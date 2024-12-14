@@ -54,3 +54,87 @@ class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
             mins, secs = divmod(seconds, 60)
             return f"{int(mins)}m {secs:.2f}s"
 
+
+
+def train_step(model, x_batch_train, y_batch_train, sample_weight):
+    reported_loss = None
+
+    # Forward pass
+    with tf.GradientTape() as tape:
+        y_batch_pred = model(x_batch_train)
+        loss = model.compute_loss(x=x_batch_train, y=y_batch_train, y_pred=y_batch_pred, sample_weight=sample_weight,
+                                  training=True)
+        reported_loss = loss  # tracking before scaling
+        loss = model.optimizer.scale_loss(loss)
+
+    # Backward pass
+    if model.trainable_weights:
+        gradients = tape.gradient(loss, model.trainable_variables)
+
+        model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+    else:
+        raise ValueError('No trainable weights to update.')
+
+    # Metrics
+    metrics = model.compute_metrics(x=x_batch_train, y=y_batch_train, y_pred=y_batch_pred, sample_weight=sample_weight)
+
+    return reported_loss, metrics, gradients
+
+
+# Honours tf.config.run_functions_eagerly(bool)
+# See tensorflow trainer.Trainer.train_step() for reference
+def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
+    # prepare epochs
+    num_batches = len(dataset)
+
+    # prepare callbacks tracking
+    # if verbose >= 1:
+    #  history = tf.keras.callbacks.History()
+    #  callbacks.append(history)
+    if not isinstance(callbacks, tf.keras.callbacks.CallbackList):
+        callbacks = tf.keras.callbacks.CallbackList(callbacks, add_history=True, add_progbar=verbose != 0,
+                                                    verbose=verbose, epochs=epochs, steps=num_batches, model=model)
+
+    # prepare train function
+    if tf.config.functions_run_eagerly():
+        print(f"Execution mode: eager")
+        train_step_fn = train_step
+    else:
+        print(f"Execution mode: autograph")
+        train_step_fn = tf.function(train_step)
+
+    # start
+    callbacks.set_params({'verbose': 1, 'epochs': epochs, 'steps': len(dataset)})
+
+    # train
+    # gradients_list = []
+    logs = {}  # holds latest value at any given moment in time
+    callbacks.on_train_begin()
+    for epoch in range(initial_epoch, epochs):
+        model.reset_metrics()
+        start = tf.timestamp()
+        callbacks.on_epoch_begin(epoch)
+
+        for step, (x_batch_train, y_batch_train) in enumerate(dataset):
+            sample_weight = None  # TODO use: x, y, sample_weight = data_adapter_utils.unpack_x_y_sample_weight(data)
+            # print(f"  Step {step+1}: x_batch_train: {x_batch_train.shape}, y_batch_train: {y_batch_train.shape}")
+            callbacks.on_train_batch_begin(step)
+
+            loss, metrics, gradients = train_step_fn(model, x_batch_train, y_batch_train, sample_weight)
+
+            # gradients_list.append(gradients)
+            logs = metrics
+            logs['loss'] = loss.numpy()
+            callbacks.on_train_batch_end(step, logs)
+
+        # end of epoch
+        dur = (tf.timestamp() - start).numpy()
+        callbacks.on_epoch_end(epoch, logs)  # should be passing loss and mse
+        metric_str = ''
+        for k in logs.keys():
+            metric_str += f" - {k}: {logs[k]:.3f}"
+        # print(f"Epoch {epoch+1} - {dur:.1f}s - loss: {logs['loss']:.3f}{metric_str}")
+    callbacks.on_train_end(logs)
+
+    # return history, gradients_list
+    return model.history
