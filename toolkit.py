@@ -21,7 +21,7 @@ class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
 
     def set_params(self, params):
         self.epoch_count = params['epochs']
-        self.group_start_epoch = 0
+        self.group_start_epoch = -1
         self.group_start_time = tf.timestamp()
         if self.display_interval is None:
             self.display_interval = math.floor(self.epoch_count / self.display_total)
@@ -30,7 +30,7 @@ class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
         self.epoch_start = tf.timestamp()
 
     def on_epoch_end(self, epoch, logs=None):
-        if ((epoch + 1) % self.display_interval == 0) or epoch == self.epoch_count-1:
+        if self.display_interval == 0 or ((epoch + 1) % self.display_interval == 0) or epoch == self.epoch_count-1:
             now = tf.timestamp()
             group_dur = now - self.group_start_time
             rate = group_dur / (epoch - self.group_start_epoch)
