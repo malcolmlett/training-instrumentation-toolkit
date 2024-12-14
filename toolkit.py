@@ -2,16 +2,16 @@ import tensorflow as tf
 import math
 
 
-class LessVerboseEpochLogger(tf.keras.callbacks.Callback):
+class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
     """
     Progress logger for when running models that train via thousands of very short epochs.
     By default, automatically logs progress 10 times during training.
 
     Use as:
-    >>> model.fit(...., verbose=0, callbacks=[LessVerboseEpochLogger()])
+    >>> model.fit(...., verbose=0, callbacks=[LessVerboseProgressLogger()])
     """
     def __init__(self, display_interval=None, display_total=10):
-        super(LessVerboseEpochLogger, self).__init__()
+        super(LessVerboseProgressLogger, self).__init__()
         self.display_interval = display_interval
         self.display_total = display_total
         self.epoch_count = None
