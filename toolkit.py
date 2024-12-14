@@ -89,10 +89,8 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0, gr
 
     # prepare train function
     if tf.config.functions_run_eagerly():
-        print(f"Execution mode: eager")
         train_step_fn = _gradient_returning_train_step
     else:
-        print(f"Execution mode: autograph")
         train_step_fn = tf.function(_gradient_returning_train_step)
 
     # train
