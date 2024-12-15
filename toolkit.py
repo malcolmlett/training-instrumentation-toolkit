@@ -1,4 +1,5 @@
 import tensorflow as tf
+import keras
 import math
 import numpy as np
 import matplotlib.pyplot as plt
@@ -97,6 +98,9 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0, gr
 
     # train
     logs = {}  # holds latest value at any given moment in time
+    loss = None
+    gradients = None
+    activations = None
     callbacks.on_train_begin()
     gradient_callback.on_train_begin()
     for epoch in range(initial_epoch, epochs):
@@ -105,23 +109,22 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0, gr
         callbacks.on_epoch_begin(epoch)
         gradient_callback.on_epoch_begin(epoch)
 
-        for step, (x_batch_train, y_batch_train) in enumerate(dataset):
-            sample_weight = None  # TODO use: x, y, sample_weight = data_adapter_utils.unpack_x_y_sample_weight(data)
-            # print(f"  Step {step+1}: x_batch_train: {x_batch_train.shape}, y_batch_train: {y_batch_train.shape}")
+        for step, data in enumerate(dataset):
+            x, y, sample_weight = keras.utils.unpack_x_y_sample_weight(data)
             callbacks.on_train_batch_begin(step)
             gradient_callback.on_train_batch_begin(step)
 
-            loss, metrics, gradients = train_step_fn(model, x_batch_train, y_batch_train, sample_weight)
+            loss, metrics, gradients = train_step_fn(model, x, y, sample_weight)
 
             logs = metrics
             logs['loss'] = loss.numpy()
             callbacks.on_train_batch_end(step, logs)
-            gradient_callback.on_train_batch_end(step, loss, gradients, model.trainable_variables, None)
+            gradient_callback.on_train_batch_end(step, loss, gradients, model.trainable_variables, activations)
 
         # end of epoch
         dur = (tf.timestamp() - start).numpy()
         callbacks.on_epoch_end(epoch, logs)  # should be passing loss and mse
-        gradient_callback.on_epoch_end(epoch, loss, gradients, model.trainable_variables, None)
+        gradient_callback.on_epoch_end(epoch, loss, gradients, model.trainable_variables, activations)
         metric_str = ''
         for k in logs.keys():
             metric_str += f" - {k}: {logs[k]:.3f}"
@@ -133,7 +136,7 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0, gr
 
 # Tries to replicate keras.backend.tensorflow.TensorFlowTrainer.train_step() (trainer.py, keras 3.5.0)
 # as much as possible.
-def _gradient_returning_train_step(model, x_batch_train, y_batch_train, sample_weight):
+def _gradient_returning_train_step(model, x, y, sample_weight):
     """
     This method is programmatically converted via auto-graph.
 
@@ -145,12 +148,8 @@ def _gradient_returning_train_step(model, x_batch_train, y_batch_train, sample_w
 
     # Forward pass
     with tf.GradientTape() as tape:
-        y_batch_pred = model(x_batch_train)
-        loss = model.compute_loss(x=x_batch_train,
-                                  y=y_batch_train,
-                                  y_pred=y_batch_pred,
-                                  sample_weight=sample_weight,
-                                  training=True)
+        y_pred = model(x)
+        loss = model.compute_loss(x=x, y=y, y_pred=y_pred, sample_weight=sample_weight, training=True)
         reported_loss = loss  # tracking before scaling
         loss = model.optimizer.scale_loss(loss)
 
@@ -163,7 +162,7 @@ def _gradient_returning_train_step(model, x_batch_train, y_batch_train, sample_w
         raise ValueError('No trainable weights to update.')
 
     # Metrics
-    metrics = model.compute_metrics(x=x_batch_train, y=y_batch_train, y_pred=y_batch_pred, sample_weight=sample_weight)
+    metrics = model.compute_metrics(x=x, y=y, y_pred=y_pred, sample_weight=sample_weight)
 
     return reported_loss, metrics, gradients
 
