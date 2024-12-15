@@ -1,5 +1,6 @@
 import tensorflow as tf
 import math
+import numpy as np
 
 
 class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
@@ -169,6 +170,7 @@ def _gradient_returning_train_step(model, x_batch_train, y_batch_train, sample_w
 class BaseGradientCallback:
     """
     Supply a subclass instance to the custom fit() method in order to collect gradient information.
+    This implementation does nothing, and is suitable for use as a no-op.
     """
     def __init__(self):
         self.params = None
@@ -252,3 +254,162 @@ class BaseGradientCallback:
             activations: the list of activations for each layer. Currently
               never populated, but might be in the future.
         """
+
+
+class GradientHistoryCallback(BaseGradientCallback):
+    def __init__(self, verbose=1):
+        """
+        Args:
+            verbose: int. To be refactored later:
+              1: collects stats on gradients at each step or epoch, but does
+                 not keep raw gradients.
+              2: keeps a sampling of raw gradients
+              3: keeps all raw gradients
+        """
+        super(GradientHistoryCallback, self).__init__()
+        self.verbose = verbose
+
+        # results variable creation
+        if verbose == 0:
+            self.epochs = []
+        else:
+            self.steps = []  # maybe rename as 'iterations'
+        self.model_stats = {}  # dict (by stat) of lists (by iteration)
+        self.layer_stats = []  # list (by layer) of dicts (by stat) of lists (by iteration)
+        if verbose > 1:
+            self.gradients_list = None
+
+        # internal tracking
+        self._epoch = 0
+        self._variable_indices_by_layer = None
+
+    def on_train_begin(self):
+        """
+        Initialises tracking, now that we know the model and number of epochs and steps per epoch.
+        """
+        # init stats
+        self.model_stats = {key: [] for key in self._stat_keys()}
+        for layer in self.model.layers:
+            if layer.trainable_variables:
+                self.layer_stats.append({key: [] for key in self._stat_keys()})
+            else:
+                self.layer_stats.append(None)
+
+        # pre-compute lookups
+        self._variable_indices_by_layer = [[]] * len(self.model.layers)
+        for l, layer in enumerate(self.model.layers):
+            if layer.trainable_variables:
+                indices = [self._index_by_identity(self.model.trainable_variables, var) for var in
+                           layer.trainable_variables]
+                self._variable_indices_by_layer[l] = indices
+
+        if self.verbose > 1:
+            self.gradients_list = []
+
+    def on_train_end(self):
+        """
+        Cleans up tracking, and converts everything to numpy arrays for easier consumption.
+        """
+        if self.verbose == 0:
+            self.epochs = np.array(self.epochs)
+        else:
+            self.steps = np.array(self.steps)
+        for key in self.model_stats.keys():
+            lst = [v.numpy() for v in self.model_stats[key]]
+            self.model_stats[key] = np.array(lst)
+        for l in range(len(self.layer_stats)):
+            if self.layer_stats[l] is not None:
+                for key in self.layer_stats[l].keys():
+                    lst = [v.numpy() for v in self.layer_stats[l][key]]
+                    self.layer_stats[l][key] = np.array(lst)
+
+    def on_epoch_begin(self, epoch, logs=None):
+        """
+        Just tracks the current epoch number
+        """
+        self._epoch = epoch
+
+    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations=None):
+        """
+        Collects gradient stats and raw gradients after each epoch, if configured.
+        """
+        if self.verbose == 0:
+            self.epochs.append(self._epoch)
+            self._collect_stats(loss, gradients, trainable_variables, activations)
+
+    def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations=None):
+        """
+        Collects gradient stats and raw gradients after each update step, if configured.
+        """
+        # collect stats at each training step
+        if self.verbose >= 1:
+            step = self.params['steps'] * self._epoch + batch
+            self.steps.append(step)
+            self._collect_stats(loss, gradients, trainable_variables, activations)
+
+        # collect raw gradients
+        if self.verbose >= 3:
+            self.gradients_list.append(gradients)
+
+    def _collect_stats(self, loss, gradients, trainable_variables, activations):
+        # stats across all gradients as one big bucket (not weight adjusted for different sized layers)
+        self._append_dict_list(self.model_stats, self._compute_stats(gradients))
+
+        # compute stats across all gradients (weights + biases) for each layer
+        for l_idx, layer in enumerate(self.model.layers):
+            grad_indices = self._variable_indices_by_layer[l_idx]
+            layer_grads = [gradients[i] for i in grad_indices]
+            self._append_dict_list(self.layer_stats[l_idx], self._compute_stats(layer_grads))
+
+    @staticmethod
+    def _stat_keys():
+        """
+        Gets the list of stats that will be computed.
+        Currently static but may be computed based on configuration in the future.
+        """
+        return ['mean', 'min', 'max', 'std']
+
+    @tf.function
+    def _compute_stats(self, gradients):
+        tot_n = tf.constant(0.0, dtype=tf.float32)
+        tot_mean = tf.constant(0.0, dtype=tf.float32)
+        tot_m2 = tf.constant(0.0, dtype=tf.float32)  # Sum of squared differences from the mean
+        tot_min = tf.constant(float("inf"), dtype=tf.float32)
+        tot_max = tf.constant(float("-inf"), dtype=tf.float32)
+
+        for g in gradients:
+            g_mags = tf.abs(g)
+            g_size = tf.size(g, out_type=tf.float32)
+            g_min = tf.reduce_min(g_mags)
+            g_max = tf.reduce_max(g_mags)
+            g_sum = tf.reduce_sum(g_mags)
+            g_mean = g_sum / g_size
+            g_var = tf.reduce_sum((g_mags - g_mean) ** 2)
+
+            tot_min = tf.minimum(tot_min, g_min)
+            tot_max = tf.maximum(tot_max, g_max)
+
+            # Welford's algorithm for computing running statistics
+            delta = g_mean - tot_mean
+            tot_n += g_size
+            tot_mean += delta * (g_size / tot_n)
+            tot_m2 += g_var + delta ** 2 * (g_size * (tot_n - g_size) / tot_n)
+
+        return {
+            'mean': tot_mean,
+            'min': tot_min,
+            'max': tot_max,
+            'std': tf.sqrt(tot_m2 / tot_n)  # population std.dev
+        }
+
+    @staticmethod
+    def _index_by_identity(lst, target):
+        return next((i for i, v in enumerate(lst) if id(v) == id(target)), -1)
+
+    # note: experiments have found that this is faster than trying to optimise it
+    # (for example, trying to use TF Variables to store the lists goes considerably
+    #  slower - on scale of 40ms vs 14ms per epoch)
+    @staticmethod
+    def _append_dict_list(dic, addendum_dict):
+        for key in addendum_dict.keys():
+            dic[key].append(addendum_dict[key])
