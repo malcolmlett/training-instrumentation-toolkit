@@ -1,6 +1,7 @@
 import tensorflow as tf
 import math
 import numpy as np
+import matplotlib as plt
 
 
 class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
@@ -369,6 +370,9 @@ class GradientHistoryCallback(BaseGradientCallback):
         """
         return ['mean', 'min', 'max', 'std']
 
+    # Note: may issue warnings about retracing, but they can be ignored.
+    # This method must deal with the variations across each of the ways that it's called during a train step,
+    # (eg: whole model vs each layer), but after the first train step it will be fully optimised.
     @tf.function
     def _compute_stats(self, gradients):
         tot_n = tf.constant(0.0, dtype=tf.float32)
@@ -413,3 +417,72 @@ class GradientHistoryCallback(BaseGradientCallback):
     def _append_dict_list(dic, addendum_dict):
         for key in addendum_dict.keys():
             dic[key].append(addendum_dict[key])
+
+
+def show_gradient_stats(gradients_cb: GradientHistoryCallback):
+    """
+    Generates a figure containing a number of plots to visualise gradient stats
+    from a GradientHistoryCallback object.
+
+    Args:
+        gradients_cb: gradients collected during training.
+    """
+    steps = gradients_cb.steps
+
+    plt.figure(figsize=(15, 4))
+
+    # all-model high-level summary
+    plt.subplot(1, 2, 1)
+    mean = gradients_cb.model_stats['mean']
+    std = gradients_cb.model_stats['std']
+    plt.plot(steps, gradients_cb.model_stats['mean'], label='mean', color='royalblue')
+    plt.fill_between(steps, mean - std, mean + std, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
+    plt.fill_between(steps, gradients_cb.model_stats['min'], gradients_cb.model_stats['max'], color='lightgray',
+                     linewidth=0, alpha=0.2, label='min/max range')
+    plt.margins(0)
+    plt.yscale('log')
+    plt.xlabel('step')
+    plt.ylabel('gradient magnitude')
+    plt.title('All model gradients')
+    plt.legend()
+
+    # all-layer high-level summary
+    plt.subplot(1, 2, 2)
+    layer_log_means = np.column_stack([gradients_cb.layer_stats[l]['mean'] for l in range(len(gradients_cb.layer_stats))])
+    layer_log_means = _log_normalize(layer_log_means, axis=1)
+    plt.stackplot(steps, layer_log_means.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
+    plt.margins(0)
+    plt.xlabel('step')
+    plt.ylabel('Log-proportion contribution')
+    plt.title('Layer contributions')
+    # layer labels placed on centre of layer band on left-hand side
+    placement = layer_log_means[0, :] * 0.5
+    placement[1:] += np.cumsum(layer_log_means[0, :])[0:-1]
+    for l in range(layer_log_means.shape[1]):
+        plt.text(len(steps) / 100, placement[l], f"layer {l}", ha="left")
+
+    plt.show()
+
+
+def _log_normalize(arr, axis=None):
+    """
+    Normalises all values in the array or along the given axis so that they sum to 1.0,
+    and so that large scale differences are reduced to linear differences in the same
+    way that a log plot converts orders of magnitude differences to linear differences.
+
+    Args:
+        arr: numpy array or similar
+
+    Returns:
+        new array
+    """
+    # convert to log scale
+    # - result: orders-of-magnitude numbers in range -inf..+inf (eg: -4 to +4)
+    scaled = np.log(arr)
+
+    # move everything into positive
+    # - shift such that the min value gets value 1.0, so it doesn't become zero.
+    scaled = scaled - (np.min(scaled, axis=axis, keepdims=True) - 1)
+
+    # normalize
+    return scaled / np.sum(scaled, axis=axis, keepdims=True)
