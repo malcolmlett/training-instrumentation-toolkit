@@ -429,16 +429,29 @@ def show_gradient_stats(gradients_cb: GradientHistoryCallback):
     """
     steps = gradients_cb.steps
 
-    plt.figure(figsize=(15, 4))
+    # get filtered set of layer stats (dropping those with no stats)
+    layer_ids = [idx for idx, stats in enumerate(gradients_cb.layer_stats) if stats is not None]
+    layer_stats = [stats for stats in gradients_cb.layer_stats if stats is not None]
+    num_layers = len(layer_stats)
+
+    layer_log_means = np.column_stack([stats['mean'] for stats in layer_stats])
+    layer_log_means = _log_normalize(layer_log_means, axis=1)
+
+    # start figure
+    grid_width = min(2, round(math.sqrt(num_layers) / 2) * 2)  # nearest even number >= 2
+    grid_height = 2 + math.ceil(num_layers / grid_width)
+    print(f"grid: {grid_height} x {grid_width}")
+    plt.figure(figsize=(13, 4 * grid_height/2), layout='constrained')
 
     # all-model high-level summary
-    plt.subplot(1, 2, 1)
-    mean = gradients_cb.model_stats['mean']
-    std = gradients_cb.model_stats['std']
-    plt.plot(steps, gradients_cb.model_stats['mean'], label='mean', color='royalblue')
-    plt.fill_between(steps, mean - std, mean + std, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
-    plt.fill_between(steps, gradients_cb.model_stats['min'], gradients_cb.model_stats['max'], color='lightgray',
-                     linewidth=0, alpha=0.2, label='min/max range')
+    plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
+    means = gradients_cb.model_stats['mean']
+    stds = gradients_cb.model_stats['std']
+    mins = gradients_cb.model_stats['min']
+    maxs = gradients_cb.model_stats['max']
+    plt.plot(steps, means, label='mean', color='royalblue')
+    plt.fill_between(steps, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
+    plt.fill_between(steps, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
     plt.margins(0)
     plt.yscale('log')
     plt.xlabel('step')
@@ -446,10 +459,8 @@ def show_gradient_stats(gradients_cb: GradientHistoryCallback):
     plt.title('All model gradients')
     plt.legend()
 
-    # all-layer high-level summary
-    plt.subplot(1, 2, 2)
-    layer_log_means = np.column_stack([gradients_cb.layer_stats[l]['mean'] for l in range(len(gradients_cb.layer_stats))])
-    layer_log_means = _log_normalize(layer_log_means, axis=1)
+    # layer contributions - high-level summary
+    plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
     plt.stackplot(steps, layer_log_means.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
     plt.margins(0)
     plt.xlabel('step')
@@ -458,8 +469,24 @@ def show_gradient_stats(gradients_cb: GradientHistoryCallback):
     # layer labels placed on centre of layer band on left-hand side
     placement = layer_log_means[0, :] * 0.5
     placement[1:] += np.cumsum(layer_log_means[0, :])[0:-1]
-    for l in range(layer_log_means.shape[1]):
-        plt.text(len(steps) / 100, placement[l], f"layer {l}", ha="left")
+    for l_idx in range(layer_log_means.shape[1]):
+        plt.text(len(steps) / 100, placement[l_idx], f"layer {layer_ids[l_idx]}", ha="left")
+
+    # individual layers
+    for l_idx in range(num_layers):
+        r = 2 + l_idx // grid_width
+        c = l_idx % grid_width
+        plt.subplot2grid((grid_height, grid_width), (r, c))
+        means = layer_stats[l_idx]['mean']
+        stds = layer_stats[l_idx]['std']
+        mins = layer_stats[l_idx]['min']
+        maxs = layer_stats[l_idx]['max']
+        plt.plot(steps, means, label='mean', color='royalblue')
+        plt.fill_between(steps, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
+        plt.fill_between(steps, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
+        plt.margins(0)
+        plt.yscale('log')
+        plt.title(f"Layer {layer_ids[l_idx]}")
 
     plt.show()
 
