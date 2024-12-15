@@ -256,7 +256,23 @@ class BaseGradientCallback:
         """
 
 
+# TODO add explicit properties for epochs, steps, model_stats, layer_stats
 class GradientHistoryCallback(BaseGradientCallback):
+    """
+    Properties:
+        epochs: list of int. Epoch numbers correlated to captured gradients/gradient-stats
+            (only populated if verbose == 0)
+        steps: list of int. Step numbers correlated to captured gradients/gradient-stats
+            (only populated if verbose > 0)
+        model_stats: dict of np-arrays. Keys list out different stats, eg: mean, min, max, std
+        layer_stats: list of dict of np-arrays. One list item for each layer, with each
+            list item containing either a dict of stat np-arrays like for model_stats,
+            or `None` if it doesn't have any trainable variable.
+        trainable_layer_stats: filtered version of layer_stats that omits layers with no trainable variables
+        trainable_layer_indices: indices of layers in `trainable_layer_stats`
+        trainable_layer_names: names of layers in `trainable_layer_stats`
+    """
+
     def __init__(self, verbose=1):
         """
         Args:
@@ -282,6 +298,19 @@ class GradientHistoryCallback(BaseGradientCallback):
         # internal tracking
         self._epoch = 0
         self._variable_indices_by_layer = None
+        self._layer_names = None
+
+    @property
+    def trainable_layer_stats(self):
+        return [stats for stats in self.layer_stats if stats is not None]
+
+    @property
+    def trainable_layer_indices(self):
+        return [idx for idx, stats in enumerate(self.layer_stats) if stats is not None]
+
+    @property
+    def trainable_layer_names(self):
+        return [self._layer_names[idx] for idx in self.trainable_layer_indices]
 
     def on_train_begin(self):
         """
@@ -296,6 +325,7 @@ class GradientHistoryCallback(BaseGradientCallback):
                 self.layer_stats.append(None)
 
         # pre-compute lookups
+        self._layer_names = [layer.name for layer in self.model.layers]
         self._variable_indices_by_layer = [[]] * len(self.model.layers)
         for l, layer in enumerate(self.model.layers):
             if layer.trainable_variables:
@@ -430,9 +460,10 @@ def show_gradient_stats(gradients_cb: GradientHistoryCallback):
     steps = gradients_cb.steps
 
     # get filtered set of layer stats (dropping those with no stats)
-    layer_ids = [idx for idx, stats in enumerate(gradients_cb.layer_stats) if stats is not None]
-    layer_stats = [stats for stats in gradients_cb.layer_stats if stats is not None]
-    num_layers = len(layer_stats)
+    layer_ids = gradients_cb.trainable_layer_indices
+    layer_names = gradients_cb.trainable_layer_names
+    layer_stats = gradients_cb.trainable_layer_stats
+    num_trainable_layers = len(layer_stats)
 
     layer_log_means = np.column_stack([stats['mean'] for stats in layer_stats])
     layer_log_means = _log_normalize(layer_log_means, axis=1)
@@ -440,8 +471,8 @@ def show_gradient_stats(gradients_cb: GradientHistoryCallback):
     # start figure
     # - at least 4 layer plots wide
     # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_layers) / 2) * 2)  # nearest even number >= 4
-    grid_height = 2 + math.ceil(num_layers / grid_width)
+    grid_width = max(4, round(math.sqrt(num_trainable_layers) / 2) * 2)  # nearest even number >= 4
+    grid_height = 2 + math.ceil(num_trainable_layers / grid_width)
     plt.figure(figsize=(13, 4 * grid_height/2), layout='constrained')
 
     # all-model high-level summary
@@ -470,11 +501,11 @@ def show_gradient_stats(gradients_cb: GradientHistoryCallback):
     # layer labels placed on centre of layer band on left-hand side
     placement = layer_log_means[0, :] * 0.5
     placement[1:] += np.cumsum(layer_log_means[0, :])[0:-1]
-    for l_idx in range(layer_log_means.shape[1]):
-        plt.text(len(steps) / 100, placement[l_idx], f"layer {layer_ids[l_idx]}", ha="left")
+    for l_idx in range(num_trainable_layers):
+        plt.text(len(steps) / 100, placement[l_idx], f"{layer_names[l_idx]} (#{layer_ids[l_idx]})", ha="left")
 
     # individual layers
-    for l_idx in range(num_layers):
+    for l_idx in range(num_trainable_layers):
         r = 2 + l_idx // grid_width
         c = l_idx % grid_width
         plt.subplot2grid((grid_height, grid_width), (r, c))
@@ -487,7 +518,7 @@ def show_gradient_stats(gradients_cb: GradientHistoryCallback):
         plt.fill_between(steps, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
         plt.margins(0)
         plt.yscale('log')
-        plt.title(f"Layer {layer_ids[l_idx]}")
+        plt.title(f"{layer_names[l_idx]} (#{layer_ids[l_idx]})")
 
     plt.show()
 
@@ -499,18 +530,36 @@ def _log_normalize(arr, axis=None):
     way that a log plot converts orders of magnitude differences to linear differences.
 
     Args:
-        arr: numpy array or similar
+        arr: numpy array or similar of values in range 0.0 .. +inf
 
     Returns:
         new array
     """
+    # mask to work only on positive values
+    if np.min(arr) < 0.0:
+        print(f"WARN: negative values in _log_normalize are clipped at zero: {np.min(arr)}")
+    mask = arr <= 0.0
+
     # convert to log scale
     # - result: orders-of-magnitude numbers in range -inf..+inf (eg: -4 to +4)
+    # - avoid runtime warning about zeros
+    arr = arr.copy()
+    arr[mask] = 1.0   # dummy value to avoid warnings from np.log(), will be discarded
     scaled = np.log(arr)
 
     # move everything into positive
     # - shift such that the min value gets value 1.0, so it doesn't become zero.
-    scaled = scaled - (np.min(scaled, axis=axis, keepdims=True) - 1)
+    # - in simple terms we're doing:
+    #     scaled = scaled - (np.min(scaled, axis=axis=, keepdims=True) - 1)
+    dummy_max = np.max(scaled) + 1
+    scaled[mask] = dummy_max  # so as not to affect np.min()
+    offset = np.min(scaled, axis=axis, keepdims=True) - 1
+    offset[offset == dummy_max] = 0.0  # remove dummy_max values
+    scaled = scaled - offset
+    scaled[mask] = 0.0  # final masked values
 
     # normalize
-    return scaled / np.sum(scaled, axis=axis, keepdims=True)
+    tots = np.sum(scaled, axis=axis, keepdims=True)
+    tots[tots == 0.0] = 1.0  # avoid divide-by-zero
+    scaled = scaled / tots
+    return scaled
