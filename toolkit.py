@@ -1,7 +1,7 @@
 import tensorflow as tf
 import math
 import numpy as np
-import matplotlib as plt
+import matplotlib.pyplot as plt
 
 
 class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
