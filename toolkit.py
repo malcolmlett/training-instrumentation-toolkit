@@ -439,7 +439,9 @@ def show_gradient_stats(gradients_cb: GradientHistoryCallback):
     layer_log_means = _log_normalize(layer_log_means, axis=1)
 
     # start figure
-    grid_width = max(2, round(math.sqrt(num_layers) / 2) * 2)  # nearest even number >= 2
+    # - at least 4 layer plots wide
+    # - otherwise target a square grid of layer plots
+    grid_width = max(4, round(math.sqrt(num_layers) / 2) * 2)  # nearest even number >= 4
     grid_height = 2 + math.ceil(num_layers / grid_width)
     plt.figure(figsize=(13, 4 * grid_height/2), layout='constrained')
 
