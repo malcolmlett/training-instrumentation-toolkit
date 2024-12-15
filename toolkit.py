@@ -360,7 +360,8 @@ class GradientHistoryCallback(BaseGradientCallback):
         for l_idx, layer in enumerate(self.model.layers):
             grad_indices = self._variable_indices_by_layer[l_idx]
             layer_grads = [gradients[i] for i in grad_indices]
-            self._append_dict_list(self.layer_stats[l_idx], self._compute_stats(layer_grads))
+            if layer_grads:
+                self._append_dict_list(self.layer_stats[l_idx], self._compute_stats(layer_grads))
 
     @staticmethod
     def _stat_keys():
@@ -438,9 +439,8 @@ def show_gradient_stats(gradients_cb: GradientHistoryCallback):
     layer_log_means = _log_normalize(layer_log_means, axis=1)
 
     # start figure
-    grid_width = min(2, round(math.sqrt(num_layers) / 2) * 2)  # nearest even number >= 2
+    grid_width = max(2, round(math.sqrt(num_layers) / 2) * 2)  # nearest even number >= 2
     grid_height = 2 + math.ceil(num_layers / grid_width)
-    print(f"grid: {grid_height} x {grid_width}")
     plt.figure(figsize=(13, 4 * grid_height/2), layout='constrained')
 
     # all-model high-level summary
