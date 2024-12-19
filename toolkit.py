@@ -802,7 +802,8 @@ class ActivityRateCallback(tf.keras.callbacks.Callback):
                 self.layer_stats[l_idx][key] = np.array(self.layer_stats[l_idx][key])
 
     def on_epoch_end(self, epoch, logs=None):
-        if epoch % self.interval == 0:
+        # every interval and definitely on last epoch
+        if epoch % self.interval == 0 or epoch == (self.params['epochs']-1):
             # compute for this epoch
             epoch_model_stats, epoch_layer_stats = measure_unit_activity(self._monitoring_model, self._dataset,
                                                                          extract_layers=False)
