@@ -3,6 +3,7 @@ import keras
 import math
 import numpy as np
 import matplotlib.pyplot as plt
+import tqdm
 
 
 class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
@@ -448,79 +449,84 @@ class GradientHistoryCallback(BaseGradientCallback):
         for key in addendum_dict.keys():
             dic[key].append(addendum_dict[key])
 
+    def plot(self):
+        """
+        Alias for plot_summary().
+        Sets the default plot method, once I have multiple.
+        """
 
-def show_gradient_stats(gradients_cb: GradientHistoryCallback):
-    """
-    Generates a figure containing a number of plots to visualise gradient stats
-    from a GradientHistoryCallback object.
+    def plot_summary(self):
+        """
+        Generates a figure containing a number of plots to visualise gradient stats
+        from a GradientHistoryCallback object.
 
-    Args:
-        gradients_cb: gradients collected during training.
-    """
-    steps = gradients_cb.steps
+        Args:
+            self: gradients collected during training.
+        """
+        steps = self.steps
 
-    # get filtered set of layer stats (dropping those with no stats)
-    layer_ids = gradients_cb.trainable_layer_indices
-    layer_names = gradients_cb.trainable_layer_names
-    layer_stats = gradients_cb.trainable_layer_stats
-    num_trainable_layers = len(layer_stats)
+        # get filtered set of layer stats (dropping those with no stats)
+        layer_ids = self.trainable_layer_indices
+        layer_names = self.trainable_layer_names
+        layer_stats = self.trainable_layer_stats
+        num_trainable_layers = len(layer_stats)
 
-    layer_log_means = np.column_stack([stats['mean'] for stats in layer_stats])
-    layer_log_means = _log_normalize(layer_log_means, axis=1)
+        layer_log_means = np.column_stack([stats['mean'] for stats in layer_stats])
+        layer_log_means = _log_normalize(layer_log_means, axis=1)
 
-    # start figure
-    # - at least 4 layer plots wide
-    # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_trainable_layers) / 2) * 2)  # nearest even number >= 4
-    grid_height = 2 + math.ceil(num_trainable_layers / grid_width)
-    plt.figure(figsize=(13, 4 * grid_height/2), layout='constrained')
+        # start figure
+        # - at least 4 layer plots wide
+        # - otherwise target a square grid of layer plots
+        grid_width = max(4, round(math.sqrt(num_trainable_layers) / 2) * 2)  # nearest even number >= 4
+        grid_height = 2 + math.ceil(num_trainable_layers / grid_width)
+        plt.figure(figsize=(13, 4 * grid_height/2), layout='constrained')
 
-    # all-model high-level summary
-    plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
-    means = gradients_cb.model_stats['mean']
-    stds = gradients_cb.model_stats['std']
-    mins = gradients_cb.model_stats['min']
-    maxs = gradients_cb.model_stats['max']
-    plt.plot(steps, means, label='mean', color='royalblue')
-    plt.fill_between(steps, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
-    plt.fill_between(steps, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
-    plt.margins(0)
-    plt.yscale('log')
-    plt.xlabel('step')
-    plt.ylabel('gradient magnitude')
-    plt.title('All model gradients')
-    plt.legend()
-
-    # layer contributions - high-level summary
-    plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
-    plt.stackplot(steps, layer_log_means.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
-    plt.margins(0)
-    plt.xlabel('step')
-    plt.ylabel('Log-proportion contribution')
-    plt.title('Layer contributions')
-    # layer labels placed on centre of layer band on left-hand side
-    placement = layer_log_means[0, :] * 0.5
-    placement[1:] += np.cumsum(layer_log_means[0, :])[0:-1]
-    for l_idx in range(num_trainable_layers):
-        plt.text(len(steps) / 100, placement[l_idx], f"{layer_names[l_idx]} (#{layer_ids[l_idx]})", ha="left")
-
-    # individual layers
-    for l_idx in range(num_trainable_layers):
-        r = 2 + l_idx // grid_width
-        c = l_idx % grid_width
-        plt.subplot2grid((grid_height, grid_width), (r, c))
-        means = layer_stats[l_idx]['mean']
-        stds = layer_stats[l_idx]['std']
-        mins = layer_stats[l_idx]['min']
-        maxs = layer_stats[l_idx]['max']
+        # all-model high-level summary
+        plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
+        means = self.model_stats['mean']
+        stds = self.model_stats['std']
+        mins = self.model_stats['min']
+        maxs = self.model_stats['max']
         plt.plot(steps, means, label='mean', color='royalblue')
         plt.fill_between(steps, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
         plt.fill_between(steps, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
         plt.margins(0)
         plt.yscale('log')
-        plt.title(f"{layer_names[l_idx]} (#{layer_ids[l_idx]})")
+        plt.xlabel('step')
+        plt.ylabel('gradient magnitude')
+        plt.title('All model gradients')
+        plt.legend()
 
-    plt.show()
+        # layer contributions - high-level summary
+        plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
+        plt.stackplot(steps, layer_log_means.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
+        plt.margins(0)
+        plt.xlabel('step')
+        plt.ylabel('Log-proportion contribution')
+        plt.title('Layer contributions')
+        # layer labels placed on centre of layer band on left-hand side
+        placement = layer_log_means[0, :] * 0.5
+        placement[1:] += np.cumsum(layer_log_means[0, :])[0:-1]
+        for l_idx in range(num_trainable_layers):
+            plt.text(len(steps) / 100, placement[l_idx], f"{layer_names[l_idx]} (#{layer_ids[l_idx]})", ha="left")
+
+        # individual layers
+        for l_idx in range(num_trainable_layers):
+            r = 2 + l_idx // grid_width
+            c = l_idx % grid_width
+            plt.subplot2grid((grid_height, grid_width), (r, c))
+            means = layer_stats[l_idx]['mean']
+            stds = layer_stats[l_idx]['std']
+            mins = layer_stats[l_idx]['min']
+            maxs = layer_stats[l_idx]['max']
+            plt.plot(steps, means, label='mean', color='royalblue')
+            plt.fill_between(steps, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
+            plt.fill_between(steps, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
+            plt.margins(0)
+            plt.yscale('log')
+            plt.title(f"{layer_names[l_idx]} (#{layer_ids[l_idx]})")
+
+        plt.show()
 
 
 def _log_normalize(arr, axis=None):
@@ -563,3 +569,350 @@ def _log_normalize(arr, axis=None):
     tots[tots == 0.0] = 1.0  # avoid divide-by-zero
     scaled = scaled / tots
     return scaled
+
+
+def measure_unit_activity(model, dataset, include_channel_activity=False, include_spatial_activity=False,
+                          verbose=0, **kwargs):
+    """
+    Measures the rate of unit activations (having non-zero output) across all units in all layers, when
+    predictions are made against the X values in the given dataset, and computes stats over the results.
+
+    All layers are assumed to produce outputs with shapes of form: `(batch_size, ..spatial_dims.., channels)`.
+    Unit activation rates are recorded per-channel, aggregated across batch and spatial dims, and then stats collected
+    across the channels.
+
+    Args:
+      model: model to examine
+        For efficiency, the model can be pre-prepared with all layers set as model outputs,
+        and setting 'extract_layers=False'
+      dataset: assumed to be of form (X, Y), and must already be setup with appropriate batching
+      include_channel_activity: bool
+        Whether to additionally include per-layer raw activity rates across the channel dim.
+      include_spatial_activity: bool
+        Whether to additionally include per-layer raw activity rates across the spatial dims (eg: height, width).
+        Layers without spatial dims just get scalar values for this.
+      verbose: int, default: 0, extent of progress reporting
+        0 = silent
+        1 = show progress bar
+
+    Keyword args:
+      extract_layers: default=True
+        Whether to extract layers from the model or to use the current model outputs as is.
+
+    Returns:
+      (model_stats, layer_stats, layer_spatial_activity_rates), where:
+        model_stats = {
+          'mean_dead_rate': mean dead rate across layers
+          'min_dead_rate': min dead rate across layers
+          'max_dead_rate': max dead rate across layers
+          'mean_activation_rate': mean activate rate across layers
+          'min_activation_rate': min activate rate across layers
+          'max_activation_rate': max activate rate across layers
+        }
+        layer_stats = list with stats per layer: {
+          'dead_rate': fraction of channels that always produce zero outputs regardless of input
+          'activation_rate': mean fraction of channels that produce non-zero outputs for any given input
+        }
+        layer_channel_activity = list, with tensor for each layer, of shape `(channels,)`.
+        layer_spatial_activity = list, with tensor for each layer, of shape `(..spatial_dims..)`
+          or scaler if no spatial dims. Omitted unless include_spatial_activity is set True.
+
+    """
+
+    # prepare model
+    extract_layers = kwargs.get('extract_layers', True)
+    if extract_layers:
+        monitoring_model = tf.keras.Model(inputs=model.inputs, outputs=[layer.output for layer in model.layers])
+    else:
+        monitoring_model = model
+
+    # init
+    channel_sizes = [shape[-1] for shape in monitoring_model.output_shape]
+    spatial_dims = [shape[1:-1] if len(shape) > 2 else (1,) for shape in monitoring_model.output_shape]
+    batch_size = 1  # populated during dataset traversal
+    batch_dims_sizes = [1 for shape in monitoring_model.output_shape]  # populated during dataset traversal
+    layer_channel_activity_sums = [tf.zeros(size, dtype=tf.int32) for size in channel_sizes]  # by channel
+    if include_spatial_activity:
+        layer_spatial_activity_sums = [tf.zeros(shape, dtype=tf.int32) for shape in spatial_dims]  # by spatial dims
+    else:
+        layer_spatial_activity_sums = None
+
+    # get raw active counts per layer across all batches in dataset
+    num_batches = 0
+    dataset_iterator = tqdm.tqdm(dataset) if verbose > 0 else dataset
+    for inputs, _ in dataset_iterator:
+        num_batches += 1
+        layer_outputs = monitoring_model(inputs=inputs, training=False)
+        batch_size = layer_outputs[0].shape[0]
+        batch_dims_sizes = [tf.reduce_prod(layer_output.shape[:-1]) for layer_output in layer_outputs]
+        for l_idx, layer_output in enumerate(layer_outputs):
+            active_outputs = tf.cast(tf.not_equal(layer_output, 0.0), tf.int32)
+            active_counts_by_channel = tf.reduce_sum(active_outputs, axis=tf.range(tf.rank(active_outputs) - 1))
+            layer_channel_activity_sums[l_idx] += active_counts_by_channel
+            if layer_spatial_activity_sums is not None:
+                active_counts_by_spatial = tf.reduce_sum(active_outputs, axis=(0, tf.rank(active_outputs) - 1))
+                layer_spatial_activity_sums[l_idx] += active_counts_by_spatial
+
+    # compute individual layer channel stats
+    def _compute_channel_stats(batch_dims_size, channel_size, layer_active_sum):
+        batch_dims_size = tf.maximum(num_batches * batch_dims_size, 1)  # avoid div-by-zero
+        channel_size = tf.maximum(channel_size, 1)  # avoid div-by-zero
+        active_rates = layer_active_sum / batch_dims_size
+        dead_rate = tf.reduce_sum(tf.cast(tf.equal(layer_active_sum, 0), tf.int32)) / channel_size
+        return {
+            'dead_rate': dead_rate.numpy(),
+            'activation_rate': tf.reduce_mean(active_rates).numpy()
+        }
+
+    layer_stats = [_compute_channel_stats(batch_dims_size, channel_size, layer_active_sum) for
+                   batch_dims_size, channel_size, layer_active_sum in
+                   zip(batch_dims_sizes, channel_sizes, layer_channel_activity_sums)]
+
+    # collect raw layer activity rates
+    def _compute_channel_activity_rates(batch_dims_size, layer_active_sum):
+        batch_dims_size = tf.maximum(num_batches * batch_dims_size, 1)  # avoid div-by-zero
+        active_rates = layer_active_sum / batch_dims_size
+        return active_rates
+
+    def _compute_spatial_activity_rates(channel_size, layer_active_sum):
+        channel_size = tf.maximum(channel_size, 1)  # avoid div-by-zero
+        active_rates = layer_active_sum / (num_batches * batch_size * channel_size)
+        return active_rates
+
+    layer_channel_activities = None
+    if include_channel_activity:
+        layer_channel_activities = [_compute_channel_activity_rates(batch_dims_size, layer_active_sum) for
+                                    batch_dims_size, layer_active_sum in
+                                    zip(batch_dims_sizes, layer_channel_activity_sums)]
+
+    layer_spatial_activities = None
+    if layer_spatial_activity_sums is not None:
+        layer_spatial_activities = [_compute_spatial_activity_rates(channel_size, spatial_sum) for
+                                    channel_size, spatial_sum in zip(channel_sizes, layer_spatial_activity_sums)]
+
+    # compute aggregate stats across whole model
+    def _compute_model_stats(layer_stats_list):
+        dic = {}
+        for key in ['dead_rate', 'activation_rate']:
+            dic[f"min_{key}"] = min([stats[key] for stats in layer_stats_list])
+            dic[f"max_{key}"] = max([stats[key] for stats in layer_stats_list])
+            dic[f"mean_{key}"] = np.mean([stats[key] for stats in layer_stats_list])
+        return dic
+
+    model_stats = _compute_model_stats(layer_stats)
+
+    # build result tuple
+    res = (model_stats, layer_stats)
+    if layer_channel_activities is not None:
+        res += (layer_channel_activities,)
+    if layer_spatial_activities is not None:
+        res += (layer_spatial_activities,)
+    return res
+
+
+def plot_spatial_stats(layer_spatial_stats):
+    """
+    Simplistic plot of activity at different layers.
+
+    Example:
+    >>> _, _, layer_spatial_stats = measure_unit_activity(model, dataset, include_spatial_activity=True)
+    >>> plot_spatial_stats(layer_spatial_stats)
+    """
+    plt.figure(figsize=(10, 3), layout='constrained')
+    for l_idx, stat in enumerate(layer_spatial_stats):
+        plt.subplot(2, len(layer_spatial_stats), l_idx + 1)
+        plt.title(f"layer {l_idx}")
+        plt.xticks([])
+        plt.yticks([])
+        if tf.rank(stat) >= 2:
+            stat = tf.reduce_mean(stat, axis=range(2, tf.rank(stat)))
+            plt.imshow(stat)
+        else:
+            stat = np.mean(stat)
+            plt.text(0.5, 0.5, f"mean\n{stat:.3f}", horizontalalignment='center', verticalalignment='center')
+
+        if tf.rank(stat) >= 2:
+            plt.subplot(2, len(layer_spatial_stats), l_idx + 1 + len(layer_spatial_stats))
+            plt.imshow(tf.cast(tf.not_equal(stat, 0.0), tf.float32), cmap='gray', vmin=0.0, vmax=1.0)
+            plt.xticks([])
+            plt.yticks([])
+    plt.show()
+
+
+class ActivityRateCallback(tf.keras.callbacks.Callback):
+    """
+    Model training callback that collects unit activation rates during training.
+    """
+
+    def __init__(self, x, interval=1, batch_size=None, **kwargs):
+        """
+        Args:
+            x: Input data or TF Dataset
+                Ideally batched, but will try to automatically batch otherwise.
+            interval: int, default: every epoch.
+                Sample every N epochs.
+            batch_size: int
+                Must be supplied in order to apply to dataset if not already batched.
+        """
+        super(ActivityRateCallback, self).__init__(**kwargs)
+        self.x = x
+        self.interval = interval
+        self.batch_size = batch_size
+
+        # collected stats
+        self.epochs = None
+        self.model_stats = None
+        self.layer_stats = None
+
+        # internal tracking
+        self._dataset = None
+        self._monitoring_model = None
+        self._layer_names = None
+
+    @property
+    def layer_names(self):
+        return self._layer_names
+
+    def on_train_begin(self, logs=None):
+        """
+        Initialises tracking, now that we know the model and number of epochs
+        """
+        # handle variations in how data is supplied
+        if isinstance(self.x, tf.data.Dataset):
+            self._dataset = self.x
+            # ensure dataset has been batched
+            if not self._is_batched(self._dataset):
+                steps_per_epoch = self.params['steps']
+                if self.batch_size is None and steps_per_epoch is not None:
+                    self.batch_size = int(math.ceil(self._dataset.cardinality().numpy() / steps_per_epoch))
+                if self.batch_size is not None:
+                    self._dataset = self._dataset.batch(self.batch_size)
+                else:
+                    raise ValueError("dataset not batched and unable to infer batch size.")
+        else:
+            steps_per_epoch = self.params['steps']
+            if self.batch_size is None and steps_per_epoch is not None:
+                self.batch_size = int(math.ceil(len(self.x) / steps_per_epoch))
+            if self.batch_size is None:
+                raise ValueError("one of batch_size or steps_per_epoch must be provided when x list/array given.")
+            y = tf.zeros((len(self.x),))  # fake y values
+            self._dataset = tf.data.Dataset.from_tensor_slices((self.x, y)).batch(self.batch_size)
+
+        # prepare access to each layer of model
+        self._monitoring_model = tf.keras.Model(inputs=self.model.inputs,
+                                                outputs=[layer.output for layer in self.model.layers])
+        self._layer_names = [layer.name for layer in self.model.layers]
+
+        # init stats
+        self.epochs = []
+        self.model_stats = {}
+        self.layer_stats = [{key: [] for key in self._stat_keys()} for _ in self.model.layers]
+
+    def on_train_end(self, logs=None):
+        """
+        Cleans up tracking, and converts everything to numpy arrays for easier consumption.
+        """
+        self.epochs = np.array(self.epochs)
+        for key in self.model_stats.keys():
+            self.model_stats[key] = np.array(self.model_stats[key])
+        for l_idx in range(len(self.layer_stats)):
+            for key in self.layer_stats[l_idx].keys():
+                self.layer_stats[l_idx][key] = np.array(self.layer_stats[l_idx][key])
+
+    def on_epoch_end(self, epoch, logs=None):
+        if epoch % self.interval == 0:
+            # compute for this epoch
+            epoch_model_stats, epoch_layer_stats = measure_unit_activity(self._monitoring_model, self._dataset,
+                                                                         extract_layers=False)
+
+            # accumulate over time
+            self.epochs.append(epoch)
+            self._append_dict_list(self.model_stats, epoch_model_stats)
+            for l_idx, stats in enumerate(epoch_layer_stats):
+                self._append_dict_list(self.layer_stats[l_idx], stats)
+
+    @staticmethod
+    def _append_dict_list(dic, addendum_dict):
+        for key in addendum_dict.keys():
+            if key not in dic:
+                dic[key] = []
+            dic[key].append(addendum_dict[key])
+
+    @staticmethod
+    def _stat_keys():
+        """
+        Gets the list of stats that will be computed.
+        Currently static but may be computed based on configuration in the future.
+        """
+        return ['dead_rate', 'activation_rate']
+
+    @staticmethod
+    def _is_batched(dataset):
+        try:
+            for spec in dataset.element_spec:
+                if isinstance(spec.shape, tf.TensorShape) and spec.shape.rank > 0 and spec.shape[0] is None:
+                    return True
+            return False
+        except AttributeError:
+            return False
+
+    def plot(self):
+        """
+        Alias for plot_summary().
+        Determines the default once there are multiple plot methods.
+        """
+        self.plot_summary()
+
+    def plot_summary(self):
+        epochs = self.epochs
+        num_layers = len(self.layer_stats)
+        layer_names = self.layer_names
+
+        # start figure
+        # - at least 4 layer plots wide
+        # - otherwise target a square grid of layer plots
+        grid_width = max(4, round(math.sqrt(num_layers) / 2) * 2)  # nearest even number >= 4
+        grid_height = 2 + math.ceil(num_layers / grid_width)
+        plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
+
+        # all-model high-level summary
+        plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
+        plt.plot(epochs, self.model_stats['mean_activation_rate'], label='mean activation rate',
+                 color='tab:blue')
+        plt.fill_between(epochs, self.model_stats['min_activation_rate'],
+                         self.model_stats['max_activation_rate'], color='tab:blue', alpha=0.2,
+                         label='min/max range')
+        plt.ylim([0.0, 1.1])
+        plt.title("Unit activation rates across layers")
+        plt.xlabel('step')
+        plt.ylabel('fraction of units')
+        plt.legend()
+
+        plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
+        plt.plot(epochs, self.model_stats['mean_dead_rate'], label='mean dead rate', color='tab:red')
+        plt.fill_between(epochs, self.model_stats['min_dead_rate'], self.model_stats['max_dead_rate'],
+                         color='tab:red', alpha=0.2, label='min/max range')
+        plt.ylim([0.0, 1.1])
+        plt.title("Dead unit rates across layers")
+        plt.xlabel('step')
+        plt.ylabel('fraction of units')
+        plt.legend()
+
+        # individual layers
+        for l_idx in range(num_layers):
+            r = 2 + l_idx // grid_width
+            c = l_idx % grid_width
+            plt.subplot2grid((grid_height, grid_width), (r, c))
+            dead_rates = self.layer_stats[l_idx]['dead_rate']
+            activation_rates = self.layer_stats[l_idx]['activation_rate']
+            plt.plot(epochs, activation_rates, label='activation rates', color='tab:blue')
+            plt.fill_between(epochs, 0, activation_rates, color='tab:blue', alpha=0.2)
+            plt.plot(epochs, dead_rates, label='dead units', color='tab:red')
+            plt.fill_between(epochs, 0, dead_rates, color='tab:red', alpha=0.2)
+            plt.ylim([0.0, 1.0])
+            plt.margins(0)
+            plt.title(f"{layer_names[l_idx]} (#{l_idx})")
+            if l_idx == 0:
+                plt.legend()
+
+        plt.show()
