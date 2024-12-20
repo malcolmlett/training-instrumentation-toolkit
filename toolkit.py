@@ -629,26 +629,50 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
     # init
     channel_sizes = [shape[-1] for shape in monitoring_model.output_shape]
     spatial_dims = [shape[1:-1] if len(shape) > 2 else (1,) for shape in monitoring_model.output_shape]
-    layer_channel_activity_sums = [tf.zeros(size, dtype=tf.float32) for size in channel_sizes]  # by channel
+    num_batches = dataset.cardinality()
+    layer_channel_activity_sums = [tf.Variable(tf.zeros(size, dtype=tf.float32)) for size in channel_sizes]  # by channel
     if include_spatial_activity:
-        layer_spatial_activity_sums = [tf.zeros(shape, dtype=tf.float32) for shape in spatial_dims]  # by spatial dims
+        layer_spatial_activity_sums = [tf.Variable(tf.zeros(shape, dtype=tf.float32)) for shape in spatial_dims]  # by spatial dims
     else:
         layer_spatial_activity_sums = None
 
     # get raw active counts per layer across all batches in dataset
     # (we compute the mean for each batch, but sum across the batches and divide later)
-    num_batches = 0
-    dataset_iterator = tqdm.tqdm(dataset) if verbose > 0 else dataset
-    for inputs, _ in dataset_iterator:
-        num_batches += 1
-        layer_outputs = monitoring_model(inputs=inputs, training=False)
-        for l_idx, layer_output in enumerate(layer_outputs):
-            active_outputs = tf.cast(tf.not_equal(layer_output, 0.0), tf.float32)
-            active_counts_by_channel = tf.reduce_mean(active_outputs, axis=tf.range(tf.rank(active_outputs) - 1))
-            layer_channel_activity_sums[l_idx] += active_counts_by_channel
-            if layer_spatial_activity_sums is not None:
-                active_counts_by_spatial = tf.reduce_mean(active_outputs, axis=(0, tf.rank(active_outputs) - 1))
-                layer_spatial_activity_sums[l_idx] += active_counts_by_spatial
+    def _collect_stats(model_arg, dataset_arg, layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg):
+        """
+        Conditionally auto-graphed.
+        Args:
+            model_arg: 
+            dataset_arg: 
+            layer_channel_activity_sums_arg: list of tf.Variable
+            layer_spatial_activity_sums_arg: list of tf.Variable
+        Returns:
+             layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg
+        """
+        for inputs, _ in dataset_arg:
+            layer_outputs = model_arg(inputs=inputs, training=False)
+            for l_idx, layer_output in enumerate(layer_outputs):
+                active_outputs = tf.cast(tf.not_equal(layer_output, 0.0), tf.float32)
+                active_counts_by_channel = tf.reduce_mean(active_outputs, axis=tf.range(tf.rank(active_outputs) - 1))
+                layer_channel_activity_sums_arg[l_idx] += active_counts_by_channel
+                if layer_spatial_activity_sums_arg is not None:
+                    active_counts_by_spatial = tf.reduce_mean(active_outputs, axis=(0, tf.rank(active_outputs) - 1))
+                    layer_spatial_activity_sums_arg[l_idx] += active_counts_by_spatial
+        return layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg
+
+    @tf.function
+    def _collect_stats_autograph(model_arg, dataset_arg, layer_channel_activity_sums_arg,
+                                 layer_spatial_activity_sums_arg):
+        _collect_stats(model_arg, dataset_arg, layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg)
+
+    if verbose > 0:
+        # note: can't use auto-graph, so slower
+        dataset_iterator = tqdm.tqdm(dataset)
+        layer_channel_activity_sums, layer_spatial_activity_sums = _collect_stats(
+            monitoring_model, dataset_iterator, layer_channel_activity_sums, layer_spatial_activity_sums)
+    else:
+        layer_channel_activity_sums, layer_spatial_activity_sums = _collect_stats_autograph(
+            monitoring_model, dataset, layer_channel_activity_sums, layer_spatial_activity_sums)
 
     # compute individual layer channel stats
     def _compute_channel_stats(channel_size, layer_active_sum):
