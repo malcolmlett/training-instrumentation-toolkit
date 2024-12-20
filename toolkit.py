@@ -628,8 +628,8 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
 
     # init
     channel_sizes = [shape[-1] for shape in monitoring_model.output_shape]
-    spatial_dims = [shape[1:-1] if len(shape) > 2 else (1,) for shape in monitoring_model.output_shape]
-    num_batches = dataset.cardinality()
+    spatial_dims = [shape[1:-1] if len(shape) > 2 else () for shape in monitoring_model.output_shape]
+    num_batches = tf.cast(dataset.cardinality(), dtype=tf.float32)
     layer_channel_activity_sums = [tf.Variable(tf.zeros(size, dtype=tf.float32)) for size in channel_sizes]  # by channel
     if include_spatial_activity:
         layer_spatial_activity_sums = [tf.Variable(tf.zeros(shape, dtype=tf.float32)) for shape in spatial_dims]  # by spatial dims
@@ -638,40 +638,31 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
 
     # get raw active counts per layer across all batches in dataset
     # (we compute the mean for each batch, but sum across the batches and divide later)
-    def _collect_stats(model_arg, dataset_arg, layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg):
-        """
-        Conditionally auto-graphed.
-        Args:
-            model_arg: 
-            dataset_arg: 
-            layer_channel_activity_sums_arg: list of tf.Variable
-            layer_spatial_activity_sums_arg: list of tf.Variable
-        Returns:
-             layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg
-        """
+    @tf.function
+    def _collect_stats_outer(model_arg, dataset_arg, layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg):
         for inputs, _ in dataset_arg:
-            layer_outputs = model_arg(inputs=inputs, training=False)
-            for l_idx, layer_output in enumerate(layer_outputs):
-                active_outputs = tf.cast(tf.not_equal(layer_output, 0.0), tf.float32)
-                active_counts_by_channel = tf.reduce_mean(active_outputs, axis=tf.range(tf.rank(active_outputs) - 1))
-                layer_channel_activity_sums_arg[l_idx] += active_counts_by_channel
-                if layer_spatial_activity_sums_arg is not None:
-                    active_counts_by_spatial = tf.reduce_mean(active_outputs, axis=(0, tf.rank(active_outputs) - 1))
-                    layer_spatial_activity_sums_arg[l_idx] += active_counts_by_spatial
+            _collect_stats_inner(model_arg, inputs, layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg)
         return layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg
 
     @tf.function
-    def _collect_stats_autograph(model_arg, dataset_arg, layer_channel_activity_sums_arg,
-                                 layer_spatial_activity_sums_arg):
-        _collect_stats(model_arg, dataset_arg, layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg)
+    def _collect_stats_inner(model_arg, inputs_arg, layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg):
+        layer_outputs = model_arg(inputs=inputs_arg, training=False)
+        for l_idx, layer_output in enumerate(layer_outputs):
+            active_outputs = tf.cast(tf.not_equal(layer_output, 0.0), tf.float32)
+            active_counts_by_channel = tf.reduce_mean(active_outputs, axis=tf.range(tf.rank(active_outputs) - 1))
+            layer_channel_activity_sums_arg[l_idx].assign_add(active_counts_by_channel)
+            if layer_spatial_activity_sums_arg is not None:
+                active_counts_by_spatial = tf.reduce_mean(active_outputs, axis=(0, tf.rank(active_outputs) - 1))
+                layer_spatial_activity_sums_arg[l_idx].assign_add(active_counts_by_spatial)
+        return layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg
 
     if verbose > 0:
-        # note: can't use auto-graph, so slower
-        dataset_iterator = tqdm.tqdm(dataset)
-        layer_channel_activity_sums, layer_spatial_activity_sums = _collect_stats(
-            monitoring_model, dataset_iterator, layer_channel_activity_sums, layer_spatial_activity_sums)
+        # note: can't use auto-graph for the outer loop so might be just a little bit slower (circa 13s vs 10s)
+        for inputs, _ in tqdm.tqdm(dataset):
+            _collect_stats_inner(monitoring_model, inputs, layer_channel_activity_sums, layer_spatial_activity_sums)
     else:
-        layer_channel_activity_sums, layer_spatial_activity_sums = _collect_stats_autograph(
+        # even dataset iteration loop is auto-graphed
+        layer_channel_activity_sums, layer_spatial_activity_sums = _collect_stats_outer(
             monitoring_model, dataset, layer_channel_activity_sums, layer_spatial_activity_sums)
 
     # compute individual layer channel stats
