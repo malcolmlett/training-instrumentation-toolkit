@@ -783,6 +783,7 @@ class ActivityRateCallback(tf.keras.callbacks.Callback):
                 if self.batch_size is None and steps_per_epoch is not None:
                     self.batch_size = int(math.ceil(self._dataset.cardinality().numpy() / steps_per_epoch))
                 if self.batch_size is not None:
+                    print(f"Batching dataset with batch size {self.batch_size}")
                     self._dataset = self._dataset.batch(self.batch_size)
                 else:
                     raise ValueError("dataset not batched and unable to infer batch size.")
@@ -846,12 +847,22 @@ class ActivityRateCallback(tf.keras.callbacks.Callback):
 
     @staticmethod
     def _is_batched(dataset):
+        def _is_batched_spec(obj):
+            return isinstance(obj, tf.TensorSpec) and isinstance(obj.shape, tf.TensorShape) and obj.shape.rank > 0 and \
+                obj.shape[0] is None
+
         try:
             for spec in dataset.element_spec:
-                if isinstance(spec.shape, tf.TensorShape) and spec.shape.rank > 0 and spec.shape[0] is None:
+                if isinstance(spec, tuple):
+                    for item in spec:
+                        if _is_batched_spec(item):
+                            return True
+                elif _is_batched_spec(spec):
                     return True
+            print(f"not batched")
             return False
         except AttributeError:
+            print(f"error")
             return False
 
     def plot(self):
