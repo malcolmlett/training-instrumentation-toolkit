@@ -707,21 +707,84 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
     return res
 
 
-def plot_spatial_stats(layer_spatial_stats, model=None):
+def plot_channel_stats(layer_channel_activity, model=None):
     """
-    Simplistic plot of activity at different layers.
+    Simple grid plot of per-channel unit activitation rates across
+    the different layers.
 
     Args:
-        layer_spatial_stats:
+        layer_channel_activity:
+            as collected from measure_unit_activity()
+        model:
+            Optionally pass this to add layer names.
+
+    Example:
+    >>> _, _, layer_channel_activity = measure_unit_activity(model, dataset, include_channel_activity=True)
+    >>> plot_channel_stats(layer_channel_activity, model)
+    """
+    num_layers = len(layer_channel_activity)
+
+    # start figure
+    # - at least 4 plots wide
+    # - each layer has two plots, arranged virtically
+    # - otherwise target a square grid of layer plots
+    grid_width = max(4, round(math.sqrt(num_layers)))
+    grid_height = math.ceil(num_layers / grid_width)
+    plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
+
+    # two plots for each layer
+    for l_idx, activation_rates in enumerate(layer_channel_activity):
+        r = (l_idx // grid_width)
+        c = l_idx % grid_width
+
+        # flatten to 1D if necessary and collect some stats
+        activation_rates = activation_rates.numpy().flatten()
+        len_active_rate = np.size(activation_rates)
+        mean_active_rate = np.mean(activation_rates)
+        min_active_rate = np.min(activation_rates)
+        max_active_rate = np.max(activation_rates)
+        dead_rate = np.mean(tf.cast(tf.equal(activation_rates, 0.0), tf.float32))
+
+        plt.subplot2grid((grid_height, grid_width), (r, c))
+        plt.title(f"{model.layers[l_idx].name} (#{l_idx})" if model is not None else f"layer {l_idx}")
+        plt.xlim([0.0, 1.0])
+        plt.yticks([])
+        plt.xticks([0.0, 0.5, 1.0])
+        if r == 0:
+            plt.xlabel('activation rate')
+        if c == 0:
+            plt.ylabel('histogram')
+        hist_vals, _, _ = plt.hist(activation_rates, bins=np.arange(0, 1.1, 0.1))
+        plot_height = np.max(hist_vals)
+        text_col = 'black'
+        if 0.0 < dead_rate < 1.0:
+            text_col = 'tab:orange'
+        elif dead_rate == 1.0:
+            text_col = 'tab:red'
+        plt.text(0.5, plot_height*0.5,
+                 f"len {len_active_rate}\n"
+                 f"mean {mean_active_rate:.3f}\nmin {min_active_rate:.3f}\nmax {max_active_rate:.3f}\n"
+                 f"dead {dead_rate:.3f}", color=text_col,
+                 horizontalalignment='center', verticalalignment='center')
+    plt.show()
+
+
+def plot_spatial_stats(layer_spatial_activity, model=None):
+    """
+    Simple grid plot of spatially-arrange unit activitation rates across
+    the different layers.
+
+    Args:
+        layer_spatial_activity:
             as collecte from measure_unit_activity()
         model:
             Optionally pass this to add layer names.
 
     Example:
-    >>> _, _, layer_spatial_stats = measure_unit_activity(model, dataset, include_spatial_activity=True)
-    >>> plot_spatial_stats(layer_spatial_stats, model)
+    >>> _, _, layer_spatial_activity = measure_unit_activity(model, dataset, include_spatial_activity=True)
+    >>> plot_spatial_stats(layer_spatial_activity, model)
     """
-    num_layers = len(layer_spatial_stats)
+    num_layers = len(layer_spatial_activity)
 
     # start figure
     # - at least 4 plots wide
@@ -732,32 +795,42 @@ def plot_spatial_stats(layer_spatial_stats, model=None):
     plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
 
     # two plots for each layer
-    for l_idx, stat in enumerate(layer_spatial_stats):
+    for l_idx, activation_rates in enumerate(layer_spatial_activity):
         r = (l_idx // grid_width) * 2
         c = l_idx % grid_width
+
+        # flatten to 2D if needed and collect stats
+        if tf.rank(activation_rates) >= 2:
+            activation_rates = tf.reduce_mean(activation_rates, axis=range(2, tf.rank(activation_rates)))
+        alive_units = tf.cast(tf.not_equal(activation_rates, 0.0), tf.float32)
+        dead_rate = np.mean(tf.cast(tf.equal(activation_rates, 0.0), tf.float32))
+        mean_active_rate = np.mean(activation_rates)
+        min_active_rate = np.min(activation_rates)
+        max_active_rate = np.max(activation_rates)
+        plot_shape = (activation_rates.shape[0]-1,activation_rates.shape[1]-1) if tf.rank(activation_rates) >= 2 else (1, 1)
+
         plt.subplot2grid((grid_height, grid_width), (r, c))
         plt.title(f"{model.layers[l_idx].name} (#{l_idx})" if model is not None else f"layer {l_idx}")
         plt.xticks([])
         plt.yticks([])
         if c == 0:
             plt.ylabel('activations')
-        if tf.rank(stat) >= 2:
-            stat = tf.reduce_mean(stat, axis=range(2, tf.rank(stat)))
-            plt.imshow(stat)
-        else:
-            stat = np.mean(stat)
-            plt.text(0.5, 0.5, f"mean\n{stat:.3f}", horizontalalignment='center', verticalalignment='center')
+        if tf.rank(activation_rates) >= 2:
+            plt.imshow(activation_rates, vmin=0.0)
+        plt.text(plot_shape[1]*0.5, plot_shape[0]*0.5,
+                 f"mean {mean_active_rate:.3f}\nmin {min_active_rate:.3f}\nmax {max_active_rate:.3f}",
+                 horizontalalignment='center', verticalalignment='center')
 
         plt.subplot2grid((grid_height, grid_width), (r + 1, c))
         plt.xticks([])
         plt.yticks([])
         if c == 0:
             plt.ylabel('alive outputs')
-        if tf.rank(stat) >= 2:
-            plt.imshow(tf.cast(tf.not_equal(stat, 0.0), tf.float32), cmap='gray', vmin=0.0, vmax=1.0)
-        else:
-            stat = np.mean(tf.cast(tf.equal(stat, 0.0), tf.float32))
-            plt.text(0.5, 0.5, f"dead rate\n{stat:.3f}", horizontalalignment='center', verticalalignment='center')
+        if tf.rank(activation_rates) >= 2:
+            plt.imshow(alive_units, cmap='gray', vmin=0.0, vmax=1.0)
+        plt.text(plot_shape[1]*0.5, plot_shape[0]*0.5,
+                 f"dead rate\n{dead_rate:.3f}",
+                 horizontalalignment='center', verticalalignment='center')
     plt.show()
 
 
