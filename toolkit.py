@@ -828,8 +828,13 @@ def plot_spatial_stats(layer_spatial_activity, model=None):
             plt.ylabel('alive outputs')
         if tf.rank(activation_rates) >= 2:
             plt.imshow(alive_units, cmap='gray', vmin=0.0, vmax=1.0)
+        text_col = 'black'
+        if 0.0 < dead_rate < 1.0:
+            text_col = 'tab:orange'
+        elif dead_rate == 1.0:
+            text_col = 'tab:red'
         plt.text(plot_shape[1]*0.5, plot_shape[0]*0.5,
-                 f"dead rate\n{dead_rate:.3f}",
+                 f"dead rate\n{dead_rate:.3f}", color=text_col,
                  horizontalalignment='center', verticalalignment='center')
     plt.show()
 
