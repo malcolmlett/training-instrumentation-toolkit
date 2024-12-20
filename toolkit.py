@@ -707,20 +707,40 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
     return res
 
 
-def plot_spatial_stats(layer_spatial_stats):
+def plot_spatial_stats(layer_spatial_stats, model=None):
     """
     Simplistic plot of activity at different layers.
 
+    Args:
+        layer_spatial_stats:
+            as collecte from measure_unit_activity()
+        model:
+            Optionally pass this to add layer names.
+
     Example:
     >>> _, _, layer_spatial_stats = measure_unit_activity(model, dataset, include_spatial_activity=True)
-    >>> plot_spatial_stats(layer_spatial_stats)
+    >>> plot_spatial_stats(layer_spatial_stats, model)
     """
-    plt.figure(figsize=(10, 3), layout='constrained')
+    num_layers = len(layer_spatial_stats)
+
+    # start figure
+    # - at least 4 plots wide
+    # - each layer has two plots, arranged virtically
+    # - otherwise target a square grid of layer plots
+    grid_width = max(4, round(math.sqrt(num_layers * 2)))
+    grid_height = math.ceil(num_layers / grid_width) * 2
+    plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
+
+    # two plots for each layer
     for l_idx, stat in enumerate(layer_spatial_stats):
-        plt.subplot(2, len(layer_spatial_stats), l_idx + 1)
-        plt.title(f"layer {l_idx}")
+        r = (l_idx // grid_width) * 2
+        c = l_idx % grid_width
+        plt.subplot2grid((grid_height, grid_width), (r, c))
+        plt.title(f"{model.layers[l_idx].name} (#{l_idx})" if model is not None else f"layer {l_idx}")
         plt.xticks([])
         plt.yticks([])
+        if c == 0:
+            plt.ylabel('activations')
         if tf.rank(stat) >= 2:
             stat = tf.reduce_mean(stat, axis=range(2, tf.rank(stat)))
             plt.imshow(stat)
@@ -728,11 +748,16 @@ def plot_spatial_stats(layer_spatial_stats):
             stat = np.mean(stat)
             plt.text(0.5, 0.5, f"mean\n{stat:.3f}", horizontalalignment='center', verticalalignment='center')
 
+        plt.subplot2grid((grid_height, grid_width), (r + 1, c))
+        plt.xticks([])
+        plt.yticks([])
+        if c == 0:
+            plt.ylabel('alive outputs')
         if tf.rank(stat) >= 2:
-            plt.subplot(2, len(layer_spatial_stats), l_idx + 1 + len(layer_spatial_stats))
             plt.imshow(tf.cast(tf.not_equal(stat, 0.0), tf.float32), cmap='gray', vmin=0.0, vmax=1.0)
-            plt.xticks([])
-            plt.yticks([])
+        else:
+            stat = np.mean(tf.cast(tf.equal(stat, 0.0), tf.float32))
+            plt.text(0.5, 0.5, f"dead rate\n{stat:.3f}", horizontalalignment='center', verticalalignment='center')
     plt.show()
 
 
