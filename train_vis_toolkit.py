@@ -878,7 +878,7 @@ def plot_unit_activity(activity_callback):
         - per-layer unit activation rates
     """
     # collect data
-    epochs = activity_callback.epochs
+    iterations = activity_callback.epochs if hasattr(activity_callback, 'epochs') else activity_callback.steps
     num_layers = len(activity_callback.layer_stats)
     model_stats = activity_callback.model_stats
     layer_stats = activity_callback.layer_stats
@@ -896,9 +896,9 @@ def plot_unit_activity(activity_callback):
 
     # all-model high-level summary
     plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
-    plt.plot(epochs, model_stats['mean_activation_rate'], label='mean activation rate',
+    plt.plot(iterations, model_stats['mean_activation_rate'], label='mean activation rate',
              color='tab:blue')
-    plt.fill_between(epochs, model_stats['min_activation_rate'],
+    plt.fill_between(iterations, model_stats['min_activation_rate'],
                      model_stats['max_activation_rate'], color='tab:blue', alpha=0.2,
                      label='min/max range')
     plt.ylim([0.0, 1.1])
@@ -908,8 +908,8 @@ def plot_unit_activity(activity_callback):
     plt.legend()
 
     plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
-    plt.plot(epochs, model_stats['mean_dead_rate'], label='mean dead rate', color='tab:red')
-    plt.fill_between(epochs, model_stats['min_dead_rate'], model_stats['max_dead_rate'],
+    plt.plot(iterations, model_stats['mean_dead_rate'], label='mean dead rate', color='tab:red')
+    plt.fill_between(iterations, model_stats['min_dead_rate'], model_stats['max_dead_rate'],
                      color='tab:red', alpha=0.2, label='min/max range')
     plt.ylim([0.0, 1.1])
     plt.title("Dead unit rates across layers")
@@ -924,16 +924,16 @@ def plot_unit_activity(activity_callback):
         plt.subplot2grid((grid_height, grid_width), (r, c))
         dead_rates = layer_stats[l_idx]['dead_rate']
         activation_rates = layer_stats[l_idx]['activation_rate']
-        plt.plot(epochs, activation_rates, label='activation rates', color='tab:blue')
-        plt.fill_between(epochs, 0, activation_rates, color='tab:blue', alpha=0.2)
-        plt.plot(epochs, dead_rates, label='dead units', color='tab:red')
-        plt.fill_between(epochs, 0, dead_rates, color='tab:red', alpha=0.2)
+        plt.plot(iterations, activation_rates, label='activation rates', color='tab:blue')
+        plt.fill_between(iterations, 0, activation_rates, color='tab:blue', alpha=0.2)
+        plt.plot(iterations, dead_rates, label='dead units', color='tab:red')
+        plt.fill_between(iterations, 0, dead_rates, color='tab:red', alpha=0.2)
         plt.ylim([0.0, 1.0])
         plt.margins(0)
         plt.title(f"layer {l_idx}:\n{layer_names[l_idx]}" if model is not None else f"layer {l_idx}")
 
         # text overlay
-        plot_width = np.max(epochs)
+        plot_width = np.max(iterations)
         final_dead_rate = dead_rates[-1]
         plt.text(plot_width * 0.5, 0.5,
                  f"{channel_sizes[l_idx]} units\n"
