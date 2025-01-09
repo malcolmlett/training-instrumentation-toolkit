@@ -258,6 +258,7 @@ class BaseGradientCallback:
 
 
 # TODO add explicit properties for epochs, steps, model_stats, layer_stats
+# TODO add capture of the last gradients
 class GradientHistoryCallback(BaseGradientCallback):
     """
     Properties:
@@ -529,319 +530,17 @@ class GradientHistoryCallback(BaseGradientCallback):
         plt.show()
 
 
-def _log_normalize(arr, axis=None):
-    """
-    Normalises all values in the array or along the given axis so that they sum to 1.0,
-    and so that large scale differences are reduced to linear differences in the same
-    way that a log plot converts orders of magnitude differences to linear differences.
-
-    Args:
-        arr: numpy array or similar of values in range 0.0 .. +inf
-
-    Returns:
-        new array
-    """
-    # mask to work only on positive values
-    if np.min(arr) < 0.0:
-        print(f"WARN: negative values in _log_normalize are clipped at zero: {np.min(arr)}")
-    mask = arr <= 0.0
-
-    # convert to log scale
-    # - result: orders-of-magnitude numbers in range -inf..+inf (eg: -4 to +4)
-    # - avoid runtime warning about zeros
-    arr = arr.copy()
-    arr[mask] = 1.0   # dummy value to avoid warnings from np.log(), will be discarded
-    scaled = np.log(arr)
-
-    # move everything into positive
-    # - shift such that the min value gets value 1.0, so it doesn't become zero.
-    # - in simple terms we're doing:
-    #     scaled = scaled - (np.min(scaled, axis=axis=, keepdims=True) - 1)
-    dummy_max = np.max(scaled) + 1
-    scaled[mask] = dummy_max  # so as not to affect np.min()
-    offset = np.min(scaled, axis=axis, keepdims=True) - 1
-    offset[offset == dummy_max] = 0.0  # remove dummy_max values
-    scaled = scaled - offset
-    scaled[mask] = 0.0  # final masked values
-
-    # normalize
-    tots = np.sum(scaled, axis=axis, keepdims=True)
-    tots[tots == 0.0] = 1.0  # avoid divide-by-zero
-    scaled = scaled / tots
-    return scaled
-
-
-def measure_unit_activity(model, dataset, include_channel_activity=False, include_spatial_activity=False,
-                          verbose=0, **kwargs):
-    """
-    Measures the rate of unit activations (having non-zero output) across all units in all layers, when
-    predictions are made against the X values in the given dataset, and computes stats over the results.
-
-    All layers are assumed to produce outputs with shapes of form: `(batch_size, ..spatial_dims.., channels)`.
-    Unit activation rates are recorded per-channel, aggregated across batch and spatial dims, and then stats collected
-    across the channels.
-
-    Args:
-      model: model to examine
-        For efficiency, the model can be pre-prepared with all layers set as model outputs,
-        and setting 'extract_layers=False'
-      dataset: assumed to be of form (X, Y), and must already be setup with appropriate batching
-      include_channel_activity: bool
-        Whether to additionally include per-layer raw activity rates across the channel dim.
-      include_spatial_activity: bool
-        Whether to additionally include per-layer raw activity rates across the spatial dims (eg: height, width).
-        Layers without spatial dims just get scalar values for this.
-      verbose: int, default: 0, extent of progress reporting
-        0 = silent
-        1 = show progress bar
-
-    Keyword args:
-      extract_layers: default=True
-        Whether to extract layers from the model or to use the current model outputs as is.
-
-    Returns:
-      (model_stats, layer_stats, layer_spatial_activity_rates), where:
-        model_stats = {
-          'mean_dead_rate': mean dead rate across layers
-          'min_dead_rate': min dead rate across layers
-          'max_dead_rate': max dead rate across layers
-          'mean_activation_rate': mean activate rate across layers
-          'min_activation_rate': min activate rate across layers
-          'max_activation_rate': max activate rate across layers
-        }
-        layer_stats = list with stats per layer: {
-          'dead_rate': fraction of channels that always produce zero outputs regardless of input
-          'activation_rate': mean fraction of channels that produce non-zero outputs for any given input
-        }
-        layer_channel_activity = list, with tensor for each layer, of shape `(channels,)`.
-        layer_spatial_activity = list, with tensor for each layer, of shape `(..spatial_dims..)`
-          or scaler if no spatial dims. Omitted unless include_spatial_activity is set True.
-
-    """
-
-    # prepare model
-    extract_layers = kwargs.get('extract_layers', True)
-    if extract_layers:
-        monitoring_model = tf.keras.Model(inputs=model.inputs, outputs=[layer.output for layer in model.layers])
-    else:
-        monitoring_model = model
-
-    # init
-    channel_sizes = [shape[-1] for shape in monitoring_model.output_shape]
-    spatial_dims = [shape[1:-1] if len(shape) > 2 else () for shape in monitoring_model.output_shape]
-    num_batches = tf.cast(dataset.cardinality(), dtype=tf.float32)
-    layer_channel_activity_sums = [tf.Variable(tf.zeros(size, dtype=tf.float32)) for size in channel_sizes]  # by channel
-    if include_spatial_activity:
-        layer_spatial_activity_sums = [tf.Variable(tf.zeros(shape, dtype=tf.float32)) for shape in spatial_dims]  # by spatial dims
-    else:
-        layer_spatial_activity_sums = None
-
-    # get raw active counts per layer across all batches in dataset
-    # (we compute the mean for each batch, but sum across the batches and divide later)
-    @tf.function
-    def _collect_stats_outer(model_arg, dataset_arg, layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg):
-        for inputs, _ in dataset_arg:
-            _collect_stats_inner(model_arg, inputs, layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg)
-        return layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg
-
-    @tf.function
-    def _collect_stats_inner(model_arg, inputs_arg, layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg):
-        layer_outputs = model_arg(inputs=inputs_arg, training=False)
-        for l_idx, layer_output in enumerate(layer_outputs):
-            active_outputs = tf.cast(tf.not_equal(layer_output, 0.0), tf.float32)
-            active_counts_by_channel = tf.reduce_mean(active_outputs, axis=tf.range(tf.rank(active_outputs) - 1))
-            layer_channel_activity_sums_arg[l_idx].assign_add(active_counts_by_channel)
-            if layer_spatial_activity_sums_arg is not None:
-                active_counts_by_spatial = tf.reduce_mean(active_outputs, axis=(0, tf.rank(active_outputs) - 1))
-                layer_spatial_activity_sums_arg[l_idx].assign_add(active_counts_by_spatial)
-        return layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg
-
-    if verbose > 0:
-        # note: can't use auto-graph for the outer loop so might be just a little bit slower (circa 13s vs 10s)
-        for inputs, _ in tqdm.tqdm(dataset):
-            _collect_stats_inner(monitoring_model, inputs, layer_channel_activity_sums, layer_spatial_activity_sums)
-    else:
-        # even dataset iteration loop is auto-graphed
-        layer_channel_activity_sums, layer_spatial_activity_sums = _collect_stats_outer(
-            monitoring_model, dataset, layer_channel_activity_sums, layer_spatial_activity_sums)
-
-    # compute individual layer channel stats
-    def _compute_channel_stats(channel_size, layer_active_sum):
-        active_rates = layer_active_sum / num_batches
-        dead_rate = tf.reduce_sum(tf.cast(tf.equal(layer_active_sum, 0.0), tf.int32)) / channel_size
-        return {
-            'dead_rate': dead_rate.numpy(),
-            'activation_rate': tf.reduce_mean(active_rates).numpy()
-        }
-
-    layer_stats = [_compute_channel_stats(channel_size, layer_active_sum) for
-                   channel_size, layer_active_sum in
-                   zip(channel_sizes, layer_channel_activity_sums)]
-
-    # collect raw layer activity rates
-    layer_channel_activities = None
-    if include_channel_activity:
-        layer_channel_activities = [layer_active_sum / num_batches for layer_active_sum in layer_channel_activity_sums]
-
-    layer_spatial_activities = None
-    if layer_spatial_activity_sums is not None:
-        layer_spatial_activities = [layer_active_sum / num_batches for layer_active_sum in layer_spatial_activity_sums]
-
-    # compute aggregate stats across whole model
-    def _compute_model_stats(layer_stats_list):
-        dic = {}
-        for key in ['dead_rate', 'activation_rate']:
-            dic[f"min_{key}"] = min([stats[key] for stats in layer_stats_list])
-            dic[f"max_{key}"] = max([stats[key] for stats in layer_stats_list])
-            dic[f"mean_{key}"] = np.mean([stats[key] for stats in layer_stats_list])
-        return dic
-
-    model_stats = _compute_model_stats(layer_stats)
-
-    # build result tuple
-    res = (model_stats, layer_stats)
-    if layer_channel_activities is not None:
-        res += (layer_channel_activities,)
-    if layer_spatial_activities is not None:
-        res += (layer_spatial_activities,)
-    return res
-
-
-def plot_channel_stats(layer_channel_activity, model=None):
-    """
-    Simple grid plot of per-channel unit activitation rates across
-    the different layers.
-
-    Args:
-        layer_channel_activity:
-            as collected from measure_unit_activity()
-        model:
-            Optionally pass this to add layer names.
-
-    Example:
-    >>> _, _, layer_channel_activity = measure_unit_activity(model, dataset, include_channel_activity=True)
-    >>> plot_channel_stats(layer_channel_activity, model)
-    """
-    num_layers = len(layer_channel_activity)
-
-    # start figure
-    # - at least 4 plots wide
-    # - each layer has two plots, arranged virtically
-    # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_layers)))
-    grid_height = math.ceil(num_layers / grid_width)
-    plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
-
-    # two plots for each layer
-    for l_idx, activation_rates in enumerate(layer_channel_activity):
-        r = (l_idx // grid_width)
-        c = l_idx % grid_width
-
-        # flatten to 1D if necessary and collect some stats
-        activation_rates = activation_rates.numpy().flatten()
-        len_active_rate = np.size(activation_rates)
-        mean_active_rate = np.mean(activation_rates)
-        min_active_rate = np.min(activation_rates)
-        max_active_rate = np.max(activation_rates)
-        dead_rate = np.mean(tf.cast(tf.equal(activation_rates, 0.0), tf.float32))
-
-        plt.subplot2grid((grid_height, grid_width), (r, c))
-        plt.title(f"{model.layers[l_idx].name} (#{l_idx})" if model is not None else f"layer {l_idx}")
-        plt.xlim([0.0, 1.0])
-        plt.yticks([])
-        plt.xticks([0.0, 0.5, 1.0])
-        if r == 0:
-            plt.xlabel('activation rate')
-        if c == 0:
-            plt.ylabel('histogram')
-        hist_vals, _, _ = plt.hist(activation_rates, bins=np.arange(0, 1.1, 0.1))
-        plot_height = np.max(hist_vals)
-        text_col = 'black'
-        if 0.0 < dead_rate < 1.0:
-            text_col = 'tab:orange'
-        elif dead_rate == 1.0:
-            text_col = 'tab:red'
-        plt.text(0.5, plot_height*0.5,
-                 f"len {len_active_rate}\n"
-                 f"mean {mean_active_rate:.3f}\nmin {min_active_rate:.3f}\nmax {max_active_rate:.3f}\n"
-                 f"dead {dead_rate:.3f}", color=text_col,
-                 horizontalalignment='center', verticalalignment='center')
-    plt.show()
-
-
-def plot_spatial_stats(layer_spatial_activity, model=None):
-    """
-    Simple grid plot of spatially-arrange unit activitation rates across
-    the different layers.
-
-    Args:
-        layer_spatial_activity:
-            as collecte from measure_unit_activity()
-        model:
-            Optionally pass this to add layer names.
-
-    Example:
-    >>> _, _, layer_spatial_activity = measure_unit_activity(model, dataset, include_spatial_activity=True)
-    >>> plot_spatial_stats(layer_spatial_activity, model)
-    """
-    num_layers = len(layer_spatial_activity)
-
-    # start figure
-    # - at least 4 plots wide
-    # - each layer has two plots, arranged virtically
-    # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_layers * 2)))
-    grid_height = math.ceil(num_layers / grid_width) * 2
-    plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
-
-    # two plots for each layer
-    for l_idx, activation_rates in enumerate(layer_spatial_activity):
-        r = (l_idx // grid_width) * 2
-        c = l_idx % grid_width
-
-        # flatten to 2D if needed and collect stats
-        if tf.rank(activation_rates) >= 2:
-            activation_rates = tf.reduce_mean(activation_rates, axis=range(2, tf.rank(activation_rates)))
-        alive_units = tf.cast(tf.not_equal(activation_rates, 0.0), tf.float32)
-        dead_rate = np.mean(tf.cast(tf.equal(activation_rates, 0.0), tf.float32))
-        mean_active_rate = np.mean(activation_rates)
-        min_active_rate = np.min(activation_rates)
-        max_active_rate = np.max(activation_rates)
-        plot_shape = (activation_rates.shape[0]-1,activation_rates.shape[1]-1) if tf.rank(activation_rates) >= 2 else (1, 1)
-
-        plt.subplot2grid((grid_height, grid_width), (r, c))
-        plt.title(f"{model.layers[l_idx].name} (#{l_idx})" if model is not None else f"layer {l_idx}")
-        plt.xticks([])
-        plt.yticks([])
-        if c == 0:
-            plt.ylabel('activations')
-        if tf.rank(activation_rates) >= 2:
-            plt.imshow(activation_rates, vmin=0.0)
-        plt.text(plot_shape[1]*0.5, plot_shape[0]*0.5,
-                 f"mean {mean_active_rate:.3f}\nmin {min_active_rate:.3f}\nmax {max_active_rate:.3f}",
-                 horizontalalignment='center', verticalalignment='center')
-
-        plt.subplot2grid((grid_height, grid_width), (r + 1, c))
-        plt.xticks([])
-        plt.yticks([])
-        if c == 0:
-            plt.ylabel('alive outputs')
-        if tf.rank(activation_rates) >= 2:
-            plt.imshow(alive_units, cmap='gray', vmin=0.0, vmax=1.0)
-        text_col = 'black'
-        if 0.0 < dead_rate < 1.0:
-            text_col = 'tab:orange'
-        elif dead_rate == 1.0:
-            text_col = 'tab:red'
-        plt.text(plot_shape[1]*0.5, plot_shape[0]*0.5,
-                 f"dead rate\n{dead_rate:.3f}", color=text_col,
-                 horizontalalignment='center', verticalalignment='center')
-    plt.show()
-
-
 class ActivityRateCallback(tf.keras.callbacks.Callback):
     """
     Model training callback that collects unit activation rates during training.
+
+    Uses measure_unit_activity() with the following definition:
+    > All layers are assumed to produce outputs with shapes of form: `(batch_size, ..spatial_dims.., channels)`.
+    > Unit activation rates are recorded per-channel, aggregated across batch and spatial dims, and then stats collected
+    > across the channels.
+    > In other words, each physical unit with its unique set of weights is treated as a single atomic component
+    > that is re-used multiple times across batch and spatial dims. Stats are then collected against that atomic
+    > component in terms of how often it is active (non-zero output) vs inactive (zero output).
     """
 
     def __init__(self, x, interval=1, batch_size=None, **kwargs):
@@ -976,55 +675,414 @@ class ActivityRateCallback(tf.keras.callbacks.Callback):
         self.plot_summary()
 
     def plot_summary(self):
-        epochs = self.epochs
-        num_layers = len(self.layer_stats)
-        layer_names = self.layer_names
+        """
+        Plots a high-level summary of unit activity rates across the entire model
+        and across each layer.
+        """
+        plot_unit_activity_stats(self)
 
-        # start figure
-        # - at least 4 layer plots wide
-        # - otherwise target a square grid of layer plots
-        grid_width = max(4, round(math.sqrt(num_layers) / 2) * 2)  # nearest even number >= 4
-        grid_height = 2 + math.ceil(num_layers / grid_width)
-        plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
+def _log_normalize(arr, axis=None):
+    """
+    Normalises all values in the array or along the given axis so that they sum to 1.0,
+    and so that large scale differences are reduced to linear differences in the same
+    way that a log plot converts orders of magnitude differences to linear differences.
 
-        # all-model high-level summary
-        plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
-        plt.plot(epochs, self.model_stats['mean_activation_rate'], label='mean activation rate',
-                 color='tab:blue')
-        plt.fill_between(epochs, self.model_stats['min_activation_rate'],
-                         self.model_stats['max_activation_rate'], color='tab:blue', alpha=0.2,
-                         label='min/max range')
-        plt.ylim([0.0, 1.1])
-        plt.title("Unit activation rates across layers")
-        plt.xlabel('step')
-        plt.ylabel('fraction of units')
-        plt.legend()
+    Args:
+        arr: numpy array or similar of values in range 0.0 .. +inf
 
-        plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
-        plt.plot(epochs, self.model_stats['mean_dead_rate'], label='mean dead rate', color='tab:red')
-        plt.fill_between(epochs, self.model_stats['min_dead_rate'], self.model_stats['max_dead_rate'],
-                         color='tab:red', alpha=0.2, label='min/max range')
-        plt.ylim([0.0, 1.1])
-        plt.title("Dead unit rates across layers")
-        plt.xlabel('step')
-        plt.ylabel('fraction of units')
-        plt.legend()
+    Returns:
+        new array
+    """
+    # mask to work only on positive values
+    if np.min(arr) < 0.0:
+        print(f"WARN: negative values in _log_normalize are clipped at zero: {np.min(arr)}")
+    mask = arr <= 0.0
 
-        # individual layers
-        for l_idx in range(num_layers):
-            r = 2 + l_idx // grid_width
-            c = l_idx % grid_width
-            plt.subplot2grid((grid_height, grid_width), (r, c))
-            dead_rates = self.layer_stats[l_idx]['dead_rate']
-            activation_rates = self.layer_stats[l_idx]['activation_rate']
-            plt.plot(epochs, activation_rates, label='activation rates', color='tab:blue')
-            plt.fill_between(epochs, 0, activation_rates, color='tab:blue', alpha=0.2)
-            plt.plot(epochs, dead_rates, label='dead units', color='tab:red')
-            plt.fill_between(epochs, 0, dead_rates, color='tab:red', alpha=0.2)
-            plt.ylim([0.0, 1.0])
-            plt.margins(0)
-            plt.title(f"{layer_names[l_idx]} (#{l_idx})")
-            if l_idx == 0:
-                plt.legend()
+    # convert to log scale
+    # - result: orders-of-magnitude numbers in range -inf..+inf (eg: -4 to +4)
+    # - avoid runtime warning about zeros
+    arr = arr.copy()
+    arr[mask] = 1.0   # dummy value to avoid warnings from np.log(), will be discarded
+    scaled = np.log(arr)
 
-        plt.show()
+    # move everything into positive
+    # - shift such that the min value gets value 1.0, so it doesn't become zero.
+    # - in simple terms we're doing:
+    #     scaled = scaled - (np.min(scaled, axis=axis=, keepdims=True) - 1)
+    dummy_max = np.max(scaled) + 1
+    scaled[mask] = dummy_max  # so as not to affect np.min()
+    offset = np.min(scaled, axis=axis, keepdims=True) - 1
+    offset[offset == dummy_max] = 0.0  # remove dummy_max values
+    scaled = scaled - offset
+    scaled[mask] = 0.0  # final masked values
+
+    # normalize
+    tots = np.sum(scaled, axis=axis, keepdims=True)
+    tots[tots == 0.0] = 1.0  # avoid divide-by-zero
+    scaled = scaled / tots
+    return scaled
+
+
+def measure_unit_activity(model, dataset, include_channel_activity=False, include_spatial_activity=False,
+                          verbose=0, **kwargs):
+    """
+    Measures the rate of unit activations (having non-zero output) across all units in all layers, when
+    predictions are made against the X values in the given dataset, and computes stats over the results.
+
+    All layers are assumed to produce outputs with shapes of form: `(batch_size, ..spatial_dims.., channels)`.
+    Unit activation rates are recorded per-channel, aggregated across batch and spatial dims, and then stats collected
+    across the channels.
+
+    In other words, each physical unit with its unique set of weights is treated as a single atomic component
+    that is re-used multiple times across batch and spatial dims. Stats are then collected against that atomic
+    component in terms of how often it is active (non-zero output) vs inactive (zero output).
+
+    Args:
+      model: model to examine
+        For efficiency, the model can be pre-prepared with all layers set as model outputs,
+        and setting 'extract_layers=False'
+      dataset: assumed to be of form (X, Y), and must already be setup with appropriate batching
+      include_channel_activity: bool
+        Whether to additionally include per-layer raw activity rates across the channel dim.
+      include_spatial_activity: bool
+        Whether to additionally include per-layer raw activity rates across the spatial dims (eg: height, width).
+        Layers without spatial dims just get scalar values for this.
+      verbose: int, default: 0, extent of progress reporting
+        0 = silent
+        1 = show progress bar
+
+    Keyword args:
+      extract_layers: default=True
+        Whether to extract layers from the model or to use the current model outputs as is.
+
+    Returns:
+      (model_stats, layer_stats, layer_spatial_activity_rates), where:
+        model_stats = {
+          'mean_dead_rate': mean dead rate across layers
+          'min_dead_rate': min dead rate across layers
+          'max_dead_rate': max dead rate across layers
+          'mean_activation_rate': mean activate rate across layers
+          'min_activation_rate': min activate rate across layers
+          'max_activation_rate': max activate rate across layers
+        }
+        layer_stats = list with stats per layer: {
+          'dead_rate': fraction of channels that always produce zero outputs regardless of input
+          'activation_rate': mean fraction of channels that produce non-zero outputs for any given input
+        }
+        layer_channel_activity = list, with tensor for each layer, of shape `(channels,)`.
+        layer_spatial_activity = list, with tensor for each layer, of shape `(..spatial_dims..)`
+          or scaler if no spatial dims. Omitted unless include_spatial_activity is set True.
+
+    """
+
+    # prepare model
+    extract_layers = kwargs.get('extract_layers', True)
+    if extract_layers:
+        monitoring_model = tf.keras.Model(inputs=model.inputs, outputs=[layer.output for layer in model.layers])
+    else:
+        monitoring_model = model
+
+    # init
+    channel_sizes = [shape[-1] for shape in monitoring_model.output_shape]
+    spatial_dims = [shape[1:-1] if len(shape) > 2 else () for shape in monitoring_model.output_shape]
+    num_batches = tf.cast(dataset.cardinality(), dtype=tf.float32)
+    layer_channel_activity_sums = [tf.Variable(tf.zeros(size, dtype=tf.float32)) for size in channel_sizes]  # by channel
+    if include_spatial_activity:
+        layer_spatial_activity_sums = [tf.Variable(tf.zeros(shape, dtype=tf.float32)) for shape in spatial_dims]  # by spatial dims
+    else:
+        layer_spatial_activity_sums = None
+
+    # get raw active counts per layer across all batches in dataset
+    # (we compute the mean for each batch, but sum across the batches and divide later)
+    @tf.function
+    def _collect_stats_outer(model_arg, dataset_arg, layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg):
+        for inputs, _ in dataset_arg:
+            _collect_stats_inner(model_arg, inputs, layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg)
+        return layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg
+
+    @tf.function
+    def _collect_stats_inner(model_arg, inputs_arg, layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg):
+        layer_outputs = model_arg(inputs=inputs_arg, training=False)
+        for l_idx, layer_output in enumerate(layer_outputs):
+            active_outputs = tf.cast(tf.not_equal(layer_output, 0.0), tf.float32)
+            active_counts_by_channel = tf.reduce_mean(active_outputs, axis=tf.range(tf.rank(active_outputs) - 1))
+            layer_channel_activity_sums_arg[l_idx].assign_add(active_counts_by_channel)
+            if layer_spatial_activity_sums_arg is not None:
+                active_counts_by_spatial = tf.reduce_mean(active_outputs, axis=(0, tf.rank(active_outputs) - 1))
+                layer_spatial_activity_sums_arg[l_idx].assign_add(active_counts_by_spatial)
+        return layer_channel_activity_sums_arg, layer_spatial_activity_sums_arg
+
+    if verbose > 0:
+        # note: can't use auto-graph for the outer loop so might be just a little bit slower (circa 13s vs 10s)
+        for inputs, _ in tqdm.tqdm(dataset):
+            _collect_stats_inner(monitoring_model, inputs, layer_channel_activity_sums, layer_spatial_activity_sums)
+    else:
+        # even dataset iteration loop is auto-graphed
+        layer_channel_activity_sums, layer_spatial_activity_sums = _collect_stats_outer(
+            monitoring_model, dataset, layer_channel_activity_sums, layer_spatial_activity_sums)
+
+    # compute individual layer channel stats
+    def _compute_channel_stats(channel_size, layer_active_sum):
+        active_rates = layer_active_sum / num_batches
+        dead_rate = tf.reduce_sum(tf.cast(tf.equal(layer_active_sum, 0.0), tf.int32)) / channel_size
+        return {
+            'dead_rate': dead_rate.numpy(),
+            'activation_rate': tf.reduce_mean(active_rates).numpy()
+        }
+
+    layer_stats = [_compute_channel_stats(channel_size, layer_active_sum) for
+                   channel_size, layer_active_sum in
+                   zip(channel_sizes, layer_channel_activity_sums)]
+
+    # collect raw layer activity rates
+    layer_channel_activities = None
+    if include_channel_activity:
+        layer_channel_activities = [layer_active_sum / num_batches for layer_active_sum in layer_channel_activity_sums]
+
+    layer_spatial_activities = None
+    if layer_spatial_activity_sums is not None:
+        layer_spatial_activities = [layer_active_sum / num_batches for layer_active_sum in layer_spatial_activity_sums]
+
+    # compute aggregate stats across whole model
+    def _compute_model_stats(layer_stats_list):
+        dic = {}
+        for key in ['dead_rate', 'activation_rate']:
+            dic[f"min_{key}"] = min([stats[key] for stats in layer_stats_list])
+            dic[f"max_{key}"] = max([stats[key] for stats in layer_stats_list])
+            dic[f"mean_{key}"] = np.mean([stats[key] for stats in layer_stats_list])
+        return dic
+
+    model_stats = _compute_model_stats(layer_stats)
+
+    # build result tuple
+    res = (model_stats, layer_stats)
+    if layer_channel_activities is not None:
+        res += (layer_channel_activities,)
+    if layer_spatial_activities is not None:
+        res += (layer_spatial_activities,)
+    return res
+
+
+# TODO make more generic show that passing the activity_callback is a convenience,
+# but can take raw params too
+def plot_unit_activity(activity_callback):
+    """
+    Plots a high-level summary of unit activity rates across the entire model
+    and across each layer.
+
+    Generated figure is of form:
+    - top row (two columns):
+        - "Unit activation rates across layers"
+        - "Dead unit rates across layers"
+    - remaining rows (arranged approximately as a square grid)
+        - per-layer unit activation rates
+    """
+    # collect data
+    epochs = activity_callback.epochs
+    num_layers = len(activity_callback.layer_stats)
+    model_stats = activity_callback.model_stats
+    layer_stats = activity_callback.layer_stats
+    layer_names = activity_callback.layer_names
+    model = activity_callback.model
+    monitoring_model = activity_callback._monitoring_model
+    channel_sizes = [shape[-1] for shape in monitoring_model.output_shape]
+
+    # start figure
+    # - at least 4 layer plots wide
+    # - otherwise target a square grid of layer plots
+    grid_width = max(4, round(math.sqrt(num_layers) / 2) * 2)  # nearest even number >= 4
+    grid_height = 2 + math.ceil(num_layers / grid_width)
+    plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
+
+    # all-model high-level summary
+    plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
+    plt.plot(epochs, model_stats['mean_activation_rate'], label='mean activation rate',
+             color='tab:blue')
+    plt.fill_between(epochs, model_stats['min_activation_rate'],
+                     model_stats['max_activation_rate'], color='tab:blue', alpha=0.2,
+                     label='min/max range')
+    plt.ylim([0.0, 1.1])
+    plt.title("Unit activation rates across layers")
+    plt.xlabel('step')
+    plt.ylabel('fraction of units')
+    plt.legend()
+
+    plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
+    plt.plot(epochs, model_stats['mean_dead_rate'], label='mean dead rate', color='tab:red')
+    plt.fill_between(epochs, model_stats['min_dead_rate'], model_stats['max_dead_rate'],
+                     color='tab:red', alpha=0.2, label='min/max range')
+    plt.ylim([0.0, 1.1])
+    plt.title("Dead unit rates across layers")
+    plt.xlabel('step')
+    plt.ylabel('fraction of units')
+    plt.legend()
+
+    # individual layers
+    for l_idx in range(num_layers):
+        r = 2 + l_idx // grid_width
+        c = l_idx % grid_width
+        plt.subplot2grid((grid_height, grid_width), (r, c))
+        dead_rates = layer_stats[l_idx]['dead_rate']
+        activation_rates = layer_stats[l_idx]['activation_rate']
+        plt.plot(epochs, activation_rates, label='activation rates', color='tab:blue')
+        plt.fill_between(epochs, 0, activation_rates, color='tab:blue', alpha=0.2)
+        plt.plot(epochs, dead_rates, label='dead units', color='tab:red')
+        plt.fill_between(epochs, 0, dead_rates, color='tab:red', alpha=0.2)
+        plt.ylim([0.0, 1.0])
+        plt.margins(0)
+        plt.title(f"layer {l_idx}:\n{layer_names[l_idx]}" if model is not None else f"layer {l_idx}")
+
+        # text overlay
+        plot_width = np.max(epochs)
+        final_dead_rate = dead_rates[-1]
+        plt.text(plot_width * 0.5, 0.5,
+                 f"{channel_sizes[l_idx]} units\n"
+                 f"{final_dead_rate * 100:.1f}% dead",
+                 horizontalalignment='center', verticalalignment='center')
+
+        if l_idx == 0:
+            plt.legend()
+
+    plt.show()
+
+
+def plot_channel_stats(layer_channel_activity, model=None):
+    """
+    Simple grid plot of per-channel unit activitation rates across
+    the different layers.
+
+    Args:
+        layer_channel_activity:
+            as collected from measure_unit_activity()
+        model:
+            Optionally pass this to add layer names.
+
+    Example:
+    >>> _, _, layer_channel_activity = measure_unit_activity(model, dataset, include_channel_activity=True)
+    >>> plot_channel_stats(layer_channel_activity, model)
+    """
+    num_layers = len(layer_channel_activity)
+
+    # start figure
+    # - at least 4 plots wide
+    # - each layer has two plots, arranged virtically
+    # - otherwise target a square grid of layer plots
+    grid_width = max(4, round(math.sqrt(num_layers)))
+    grid_height = math.ceil(num_layers / grid_width)
+    plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
+
+    # two plots for each layer
+    for l_idx, activation_rates in enumerate(layer_channel_activity):
+        r = (l_idx // grid_width)
+        c = l_idx % grid_width
+
+        # flatten to 1D if necessary and collect some stats
+        activation_rates = activation_rates.numpy().flatten()
+        len_active_rate = np.size(activation_rates)
+        mean_active_rate = np.mean(activation_rates)
+        min_active_rate = np.min(activation_rates)
+        max_active_rate = np.max(activation_rates)
+        dead_rate = np.mean(tf.cast(tf.equal(activation_rates, 0.0), tf.float32))
+
+        plt.subplot2grid((grid_height, grid_width), (r, c))
+        plt.title(f"layer {l_idx}:\n{model.layers[l_idx].name}" if model is not None else f"layer {l_idx}")
+        plt.xlim([0.0, 1.0])
+        plt.yticks([])
+        plt.xticks([0.0, 0.5, 1.0])
+        if r == 0:
+            plt.xlabel('activation rate')
+        if c == 0:
+            plt.ylabel('histogram')
+        hist_vals, _, _ = plt.hist(activation_rates, bins=np.arange(0, 1.1, 0.1))
+
+        # text overlay
+        plot_height = np.max(hist_vals)
+        text_col = 'black'
+        if 0.0 < dead_rate < 1.0:
+            text_col = 'tab:orange'
+        elif dead_rate == 1.0:
+            text_col = 'tab:red'
+        plt.text(0.5, plot_height*0.5,
+                 f"{len_active_rate} channels\n"
+                 f"mean {mean_active_rate*100:.1f}%\n"
+                 f"min {min_active_rate*100:.1f}%\n"
+                 f"max {max_active_rate*100:.1f}%\n"
+                 f"dead {dead_rate*100:.1f}%",
+                 color=text_col, horizontalalignment='center', verticalalignment='center')
+    plt.show()
+
+
+def plot_spatial_stats(layer_spatial_activity, model=None):
+    """
+    Simple grid plot of spatially-arrange unit activitation rates across
+    the different layers.
+
+    Args:
+        layer_spatial_activity:
+            as collected from measure_unit_activity()
+        model:
+            Optionally pass this to add layer names.
+
+    Example:
+    >>> _, _, layer_spatial_activity = measure_unit_activity(model, dataset, include_spatial_activity=True)
+    >>> plot_spatial_stats(layer_spatial_activity, model)
+    """
+    num_layers = len(layer_spatial_activity)
+
+    # start figure
+    # - at least 4 plots wide
+    # - each layer has two plots, arranged virtically
+    # - otherwise target a square grid of layer plots
+    grid_width = max(4, round(math.sqrt(num_layers * 2)))
+    grid_height = math.ceil(num_layers / grid_width) * 2
+    plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
+
+    # two plots for each layer
+    for l_idx, activation_rates in enumerate(layer_spatial_activity):
+        r = (l_idx // grid_width) * 2
+        c = l_idx % grid_width
+
+        # flatten to 2D if needed and collect stats
+        if tf.rank(activation_rates) >= 2:
+            activation_rates = tf.reduce_mean(activation_rates, axis=range(2, tf.rank(activation_rates)))
+        alive_units = tf.cast(tf.not_equal(activation_rates, 0.0), tf.float32)
+        dead_rate = np.mean(tf.cast(tf.equal(activation_rates, 0.0), tf.float32))
+        mean_active_rate = np.mean(activation_rates)
+        min_active_rate = np.min(activation_rates)
+        max_active_rate = np.max(activation_rates)
+        plot_shape = (activation_rates.shape[0]-1,activation_rates.shape[1]-1) if tf.rank(activation_rates) >= 2 else (1, 1)
+
+        # top plot
+        plt.subplot2grid((grid_height, grid_width), (r, c))
+        plt.title(f"layer {l_idx}:\n{model.layers[l_idx].name}" if model is not None else f"layer {l_idx}")
+        plt.xticks([])
+        plt.yticks([])
+        if c == 0:
+            plt.ylabel('activations')
+        if tf.rank(activation_rates) >= 2:
+            plt.imshow(activation_rates, vmin=0.0)
+        plt.text(plot_shape[1]*0.5, plot_shape[0]*0.5,
+                 f"mean {mean_active_rate*100:.1f}%\n"
+                 f"min {min_active_rate*100:.1f}%\n"
+                 f"max {max_active_rate*100:.1f}%",
+                 horizontalalignment='center', verticalalignment='center')
+
+        # bottom plot
+        plt.subplot2grid((grid_height, grid_width), (r + 1, c))
+        plt.xticks([])
+        plt.yticks([])
+        if c == 0:
+            plt.ylabel('alive outputs')
+        if tf.rank(activation_rates) >= 2:
+            plt.imshow(alive_units, cmap='gray', vmin=0.0, vmax=1.0)
+        text_col = 'black'
+        if 0.0 < dead_rate < 1.0:
+            text_col = 'tab:orange'
+        elif dead_rate == 1.0:
+            text_col = 'tab:red'
+        plt.text(plot_shape[1]*0.5, plot_shape[0]*0.5,
+                 f"dead rate\n{dead_rate*100:.1f}%",
+                 color=text_col, horizontalalignment='center', verticalalignment='center')
+    plt.show()
+
+
