@@ -1129,8 +1129,6 @@ def _normalize_collection_sets_for_layers(model: tf.keras.Model, collection_sets
               'layers': [Layer]   # references to actual layers, to capture all variables in the given layers
               'layer_indices': [int]  # list of layer indices, to capture all variables in the given layers
               'layer_names': [string]  # list of layer names, to capture all variables in the given layers
-              'variable_indices': [int]  # list of variable indices according to model.variables
-              'trainable_variable_indices': [int]  # list of variable indices according to model.trainable_variables
 
               # applicable if none of above specified:
               'include_non_trainable': bool (default False)  # whether to include non-trainable layers
@@ -1157,14 +1155,12 @@ def _normalize_collection_sets_for_layers(model: tf.keras.Model, collection_sets
     onlytrainable_layer_indices = [_index_by_identity(model.layers, layer) for layer in model.layers
                                    if layer.trainable_variables]
 
-    tracked_layer_indices = {}  # flat set of variable indices
+    tracked_layer_indices = set()  # flat set of variable indices
 
     # validate and standardise on closed layer indices
     # (lookups automatically throws ValueError if any references not present in model layers)
     for collection_set in collection_sets:
         _assert_at_most_one_property_of(collection_set, ['layers', 'layer_indices', 'layer_names'])
-
-        include_non_trainable = collection_set['include_non_trainable'] or False
 
         # identify layers
         layer_indices = None
@@ -1176,25 +1172,27 @@ def _normalize_collection_sets_for_layers(model: tf.keras.Model, collection_sets
             layer_indices = [layer_names.index(name) for name in collection_set['layer_names']]
 
         # validate no duplicate indices
-        duplicates = [index in tracked_layer_indices for index in layer_indices]
-        if duplicates:
-            raise ValueError(f"Duplicate references to layers not allowed. Duplicate indices found: {duplicates}")
+        if layer_indices is not None:
+            duplicates = [index for index in layer_indices if index in tracked_layer_indices]
+            if duplicates:
+                raise ValueError(f"Duplicate references to layers not allowed. Duplicate indices found: {duplicates}")
 
         # commit
         collection_set['layer_indices'] = layer_indices
-        tracked_layer_indices.update(layer_indices)
+        if layer_indices is not None:
+            tracked_layer_indices.update(layer_indices)
 
     # validate at-most one open set for layer indices
     open_collection_sets = [collection_set for collection_set in collection_sets
                             if collection_set['layer_indices'] is None]
-    if open_collection_sets:
+    if len(open_collection_sets) > 1:
         raise ValueError(f"At most one collection set may be specified without any layer references. "
                          f"Found: {open_collection_sets}")
 
     # infer and standardise on open layer indices
     for collection_set in collection_sets:
         if collection_set['layer_indices'] is None:
-            include_non_trainable = collection_set['include_non_trainable'] or False
+            include_non_trainable = collection_set.get('include_non_trainable', False)
             indices_lookup = all_layer_indices if include_non_trainable else onlytrainable_layer_indices
             layer_indices = [index for index in indices_lookup if index not in tracked_layer_indices]
             collection_set['layer_indices'] = layer_indices
@@ -1217,6 +1215,8 @@ def _normalize_collection_sets_for_layers(model: tf.keras.Model, collection_sets
             # defaults to density = 1.0
             pass
 
+    return collection_sets
+
 
 def _normalize_collection_sets_for_variables(model: tf.keras.Model, collection_sets: list):
     """
@@ -1233,6 +1233,7 @@ def _normalize_collection_sets_for_variables(model: tf.keras.Model, collection_s
               'layers': [Layer]   # references to actual layers, to capture all variables in the given layers
               'layer_indices': [int]  # list of layer indices, to capture all variables in the given layers
               'layer_names': [string]  # list of layer names, to capture all variables in the given layers
+              'variables': [Variable]  # references to actual variables
               'variable_indices': [int]  # list of variable indices according to model.variables
               'trainable_variable_indices': [int]  # list of variable indices according to model.trainable_variables
 
@@ -1262,7 +1263,7 @@ def _normalize_collection_sets_for_variables(model: tf.keras.Model, collection_s
     all_variable_indices_by_layer = variable_indices_by_layer(model, include_trainable_only=False)
     onlytrainable_variable_indices_by_layer = variable_indices_by_layer(model, include_trainable_only=True)
 
-    tracked_variable_indices = {}  # flat set of variable indices
+    tracked_variable_indices = set()  # flat set of variable indices
 
     # validate and standardise on closed variable indices
     # (lookups automatically throws ValueError if any references not present in model layers)
@@ -1270,7 +1271,7 @@ def _normalize_collection_sets_for_variables(model: tf.keras.Model, collection_s
         _assert_at_most_one_property_of(collection_set, ['layers', 'layer_indices', 'layer_names',
                                                          'variable_indices', 'trainable_variable_indices'])
 
-        include_non_trainable = collection_set['include_non_trainable'] or False
+        include_non_trainable = collection_set.get('include_non_trainable', False)
 
         variable_indices = None
         if collection_set.get('variable_indices'):
@@ -1297,31 +1298,31 @@ def _normalize_collection_sets_for_variables(model: tf.keras.Model, collection_s
         else:
             # leave expansion till later
             pass
-            # get all variables across model
-            variable_indices = all_variable_indices_by_layer if include_non_trainable \
-                else onlytrainable_variable_indices_by_layer
 
         # validate no duplicate indices
-        duplicates = [index in tracked_variable_indices for index in variable_indices]
-        if duplicates:
-            raise ValueError(f"Duplicate references to variables not allowed. Duplicate indices found: {duplicates}")
+        if variable_indices is not None:
+            duplicates = [index for index in variable_indices if index in tracked_variable_indices]
+            if duplicates:
+                raise ValueError(f"Duplicate references to variables not allowed. "
+                                 f"Duplicate indices found: {duplicates}")
 
         # commit
         collection_set['variable_indices'] = variable_indices
-        tracked_variable_indices.update(variable_indices)
+        if variable_indices is not None:
+            tracked_variable_indices.update(variable_indices)
 
     # validate at-most one open set for variable indices
     # infer and standardise on open variable indices
     open_collection_sets = [collection_set for collection_set in collection_sets
-                            if collection_set['variable_indices'] is None]
-    if open_collection_sets:
+                            if collection_set.get('variable_indices') is None]
+    if len(open_collection_sets) > 1:
         raise ValueError(f"At most one collection set may be specified without any layer or variable references. "
                          f"Found: {open_collection_sets}")
 
     # infer and standardise on open variable indices
     for collection_set in collection_sets:
         if collection_set['variable_indices'] is None:
-            include_non_trainable = collection_set['include_non_trainable'] or False
+            include_non_trainable = collection_set.get('include_non_trainable', False)
             indices_lookup = all_variable_indices if include_non_trainable else onlytrainable_variable_indices
             variable_indices = [index for index in indices_lookup if index not in tracked_variable_indices]
             collection_set['variable_indices'] = variable_indices
@@ -1343,6 +1344,8 @@ def _normalize_collection_sets_for_variables(model: tf.keras.Model, collection_s
         else:
             # defaults to density = 1.0
             pass
+
+    return collection_sets
 
 
 def measure_unit_activity(model, dataset, include_channel_activity=False, include_spatial_activity=False,
