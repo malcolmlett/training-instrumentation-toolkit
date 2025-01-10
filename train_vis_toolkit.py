@@ -623,7 +623,6 @@ class ActivityHistoryCallback(BaseGradientCallback):
 
         # internal tracking
         self._epoch = 0
-        self._variable_indices_by_layer = None
         self._layer_names = None
         self._layer_shapes = None
 
@@ -642,6 +641,7 @@ class ActivityHistoryCallback(BaseGradientCallback):
         self._layer_names = [layer.name for layer in self.model.layers]
 
         # populate layer_indices based on layer_names if only layer_names provided
+        # TODO use _normalize_collection_sets_for_layers() instead
         if self.collection_sets:
             for collection_set in self.collection_sets:
                 # convert different ways of specifying layer into 'layer_indices'
@@ -969,6 +969,64 @@ class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
         plot_unit_activity(self)
 
 
+class VariableHistoryCallback(tf.keras.callbacks.Callback):
+    """
+    Standard model.fit() callback that captures the state of variables during training.
+    Variable states may be captured BEFORE or AFTER each update step or epoch, depending on the needs.
+
+    Properties:
+        variables: list (by model.variable) of list (by step/epoch) of variable tensors.
+            Property is None if variable capturing not enabled.
+            Each variable is always represented according to its index in the list, but has value None
+            if it wasn't captured.
+
+        captured_variables: list (by variable) of list (by step/epoch) of variable tensors.
+            Filtered version of `variables` containing only non-None entries.
+    """
+
+    def __init__(self, per_step=False, before_updates=False, collection_sets=None, **kwargs):
+        """
+        Args:
+            per_step: bool. Whether to collect per-step stats, or per-epoch otherwise.
+                By default, activity is accumulated per-epoch, and an 'epochs' list is available
+                that tracks the display indices of each sample.
+                If per-step is set, then a `steps` list is available instead, and activity
+                is collected on each update step.
+                The same applies to layer output capture if enabled.
+
+            before_updates: bool. Whether to sample variables BEFORE they are updated, or AFTER otherwise.
+                If False, this reflects the notion of capturing the weights and biases as a RESULT of each update step.
+                If True, this reflects the notion of capturing the weights and biases that were used DURING
+                the update step.
+
+            collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
+              If omitted, this callback collects nothing (in the future it may collect stats).
+              See _normalize_collection_sets_for_variables() for format details.
+        """
+        super(VariableHistoryCallback, self).__init__(**kwargs)
+        self.per_step = per_step
+        self.before_updates = before_updates
+        self.collection_sets = collection_sets
+
+        # results variable creation
+        if per_step:
+            self.steps = []
+        else:
+            self.epochs = []
+        self.variables = None
+
+        # internal tracking
+        self._epoch = 0
+
+    def on_train_begin(self):
+        """
+        Initialises tracking, now that we know the model etc.
+        """
+        # expand collection_sets
+        if self.collection_sets:
+            self.collection_sets = _normalize_collection_sets_for_variables(self.model, self.collection_sets)
+
+
 def _log_normalize(arr, axis=None):
     """
     Normalises all values in the array or along the given axis so that they sum to 1.0,
@@ -1009,6 +1067,282 @@ def _log_normalize(arr, axis=None):
     tots[tots == 0.0] = 1.0  # avoid divide-by-zero
     scaled = scaled / tots
     return scaled
+
+
+def variable_indices_by_layer(model: tf.keras.Model, include_trainable_only: bool = False):
+    """
+    Groups indices of model.variable by layer.
+
+    Note: even with include_trainable_only==True, this produces different results from
+    trainable_variable_indices_by_layer() which indexes variables by their position in model.trainable_variables.
+
+    Params:
+        model: a model
+        include_trainable_only: bool
+            Whether to only include the indices for trainable variables, or for all variables otherwise.
+    Returns:
+         list (by layer index) of list (by variable) of variable indices from original model.variable list.
+    """
+    if include_trainable_only:
+        return [[_index_by_identity(model.variables, var) for var in layer.trainable_variables]
+                for layer in model.layers]
+    else:
+        return [[_index_by_identity(model.variables, var) for var in layer.variables]
+                for layer in model.layers]
+
+
+def trainable_variable_indices_by_layer(model: tf.keras.Model):
+    """
+    Groups indices of model.trainable_variable by layer.
+    This is different to variable_indices_by_layer() which indexes variables by their position
+    in model.variables.
+    Params:
+        model: a model
+    Returns:
+         list (by layer index) of list (by variable) of variable indices from original model.trainable_variable list.
+    """
+    return [[_index_by_identity(model.trainable_variables, var) for var in layer.trainable_variables]
+            for layer in model.layers]
+
+
+def _index_by_identity(lst, target):
+    """
+    Some classes override the equals() method s.t. you can't simply
+    do `lst.index(target)`. This function overcomes that problem.
+    """
+    return next((i for i, v in enumerate(lst) if id(v) == id(target)), -1)
+
+
+def _normalize_collection_sets_for_layers(model: tf.keras.Model, collection_sets: list):
+    """
+    Handles the variations allowed in collection_sets used for selecting capture of
+    per-layer-output data.
+    Fully resolves all collection sets to: 'layer_indices' and 'slices'.
+
+    Args:
+        model: the model being examined
+        collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
+          If omitted, this callback collects nothing (in the future it may collect stats).
+          Dicts of form (note: 'density' and 'slices' not yet supported):
+            {
+              # none or one of:
+              'layers': [Layer]   # references to actual layers, to capture all variables in the given layers
+              'layer_indices': [int]  # list of layer indices, to capture all variables in the given layers
+              'layer_names': [string]  # list of layer names, to capture all variables in the given layers
+              'variable_indices': [int]  # list of variable indices according to model.variables
+              'trainable_variable_indices': [int]  # list of variable indices according to model.trainable_variables
+
+              # applicable if none of above specified:
+              'include_non_trainable': bool (default False)  # whether to include non-trainable layers
+
+              # one of:
+              'density': float, default: 1.0  # fraction of units to collect outputs from, automatically sliced
+              'max_units': int, default: None  # max number of units to collect outputs from, automatically sliced
+              'slices': [slice]  # slices to use for each selected layer
+            }
+          A dict that omits layer or variable references applies its density/slicing rule to each trainable
+          variable that hasn't otherwise been specified in any other collection sets.
+
+    Returns:
+        updated collection_sets (modified in place)
+    """
+    def _assert_at_most_one_property_of(obj, allowed: list):
+        present = [key for key in allowed if key in obj]
+        if len(present) > 1:
+            raise ValueError(f"At most one of {allowed} can be present. Found: {present}")
+
+    # precompute lookups
+    layer_names = [layer.name for layer in model.layers]
+    all_layer_indices = list(range(len(model.layers)))
+    onlytrainable_layer_indices = [_index_by_identity(model.layers, layer) for layer in model.layers
+                                   if layer.trainable_variables]
+
+    tracked_layer_indices = {}  # flat set of variable indices
+
+    # validate and standardise on closed layer indices
+    # (lookups automatically throws ValueError if any references not present in model layers)
+    for collection_set in collection_sets:
+        _assert_at_most_one_property_of(collection_set, ['layers', 'layer_indices', 'layer_names'])
+
+        include_non_trainable = collection_set['include_non_trainable'] or False
+
+        # identify layers
+        layer_indices = None
+        if collection_set.get('layer_indices'):
+            layer_indices = collection_set['layer_indices']
+        elif collection_set.get('layers'):
+            layer_indices = [_index_by_identity(model.layers, layer) for layer in collection_set['layers']]
+        elif collection_set.get('layer_names'):
+            layer_indices = [layer_names.index(name) for name in collection_set['layer_names']]
+
+        # validate no duplicate indices
+        duplicates = [index in tracked_layer_indices for index in layer_indices]
+        if duplicates:
+            raise ValueError(f"Duplicate references to layers not allowed. Duplicate indices found: {duplicates}")
+
+        # commit
+        collection_set['layer_indices'] = layer_indices
+        tracked_layer_indices.update(layer_indices)
+
+    # validate at-most one open set for layer indices
+    open_collection_sets = [collection_set for collection_set in collection_sets
+                            if collection_set['layer_indices'] is None]
+    if open_collection_sets:
+        raise ValueError(f"At most one collection set may be specified without any layer references. "
+                         f"Found: {open_collection_sets}")
+
+    # infer and standardise on open layer indices
+    for collection_set in collection_sets:
+        if collection_set['layer_indices'] is None:
+            include_non_trainable = collection_set['include_non_trainable'] or False
+            indices_lookup = all_layer_indices if include_non_trainable else onlytrainable_layer_indices
+            layer_indices = [index for index in indices_lookup if index not in tracked_layer_indices]
+            collection_set['layer_indices'] = layer_indices
+            tracked_layer_indices.update(layer_indices)
+
+    # - validate and standardise on slicing
+    for collection_set in collection_sets:
+        _assert_at_most_one_property_of(collection_set, ['density', 'max_units', 'slices'])
+
+        # TODO
+        slices = None
+        if collection_set.get('density'):
+            if collection_set['density'] != 1.0:
+                raise ValueError("Only density=1.0 currently supported")
+        elif collection_set.get('max_units'):
+            raise ValueError("Only density=1.0 currently supported")
+        elif collection_set.get('slices'):
+            raise ValueError("Only density=1.0 currently supported")
+        else:
+            # defaults to density = 1.0
+            pass
+
+
+def _normalize_collection_sets_for_variables(model: tf.keras.Model, collection_sets: list):
+    """
+    Handles the variations allowed in collection_sets used for selecting capture of model variables.
+    Fully resolves all collection sets to: 'variable_indices' and 'slices'.
+
+    Args:
+        model: the model being examined
+        collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
+          If omitted, this callback collects nothing (in the future it may collect stats).
+          Dicts of form (note: 'density' and 'slices' not yet supported):
+            {
+              # none or one of:
+              'layers': [Layer]   # references to actual layers, to capture all variables in the given layers
+              'layer_indices': [int]  # list of layer indices, to capture all variables in the given layers
+              'layer_names': [string]  # list of layer names, to capture all variables in the given layers
+              'variable_indices': [int]  # list of variable indices according to model.variables
+              'trainable_variable_indices': [int]  # list of variable indices according to model.trainable_variables
+
+              # applicable if none of above specified, or if using 'layers', 'layer_indices', or 'layer_names':
+              'include_non_trainable': bool (default False)  # whether to include non-trainable variables
+
+              # one of:
+              'density': float, default: 1.0  # fraction of units to collect outputs from, automatically sliced
+              'max_units': int, default: None  # max number of units to collect outputs from, automatically sliced
+              'slices': [slice]  # slices to use for each selected variable
+            }
+          A dict that omits layer or variable references applies its density/slicing rule to each trainable
+          variable that hasn't otherwise been specified in any other collection sets.
+
+    Returns:
+        updated collection_sets (modified in place)
+    """
+    def _assert_at_most_one_property_of(obj, allowed: list):
+        present = [key for key in allowed if key in obj]
+        if len(present) > 1:
+            raise ValueError(f"At most one of {allowed} can be present. Found: {present}")
+
+    # precompute lookups
+    layer_names = [layer.name for layer in model.layers]
+    all_variable_indices = list(range(len(model.variables)))
+    onlytrainable_variable_indices = [_index_by_identity(model.variables, var) for var in model.trainable_variables]
+    all_variable_indices_by_layer = variable_indices_by_layer(model, include_trainable_only=False)
+    onlytrainable_variable_indices_by_layer = variable_indices_by_layer(model, include_trainable_only=True)
+
+    tracked_variable_indices = {}  # flat set of variable indices
+
+    # validate and standardise on closed variable indices
+    # (lookups automatically throws ValueError if any references not present in model layers)
+    for collection_set in collection_sets:
+        _assert_at_most_one_property_of(collection_set, ['layers', 'layer_indices', 'layer_names',
+                                                         'variable_indices', 'trainable_variable_indices'])
+
+        include_non_trainable = collection_set['include_non_trainable'] or False
+
+        variable_indices = None
+        if collection_set.get('variable_indices'):
+            variable_indices = collection_set['variable_indices']
+        elif collection_set.get('trainable_variable_indices'):
+            trainable_indices = collection_set['trainable_variable_indices']
+            variables = [model.trainable_variables[i] for i in trainable_indices]
+            variable_indices = [_index_by_identity(model.variables, var) for var in variables]
+        elif any([key for key in ['layers', 'layer_names', 'layer_indices'] if key in collection_set]):
+            # identify layers
+            if collection_set.get('layer_indices'):
+                layer_indices = collection_set['layer_indices']
+            elif collection_set.get('layers'):
+                layer_indices = [_index_by_identity(model.layers, layer) for layer in collection_set['layers']]
+            elif collection_set.get('layer_names'):
+                layer_indices = [layer_names.index(name) for name in collection_set['layer_names']]
+            else:
+                raise AssertionError("Woops, unrecognised layer specifier type")
+
+            # lookup variables from each selected layer
+            indices_lookup_by_layer = all_variable_indices_by_layer if include_non_trainable \
+                else onlytrainable_variable_indices_by_layer
+            variable_indices = [item for l_idx in layer_indices for item in indices_lookup_by_layer[l_idx]]
+        else:
+            # leave expansion till later
+            pass
+            # get all variables across model
+            variable_indices = all_variable_indices_by_layer if include_non_trainable \
+                else onlytrainable_variable_indices_by_layer
+
+        # validate no duplicate indices
+        duplicates = [index in tracked_variable_indices for index in variable_indices]
+        if duplicates:
+            raise ValueError(f"Duplicate references to variables not allowed. Duplicate indices found: {duplicates}")
+
+        # commit
+        collection_set['variable_indices'] = variable_indices
+        tracked_variable_indices.update(variable_indices)
+
+    # validate at-most one open set for variable indices
+    # infer and standardise on open variable indices
+    open_collection_sets = [collection_set for collection_set in collection_sets
+                            if collection_set['variable_indices'] is None]
+    if open_collection_sets:
+        raise ValueError(f"At most one collection set may be specified without any layer or variable references. "
+                         f"Found: {open_collection_sets}")
+
+    # infer and standardise on open variable indices
+    for collection_set in collection_sets:
+        if collection_set['variable_indices'] is None:
+            include_non_trainable = collection_set['include_non_trainable'] or False
+            indices_lookup = all_variable_indices if include_non_trainable else onlytrainable_variable_indices
+            variable_indices = [index for index in indices_lookup if index not in tracked_variable_indices]
+            collection_set['variable_indices'] = variable_indices
+            tracked_variable_indices.update(variable_indices)
+
+    # - validate and standardise on slicing
+    for collection_set in collection_sets:
+        _assert_at_most_one_property_of(collection_set, ['density', 'max_units', 'slices'])
+
+        # TODO
+        slices = None
+        if collection_set.get('density'):
+            if collection_set['density'] != 1.0:
+                raise ValueError("Only density=1.0 currently supported")
+        elif collection_set.get('max_units'):
+            raise ValueError("Only density=1.0 currently supported")
+        elif collection_set.get('slices'):
+            raise ValueError("Only density=1.0 currently supported")
+        else:
+            # defaults to density = 1.0
+            pass
 
 
 def measure_unit_activity(model, dataset, include_channel_activity=False, include_spatial_activity=False,
