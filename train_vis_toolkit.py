@@ -61,21 +61,20 @@ class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
 
 # Tries to replicate keras.backend.tensorflow.TensorFlowTrainer.fit() (trainer.py, keras 3.5.0)
 # as much as possible.
-def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0, gradient_callback=None):
+def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
     """
-    A custom training loop mimicking model.fit() that makes gradient information available for tracking.
+    A custom training loop mimicking model.fit() that makes raw gradient and layer output
+    information available for tracking.
 
     Honours the state of `tf.config.run_functions_eagerly(bool)`.
 
     Args:
         model: usual meaning
-        dataset: usual meaning
+        dataset: usual meaning, except only copes with fixed-length datasets
         epochs: usual meaning
         verbose: usual meaning
-        callbacks: usual meaning
+        callbacks: usual meaning plus can take instances of BaseGradientCallback
         initial_epoch: usual meaning
-        gradient_callback: Supply a subclass instance of BaseGradientCallback in order to collect gradient
-            information during training.
     Returns:
          HistoryCallback
     """
@@ -83,13 +82,23 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0, gr
     num_batches = len(dataset)
 
     # prepare callbacks tracking
+    gradient_callbacks = []
+    if callbacks is not None and not isinstance(callbacks, tf.keras.callbacks.CallbackList):
+        gradient_callbacks = [callback for callback in callbacks if isinstance(callback, BaseGradientCallback)]
+        callbacks = [callback for callback in callbacks if not isinstance(callback, BaseGradientCallback)]
     if not isinstance(callbacks, tf.keras.callbacks.CallbackList):
         callbacks = tf.keras.callbacks.CallbackList(callbacks, add_history=True, add_progbar=verbose != 0,
                                                     verbose=verbose, epochs=epochs, steps=num_batches, model=model)
-    if gradient_callback is None:
-        gradient_callback = BaseGradientCallback()
-    gradient_callback.set_params({'epochs': epochs, 'steps': len(dataset)})
-    gradient_callback.set_model(model)
+    for gradient_callback in gradient_callbacks:
+        gradient_callback.set_params({'epochs': epochs, 'steps': len(dataset)})
+        gradient_callback.set_model(model)
+
+    # prepare model for layer output collection
+    # (original model output(s) will be first entry of new outputs array, it will have single tensor or list
+    # accordingly)
+    monitoring_model = tf.keras.Model(
+        inputs=model.inputs,
+        outputs=[model.outputs] + [layer.output for layer in model.layers])
 
     # prepare train function
     if tf.config.functions_run_eagerly():
@@ -103,41 +112,47 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0, gr
     gradients = None
     activations = None
     callbacks.on_train_begin()
-    gradient_callback.on_train_begin()
+    for gradient_callback in gradient_callbacks:
+        gradient_callback.on_train_begin()
     for epoch in range(initial_epoch, epochs):
         model.reset_metrics()
         start = tf.timestamp()
         callbacks.on_epoch_begin(epoch)
-        gradient_callback.on_epoch_begin(epoch)
+        for gradient_callback in gradient_callbacks:
+            gradient_callback.on_epoch_begin(epoch)
 
         for step, data in enumerate(dataset):
             x, y, sample_weight = keras.utils.unpack_x_y_sample_weight(data)
             callbacks.on_train_batch_begin(step)
-            gradient_callback.on_train_batch_begin(step)
+            for gradient_callback in gradient_callbacks:
+                gradient_callback.on_train_batch_begin(step)
 
-            loss, metrics, gradients = train_step_fn(model, x, y, sample_weight)
+            loss, metrics, gradients, activations = train_step_fn(model, monitoring_model, x, y, sample_weight)
 
             logs = metrics
             logs['loss'] = loss.numpy()
             callbacks.on_train_batch_end(step, logs)
-            gradient_callback.on_train_batch_end(step, loss, gradients, model.trainable_variables, activations)
+            for gradient_callback in gradient_callbacks:
+                gradient_callback.on_train_batch_end(step, loss, gradients, model.trainable_variables, activations)
 
         # end of epoch
         dur = (tf.timestamp() - start).numpy()
         callbacks.on_epoch_end(epoch, logs)  # should be passing loss and mse
-        gradient_callback.on_epoch_end(epoch, loss, gradients, model.trainable_variables, activations)
+        for gradient_callback in gradient_callbacks:
+            gradient_callback.on_epoch_end(epoch, loss, gradients, model.trainable_variables, activations)
         metric_str = ''
         for k in logs.keys():
             metric_str += f" - {k}: {logs[k]:.3f}"
     callbacks.on_train_end(logs)
-    gradient_callback.on_train_end()
+    for gradient_callback in gradient_callbacks:
+        gradient_callback.on_train_end()
 
     return model.history
 
 
 # Tries to replicate keras.backend.tensorflow.TensorFlowTrainer.train_step() (trainer.py, keras 3.5.0)
 # as much as possible.
-def _gradient_returning_train_step(model, x, y, sample_weight):
+def _gradient_returning_train_step(model, monitoring_model, x, y, sample_weight):
     """
     This method is programmatically converted via auto-graph.
 
@@ -149,7 +164,10 @@ def _gradient_returning_train_step(model, x, y, sample_weight):
 
     # Forward pass
     with tf.GradientTape() as tape:
-        y_pred = model(x)
+        monitoring_outputs = monitoring_model(x)
+        y_pred = monitoring_outputs[0]
+        layer_outputs = monitoring_outputs[1:]
+
         loss = model.compute_loss(x=x, y=y, y_pred=y_pred, sample_weight=sample_weight, training=True)
         reported_loss = loss  # tracking before scaling
         loss = model.optimizer.scale_loss(loss)
@@ -165,12 +183,13 @@ def _gradient_returning_train_step(model, x, y, sample_weight):
     # Metrics
     metrics = model.compute_metrics(x=x, y=y, y_pred=y_pred, sample_weight=sample_weight)
 
-    return reported_loss, metrics, gradients
+    return reported_loss, metrics, gradients, layer_outputs
 
 
 class BaseGradientCallback:
     """
-    Supply a subclass instance to the custom fit() method in order to collect gradient information.
+    Supply a subclass instance to the custom fit() method in order to collect gradient and
+    layer activation information.
     This implementation does nothing, and is suitable for use as a no-op.
     """
     def __init__(self):
@@ -221,8 +240,7 @@ class BaseGradientCallback:
             loss: float. The loss value of the batch.
             gradients: the list of gradients for each trainable variable.
             trainable_variables: the list of trainable variables.
-            activations: the list of activations for each layer. Currently
-              never populated, but might be in the future.
+            activations: activation outputs from each layer.
         """
 
     def on_train_batch_begin(self, batch):
@@ -252,8 +270,7 @@ class BaseGradientCallback:
             loss: float. The loss value of the batch.
             gradients: the list of gradients for each trainable variable.
             trainable_variables: the list of trainable variables.
-            activations: the list of activations for each layer. Currently
-              never populated, but might be in the future.
+            activations: activation outputs from each layer.
         """
 
 
@@ -313,6 +330,10 @@ class GradientHistoryCallback(BaseGradientCallback):
     @property
     def trainable_layer_names(self):
         return [self._layer_names[idx] for idx in self.trainable_layer_indices]
+
+    @property
+    def variable_indices_by_layer(self):
+        return self._variable_indices_by_layer
 
     def on_train_begin(self):
         """
@@ -530,9 +551,197 @@ class GradientHistoryCallback(BaseGradientCallback):
         plt.show()
 
 
-class ActivityRateCallback(tf.keras.callbacks.Callback):
+class ActivityHistoryCallback(BaseGradientCallback):
     """
-    Model training callback that collects unit activation rates during training.
+    Callback for use in custom fit() function and collects unit activation rates and optionally raw layer outputs
+    during training.
+
+    More efficient than ActivityRateMeasuringCallback, but can only be used in the custom fit() function.
+
+    Similarly to measure_unit_activity():
+    > All layers are assumed to produce outputs with shapes of form: `(batch_size, ..spatial_dims.., channels)`.
+    > Unit activation rates are recorded per-channel, aggregated across batch and spatial dims, and then stats collected
+    > across the channels.
+    > In other words, each physical unit with its unique set of weights is treated as a single atomic component
+    > that is re-used multiple times across batch and spatial dims. Stats are then collected against that atomic
+    > component in terms of how often it is active (non-zero output) vs inactive (zero output).
+    """
+
+    def __init__(self, verbose=1):
+        """
+        Args:
+            verbose: int. To be refactored later:
+              0: collects on each epoch only
+              1: collects on each training step
+              2: collects raw output activations (temporary until more nuanced way to control is added)
+        """
+        super(ActivityHistoryCallback, self).__init__()
+        self.verbose = verbose
+
+        # results variable creation
+        if verbose == 0:
+            self.epochs = []
+        else:
+            self.steps = []  # maybe rename as 'iterations'
+        self.model_stats = {}  # dict (by stat) of lists (by iteration)
+        self.layer_stats = []  # list (by layer) of dicts (by stat) of lists (by iteration)
+        if verbose > 1:
+            self.activations_list = None
+
+        # internal tracking
+        self._epoch = 0
+        self._variable_indices_by_layer = None
+        self._layer_names = None
+        self._monitoring_model = None
+
+    @property
+    def layer_names(self):
+        return self._layer_names
+
+    def on_train_begin(self):
+        """
+        Initialises tracking, now that we know the model and number of epochs and steps per epoch
+        """
+        # init stats
+        self.layer_stats = [{key: [] for key in self._stat_keys()} for _ in self.model.layers]
+        self._layer_names = [layer.name for layer in self.model.layers]
+
+        # only to support plot_unit_activations() function
+        self._monitoring_model = tf.keras.Model(inputs=self.model.inputs,
+                                                outputs=[layer.output for layer in self.model.layers])
+
+    def _init_on_first_update(self, activations):
+        """
+        Finally initialises tracking, now that we have extra information needed.
+        """
+        if not hasattr(self, "_layer_channel_activity_sums"):
+            self._steps_per_epoch = self.params['steps']
+            self._channel_sizes = [activation.shape[-1] for activation in activations]
+            self._spatial_dims = [activation.shape[1:-1] if len(activation.shape) > 2 else ()
+                                  for activation in activations]
+            self._num_batches = tf.cast(self._steps_per_epoch, dtype=tf.float32)
+            self._layer_channel_activity_sums = [tf.Variable(tf.zeros(size, dtype=tf.float32))
+                                                 for size in self._channel_sizes]  # by channel
+
+    def on_train_end(self):
+        """
+        Cleans up tracking, and converts everything to numpy arrays for easier consumption.
+        """
+        # convert everything to numpy for easier consumption
+        if hasattr(self, "epochs"):
+            self.epochs = np.array(self.epochs)
+        else:
+            self.steps = np.array(self.steps)
+        for key in self.model_stats.keys():
+            self.model_stats[key] = np.array(self.model_stats[key])
+        for l_idx in range(len(self.layer_stats)):
+            for key in self.layer_stats[l_idx].keys():
+                self.layer_stats[l_idx][key] = np.array(self.layer_stats[l_idx][key])
+
+    def on_epoch_begin(self, epoch, logs=None):
+        """
+        Tracks the current epoch number and resets sums across each epoch
+        """
+        self._epoch = epoch
+
+        if hasattr(self, "_layer_channel_activity_sums"):
+            for layer_channel_activity_sum in self._layer_channel_activity_sums:
+                layer_channel_activity_sum.assign(tf.zeros_like(layer_channel_activity_sum))
+
+    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations=None):
+        """
+        Collects gradient stats and raw gradients after each epoch, if configured.
+        """
+        # stats calculation across entire epoch, if configured
+        # (uses partial stats that were accumulated across the steps in the batch)
+        if self.verbose == 0:
+            self.epochs.append(self._epoch)
+            epoch_layer_stats = [self._compute_channel_stats(channel_size, layer_active_sum, self._num_batches) for
+                                 channel_size, layer_active_sum in
+                                 zip(self._channel_sizes, self._layer_channel_activity_sums)]
+            epoch_model_stats = self._compute_model_stats(epoch_layer_stats)
+
+            self._append_dict_list(self.model_stats, epoch_model_stats)
+            for l_idx, stats in enumerate(epoch_layer_stats):
+                self._append_dict_list(self.layer_stats[l_idx], stats)
+
+    def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations=None):
+        """
+        Accumulates activations from each step. Also emits stats, if configured.
+        """
+        self._init_on_first_update(activations)
+
+        # accumulate activation data
+        accum = (self.verbose == 0)  # accum over steps in whole epoch, or otherwise just set per step
+        self._collect_stats_inner(activations, self._layer_channel_activity_sums, accum)
+
+        # stats calculations for each step, if configured
+        if self.verbose >= 1:
+            # compute stats
+            step_layer_stats = [self._compute_channel_stats(channel_size, layer_active_sum, 1) for
+                                channel_size, layer_active_sum in
+                                zip(self._channel_sizes, self._layer_channel_activity_sums)]
+            step_model_stats = self._compute_model_stats(step_layer_stats)
+
+            # emit for results
+            self.steps.append(self.params['steps'] * self._epoch + batch)
+            self._append_dict_list(self.model_stats, step_model_stats)
+            for l_idx, stats in enumerate(step_layer_stats):
+                self._append_dict_list(self.layer_stats[l_idx], stats)
+
+    # @tf.function -- TODO add (improved speed in other version)
+    @staticmethod
+    def _collect_stats_inner(layer_outputs, layer_channel_activity_sums_arg, accum):
+        for l_idx, layer_output in enumerate(layer_outputs):
+            active_outputs = tf.cast(tf.not_equal(layer_output, 0.0), tf.float32)
+            active_counts_by_channel = tf.reduce_mean(active_outputs, axis=tf.range(tf.rank(active_outputs) - 1))
+            if accum:
+              layer_channel_activity_sums_arg[l_idx].assign_add(active_counts_by_channel)
+            else:
+              layer_channel_activity_sums_arg[l_idx].assign(active_counts_by_channel)
+        return layer_channel_activity_sums_arg  # TODO remove if can
+
+    @staticmethod
+    def _compute_channel_stats(channel_size, layer_active_sum, num_batches):
+        active_rates = layer_active_sum / num_batches
+        dead_rate = tf.reduce_sum(tf.cast(tf.equal(layer_active_sum, 0.0), tf.int32)) / channel_size
+        return {
+            'dead_rate': dead_rate.numpy(),
+            'activation_rate': tf.reduce_mean(active_rates).numpy()
+        }
+
+    @staticmethod
+    def _compute_model_stats(layer_stats_list):
+        dic = {}
+        for key in ['dead_rate', 'activation_rate']:
+            dic[f"min_{key}"] = min([stats[key] for stats in layer_stats_list])
+            dic[f"max_{key}"] = max([stats[key] for stats in layer_stats_list])
+            dic[f"mean_{key}"] = np.mean([stats[key] for stats in layer_stats_list])
+        return dic
+
+    @staticmethod
+    def _append_dict_list(dic, addendum_dict):
+        for key in addendum_dict.keys():
+            if key not in dic:
+                dic[key] = []
+            dic[key].append(addendum_dict[key])
+
+    @staticmethod
+    def _stat_keys():
+        """
+        Gets the list of stats that will be computed.
+        Currently static but may be computed based on configuration in the future.
+        """
+        return ['dead_rate', 'activation_rate']
+
+
+
+class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
+    """
+    Standard model.fit() callback that intermittently computes unit activation rates during training,
+    via call to measure_unit_activity().
+
+    More costly to run than ActivityHistoryCallback, but can be used with the standard training function.
 
     Uses measure_unit_activity() with the following definition:
     > All layers are assumed to produce outputs with shapes of form: `(batch_size, ..spatial_dims.., channels)`.
