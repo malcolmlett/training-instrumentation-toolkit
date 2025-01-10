@@ -1751,3 +1751,48 @@ def plot_spatial_stats(layer_spatial_activity, model=None):
                  f"dead rate\n{dead_rate * 100:.1f}%",
                  color=text_col, horizontalalignment='center', verticalalignment='center')
     plt.show()
+
+
+def explain_near_zero_gradients(layer: int, gradients: GradientHistoryCallback, activity: ActivityHistoryCallback,
+                                variables: VariableHistoryCallback, threshold: float = None,
+                                threshold_percentile: float = 0.01):
+    """
+    Attempts to identify the explanation for zero and near-zero gradients in a given layer.
+
+    Args:
+        layer: layer index
+        threshold: gradients equal or below this magnitude are considered "near-zero"
+        threshold_percentile: threshold inferred at this percentile magnitude of the range of gradients.
+            Ignored if 'threshold' is set.
+        gradients:
+            callback populated with raw gradients for at least the layer in question
+            and any AFTER it that take it as input
+        activity:
+            callback populated with raw layer outputs for at least the layer in question
+            and any BEFORE it that it takes as input
+        variables:
+            callback populated with raw weights, biases, and other variables for at least the layer in question
+            and any AFTER it that take it as input
+
+    Usage:
+    > l_idx = 35
+    > gradients = GradientHistoryCallback(collection_sets=[{layer_indices: [l_idx, l_idx+1]})
+    > activity = ActivityHistoryCallback(collection_sets=[{layer_indices: [l_idx-1, l_idx]})
+    > variables = VariableHistoryCallback(collection_sets=[{layer_indices: [l_idx, l_idx+1]}, before_updates=True)
+    > fit(model, train_data, callbacks=[gradients, activity, variables])
+    > explain_near_zero_gradients(l_idx, gradients, activity, variables)
+    Example output:
+    > Examining layer 35
+    >   weights shape: (None, 10, 10, 512, 256)
+    >   bias shape: (None, 10, 10, 256)
+    > Layer summary:
+    >   units: 25600
+    >   fan-in: 51200
+    >   biases: 25600
+    > Zero gradients:
+    >   units: 347 (1.36%)
+    >
+    > Neor-zero gradients (magnitude < 0.00035):
+    >
+    >
+    """
