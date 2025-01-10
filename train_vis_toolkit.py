@@ -567,26 +567,27 @@ class ActivityHistoryCallback(BaseGradientCallback):
     > component in terms of how often it is active (non-zero output) vs inactive (zero output).
     """
 
-    def __init__(self, verbose=1):
+    def __init__(self, per_epoch=False):
         """
         Args:
-            verbose: int. To be refactored later:
-              0: collects on each epoch only
-              1: collects on each training step
-              2: collects raw output activations (temporary until more nuanced way to control is added)
+            per_epoch: bool. Whether to collect per-epoch stats, or per-step otherwise.
+                By default, activity is collected per-step, and a 'steps' list is available
+                that tracks the display indices of each sample.
+                If per-epoch is set, then a `epochs` list is available instead, and activity
+                is averaged over the batches in the epoch.
         """
         super(ActivityHistoryCallback, self).__init__()
-        self.verbose = verbose
+        self.per_epoch = per_epoch
 
         # results variable creation
-        if verbose == 0:
+        if per_epoch:
             self.epochs = []
         else:
             self.steps = []  # maybe rename as 'iterations'
         self.model_stats = {}  # dict (by stat) of lists (by iteration)
         self.layer_stats = []  # list (by layer) of dicts (by stat) of lists (by iteration)
-        if verbose > 1:
-            self.activations_list = None
+        #if verbose > 1:
+        #    self.activations_list = None
 
         # internal tracking
         self._epoch = 0
@@ -602,19 +603,13 @@ class ActivityHistoryCallback(BaseGradientCallback):
     def layer_shapes(self):
         return self._layer_shapes
 
-    def on_train_begin(self):
-        """
-        Initialises tracking, now that we know the model and number of epochs and steps per epoch
-        """
-        # init stats
-        self.layer_stats = [{key: [] for key in self._stat_keys()} for _ in self.model.layers]
-        self._layer_names = [layer.name for layer in self.model.layers]
-
     def _init_on_first_update(self, activations):
         """
-        Finally initialises tracking, now that we have extra information needed.
+        Initialises tracking, now that we have anything we need.
         """
         if not hasattr(self, "_layer_channel_activity_sums"):
+            self.layer_stats = [{key: [] for key in self._stat_keys()} for _ in self.model.layers]
+            self._layer_names = [layer.name for layer in self.model.layers]
             self._layer_shapes = [activation.shape for activation in activations]
             self._steps_per_epoch = self.params['steps']
             self._channel_sizes = [activation.shape[-1] for activation in activations]
@@ -629,7 +624,7 @@ class ActivityHistoryCallback(BaseGradientCallback):
         Cleans up tracking, and converts everything to numpy arrays for easier consumption.
         """
         # convert everything to numpy for easier consumption
-        if hasattr(self, "epochs"):
+        if self.per_epoch:
             self.epochs = np.array(self.epochs)
         else:
             self.steps = np.array(self.steps)
@@ -655,7 +650,7 @@ class ActivityHistoryCallback(BaseGradientCallback):
         """
         # stats calculation across entire epoch, if configured
         # (uses partial stats that were accumulated across the steps in the batch)
-        if self.verbose == 0:
+        if self.per_epoch:
             self.epochs.append(self._epoch)
             epoch_layer_stats = [self._compute_channel_stats(channel_size, layer_active_sum, self._num_batches) for
                                  channel_size, layer_active_sum in
@@ -673,11 +668,11 @@ class ActivityHistoryCallback(BaseGradientCallback):
         self._init_on_first_update(activations)
 
         # accumulate activation data
-        accum = (self.verbose == 0)  # accum over steps in whole epoch, or otherwise just set per step
+        accum = self.per_epoch  # accum over steps in whole epoch, or otherwise just set per step
         self._collect_stats(activations, self._layer_channel_activity_sums, accum)
 
         # stats calculations for each step, if configured
-        if self.verbose >= 1:
+        if not self.per_epoch:
             # compute stats
             step_layer_stats = [self._compute_channel_stats(channel_size, layer_active_sum, 1) for
                                 channel_size, layer_active_sum in
@@ -733,7 +728,6 @@ class ActivityHistoryCallback(BaseGradientCallback):
         Currently static but may be computed based on configuration in the future.
         """
         return ['dead_rate', 'activation_rate']
-
 
 
 class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
