@@ -1018,13 +1018,49 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         # internal tracking
         self._epoch = 0
 
-    def on_train_begin(self):
+    def on_train_begin(self, logs=None):
         """
         Initialises tracking, now that we know the model etc.
         """
         # expand collection_sets
         if self.collection_sets:
             self.collection_sets = _normalize_collection_sets_for_variables(self.model, self.collection_sets)
+            self._collected_variable_indices = [index for collection_set in self.collection_sets
+                                                for index in collection_set['variable_indices']]
+
+            # TODO initialise list of variable storages across variables and iterations, like:
+            self.variables = [None, None, [], [], None, None]
+
+    def on_train_end(self, logs=None):
+        pass
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self._epoch = epoch
+        if not self.per_step and self.before_updates:
+            self.epochs.append(epoch)
+            self._collect_stats()
+
+    def on_epoch_end(self, epoch, logs=None):
+        if not self.per_step and not self.before_updates:
+            self.epochs.append(epoch)
+            self._collect_stats()
+
+    def on_train_batch_begin(self, batch, logs=None):
+        if self.per_step and self.before_updates:
+            self.steps.append(self.params['steps'] * self._epoch + batch)
+            self._collect_stats()
+
+    def on_train_batch_end(self, batch, loss=None):
+        if self.per_step and not self.before_updates:
+            self.steps.append(self.params['steps'] * self._epoch + batch)
+            self._collect_stats()
+
+    def _collect_stats(self):
+        # TODO complete
+        # TODO later on, do slicing
+        for var_idx, var_list in enumerate(self.variables):
+            state = self.model.variables[var_idx].copy()
+            var_list.append(state)
 
 
 def _log_normalize(arr, axis=None):
