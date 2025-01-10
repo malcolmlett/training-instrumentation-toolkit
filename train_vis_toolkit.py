@@ -797,6 +797,19 @@ class ActivityHistoryCallback(BaseGradientCallback):
         """
         return ['dead_rate', 'activation_rate']
 
+    def plot(self):
+        """
+        Alias for plot_summary().
+        Determines the default once there are multiple plot methods.
+        """
+        self.plot_summary()
+
+    def plot_summary(self):
+        """
+        Alias for calling tv.plot_unit_activity(activity_callback).
+        """
+        plot_unit_activity(self)
+
 
 class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
     """
@@ -951,10 +964,9 @@ class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
 
     def plot_summary(self):
         """
-        Plots a high-level summary of unit activity rates across the entire model
-        and across each layer.
+        Alias for calling tv.plot_unit_activity(activity_callback).
         """
-        plot_unit_activity_stats(self)
+        plot_unit_activity(self)
 
 
 def _log_normalize(arr, axis=None):
@@ -1147,6 +1159,9 @@ def plot_unit_activity(activity_callback):
     """
     Plots a high-level summary of unit activity rates across the entire model
     and across each layer.
+
+    Args:
+        activity_callback: instance of ActivityHistoryCollback or ActivityRateMeasuringCallback after training.
 
     Generated figure is of form:
     - top row (two columns):
