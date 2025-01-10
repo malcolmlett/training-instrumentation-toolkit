@@ -21,7 +21,7 @@ def variable_indices_by_layer_test():
     assert res == expected, f"include_trainable_only=False: expected {expected}, but got {res}"
 
     res = variable_indices_by_layer(model, include_trainable_only=True)
-    expected = [[0, 1], [2, 3], [4], [5, 6], [7, 8], [9], [10, 11], [12, 13, 14, 15], [16, 17], [18, 19]]
+    expected = [[0, 1], [2, 3], [], [5, 6], [7, 8], [], [10, 11], [12, 13], [16, 17], [18, 19]]
     assert res == expected, f"include_trainable_only=True: expected {expected}, but got {res}"
 
 
