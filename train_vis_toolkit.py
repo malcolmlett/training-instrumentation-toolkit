@@ -1157,6 +1157,7 @@ def plot_unit_activity(activity_callback):
     """
     # collect data
     iterations = activity_callback.epochs if hasattr(activity_callback, 'epochs') else activity_callback.steps
+    iteration_name = 'epoch' if hasattr(activity_callback, 'epochs') else 'step'
     num_layers = len(activity_callback.layer_stats)
     model_stats = activity_callback.model_stats
     layer_stats = activity_callback.layer_stats
@@ -1180,7 +1181,7 @@ def plot_unit_activity(activity_callback):
                      label='min/max range')
     plt.ylim([0.0, 1.1])
     plt.title("Unit activation rates across layers")
-    plt.xlabel('step')
+    plt.xlabel(iteration_name)
     plt.ylabel('fraction of units')
     plt.legend()
 
@@ -1190,7 +1191,7 @@ def plot_unit_activity(activity_callback):
                      color='tab:red', alpha=0.2, label='min/max range')
     plt.ylim([0.0, 1.1])
     plt.title("Dead unit rates across layers")
-    plt.xlabel('step')
+    plt.xlabel(iteration_name)
     plt.ylabel('fraction of units')
     plt.legend()
 
