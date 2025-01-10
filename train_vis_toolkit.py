@@ -14,6 +14,7 @@ class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
     Use as:
     >>> model.fit(...., verbose=0, callbacks=[LessVerboseProgressLogger()])
     """
+
     def __init__(self, display_interval=None, display_total=10):
         super(LessVerboseProgressLogger, self).__init__()
         self.display_interval = display_interval
@@ -34,7 +35,7 @@ class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
         self.epoch_start = tf.timestamp()
 
     def on_epoch_end(self, epoch, logs=None):
-        if self.display_interval == 0 or ((epoch + 1) % self.display_interval == 0) or epoch == self.epoch_count-1:
+        if self.display_interval == 0 or ((epoch + 1) % self.display_interval == 0) or epoch == self.epoch_count - 1:
             now = tf.timestamp()
             group_dur = now - self.group_start_time
             rate = group_dur / (epoch - self.group_start_epoch)
@@ -192,6 +193,7 @@ class BaseGradientCallback:
     layer activation information.
     This implementation does nothing, and is suitable for use as a no-op.
     """
+
     def __init__(self):
         self.params = None
         self._model = None
@@ -501,7 +503,7 @@ class GradientHistoryCallback(BaseGradientCallback):
         # - otherwise target a square grid of layer plots
         grid_width = max(4, round(math.sqrt(num_trainable_layers) / 2) * 2)  # nearest even number >= 4
         grid_height = 2 + math.ceil(num_trainable_layers / grid_width)
-        plt.figure(figsize=(13, 4 * grid_height/2), layout='constrained')
+        plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
 
         # all-model high-level summary
         plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
@@ -565,9 +567,28 @@ class ActivityHistoryCallback(BaseGradientCallback):
     > In other words, each physical unit with its unique set of weights is treated as a single atomic component
     > that is re-used multiple times across batch and spatial dims. Stats are then collected against that atomic
     > component in terms of how often it is active (non-zero output) vs inactive (zero output).
+
+    Properties:
+        model_stats: dict (by stat key) of np-array (by iteration) of statistics, eg:
+            {
+                'min_activation_rate': np.array() of float,   # one value for each epoch/step
+                'mean_activation_rate': np.array() of float,
+                'max_activation_rate': np.array() of float,
+                'min_dead_rate': np.array() of float,
+                'mean_dead_rate': np.array() of float,
+                'max_deade_rate': np.array() of float
+            }
+        layer_stats: list (by layer) of dicts (by stat key) of np-array (by iteration) of statistics, eg:
+            [{
+                'activation_rate': np.array() of float,   # one value for each epoch/step
+                'dead_rate': np.array() of float
+            }, ...]
+        layer_outputs: list (by layer) of list (by step/epoch) of layer output tensors.
+            Property is None if no layers being captured, otherwise each layer index is represented
+            by the top-level list, with each layer entry being None if that layer is not captured.
     """
 
-    def __init__(self, per_epoch=False):
+    def __init__(self, per_epoch=False, collection_sets=None):
         """
         Args:
             per_epoch: bool. Whether to collect per-epoch stats, or per-step otherwise.
@@ -575,19 +596,29 @@ class ActivityHistoryCallback(BaseGradientCallback):
                 that tracks the display indices of each sample.
                 If per-epoch is set, then a `epochs` list is available instead, and activity
                 is averaged over the batches in the epoch.
+
+            collection_sets: list of dicts. Requests that raw layer outputs are collected for certain layers.
+              Dicts of form (note: 'density' and 'slices' not yet supported):
+                {
+                  'layers': [Layer] - references to actual layers, OR
+                  'layer_indices': [int] - list of layer indices, OR
+                  'layer_names': [string] - list of layer names
+                  'density': float, default: 1.0 - fraction of units to collect outputs from, automatically sliced, OR
+                  'slices': [slice] - slices to use for each selected layer
+                }
         """
         super(ActivityHistoryCallback, self).__init__()
         self.per_epoch = per_epoch
+        self.collection_sets = collection_sets
 
         # results variable creation
         if per_epoch:
             self.epochs = []
         else:
             self.steps = []  # maybe rename as 'iterations'
-        self.model_stats = {}  # dict (by stat) of lists (by iteration)
-        self.layer_stats = []  # list (by layer) of dicts (by stat) of lists (by iteration)
-        #if verbose > 1:
-        #    self.activations_list = None
+        self.model_stats = {}  # initially dict (by stat) of lists (by iteration)
+        self.layer_stats = []  # initially list (by layer) of dicts (by stat) of lists (by iteration)
+        self.layer_outputs = None  # initially list (by layer) of list (by step/epoch) of layer output tensors
 
         # internal tracking
         self._epoch = 0
@@ -603,13 +634,40 @@ class ActivityHistoryCallback(BaseGradientCallback):
     def layer_shapes(self):
         return self._layer_shapes
 
+    def on_train_begin(self):
+        """
+        Validates configuration and partially expands it, now that we have access to the model.
+        """
+        self._layer_names = [layer.name for layer in self.model.layers]
+
+        # populate layer_indices based on layer_names if only layer_names provided
+        if self.collection_sets:
+            for collection_set in self.collection_sets:
+                # convert different ways of specifying layer into 'layer_indices'
+                # throws ValueError if any references not present in model layers
+                if collection_set.get('layers'):
+                    layer_indices = [self.model.layers.index(layer) for layer in collection_set['layers']]
+                    collection_set['layer_indices'] = layer_indices
+                elif collection_set.get('layer_names'):
+                    layer_indices = [self._layer_names.index(layer_name) for layer_name in
+                                     collection_set['layer_names']]
+                    collection_set['layer_indices'] = layer_indices
+
+                # handle other args
+                if collection_set.get('density') and collection_set['density'] != 1.0:
+                    raise ValueError("collection_sets.density not yet supported")
+                if collection_set.get('slices'):
+                    raise ValueError("collection_sets.slices not yet supported")
+
     def _init_on_first_update(self, activations):
         """
         Initialises tracking, now that we have anything we need.
+        Note that there seems to be some dynamism in determining the output shape
+        of a Layer object. So we're just better off deferring this logic until we
+        have actual values with certain shapes.
         """
         if not hasattr(self, "_layer_channel_activity_sums"):
             self.layer_stats = [{key: [] for key in self._stat_keys()} for _ in self.model.layers]
-            self._layer_names = [layer.name for layer in self.model.layers]
             self._layer_shapes = [activation.shape for activation in activations]
             self._steps_per_epoch = self.params['steps']
             self._channel_sizes = [activation.shape[-1] for activation in activations]
@@ -618,6 +676,11 @@ class ActivityHistoryCallback(BaseGradientCallback):
             self._num_batches = tf.cast(self._steps_per_epoch, dtype=tf.float32)
             self._layer_channel_activity_sums = [tf.Variable(tf.zeros(size, dtype=tf.float32))
                                                  for size in self._channel_sizes]  # by channel
+            if self.collection_sets:
+                def _is_layer_enabled(l_idx):
+                    return any(l_idx in collection_set['layer_indices'] for collection_set in self.collection_sets)
+                self.layer_outputs = [[] if _is_layer_enabled(l_idx) else None
+                                      for l_idx in range(len(self.model.layers))]
 
     def on_train_end(self):
         """
@@ -644,23 +707,6 @@ class ActivityHistoryCallback(BaseGradientCallback):
             for layer_channel_activity_sum in self._layer_channel_activity_sums:
                 layer_channel_activity_sum.assign(tf.zeros_like(layer_channel_activity_sum))
 
-    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations=None):
-        """
-        Collects gradient stats and raw gradients after each epoch, if configured.
-        """
-        # stats calculation across entire epoch, if configured
-        # (uses partial stats that were accumulated across the steps in the batch)
-        if self.per_epoch:
-            self.epochs.append(self._epoch)
-            epoch_layer_stats = [self._compute_channel_stats(channel_size, layer_active_sum, self._num_batches) for
-                                 channel_size, layer_active_sum in
-                                 zip(self._channel_sizes, self._layer_channel_activity_sums)]
-            epoch_model_stats = self._compute_model_stats(epoch_layer_stats)
-
-            self._append_dict_list(self.model_stats, epoch_model_stats)
-            for l_idx, stats in enumerate(epoch_layer_stats):
-                self._append_dict_list(self.layer_stats[l_idx], stats)
-
     def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations=None):
         """
         Accumulates activations from each step. Also emits stats, if configured.
@@ -673,17 +719,36 @@ class ActivityHistoryCallback(BaseGradientCallback):
 
         # stats calculations for each step, if configured
         if not self.per_epoch:
-            # compute stats
-            step_layer_stats = [self._compute_channel_stats(channel_size, layer_active_sum, 1) for
-                                channel_size, layer_active_sum in
-                                zip(self._channel_sizes, self._layer_channel_activity_sums)]
-            step_model_stats = self._compute_model_stats(step_layer_stats)
-
-            # emit for results
             self.steps.append(self.params['steps'] * self._epoch + batch)
-            self._append_dict_list(self.model_stats, step_model_stats)
-            for l_idx, stats in enumerate(step_layer_stats):
-                self._append_dict_list(self.layer_stats[l_idx], stats)
+            self._emit_stats(activations, 1)
+
+    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations=None):
+        """
+        Collects gradient stats and raw gradients after each epoch, if configured.
+        """
+        # stats calculation across entire epoch, if configured
+        # (uses partial stats that were accumulated across the steps in the batch)
+        if self.per_epoch:
+            self.epochs.append(self._epoch)
+            self._emit_stats(activations, self._num_batches)
+
+    def _emit_stats(self, activations, num_batches):
+        # compute stats
+        iteration_layer_stats = [self._compute_channel_stats(channel_size, layer_active_sum, num_batches) for
+                                 channel_size, layer_active_sum in
+                                 zip(self._channel_sizes, self._layer_channel_activity_sums)]
+        iteration_model_stats = self._compute_model_stats(iteration_layer_stats)
+
+        # emit for results
+        self._append_dict_list(self.model_stats, iteration_model_stats)
+        for l_idx, stats in enumerate(iteration_layer_stats):
+            self._append_dict_list(self.layer_stats[l_idx], stats)
+
+        # collect activations
+        if self.layer_outputs:
+            for l_idx, activation in enumerate(activations):
+                if self.layer_outputs[l_idx] is not None:
+                    self.layer_outputs[l_idx].append(activation)
 
     # auto-graphed for faster iteration over layer outputs
     @tf.function
@@ -696,6 +761,7 @@ class ActivityHistoryCallback(BaseGradientCallback):
             else:
                 layer_channel_activity_sums_arg[l_idx].assign(active_counts_by_channel)
 
+    # TODO consider wrapping in @tf.function to speed up the loop
     @staticmethod
     def _compute_channel_stats(channel_size, layer_active_sum, num_batches):
         active_rates = layer_active_sum / num_batches
@@ -705,6 +771,7 @@ class ActivityHistoryCallback(BaseGradientCallback):
             'activation_rate': tf.reduce_mean(active_rates).numpy()
         }
 
+    # TODO consider doing this at end once have already converted these values to numpy(). Will be faster.
     @staticmethod
     def _compute_model_stats(layer_stats_list):
         dic = {}
@@ -828,7 +895,7 @@ class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
 
     def on_epoch_end(self, epoch, logs=None):
         # every interval and definitely on last epoch
-        if epoch % self.interval == 0 or epoch == (self.params['epochs']-1):
+        if epoch % self.interval == 0 or epoch == (self.params['epochs'] - 1):
             # compute for this epoch
             epoch_model_stats, epoch_layer_stats = measure_unit_activity(self._monitoring_model, self._dataset,
                                                                          extract_layers=False)
@@ -888,6 +955,7 @@ class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
         """
         plot_unit_activity_stats(self)
 
+
 def _log_normalize(arr, axis=None):
     """
     Normalises all values in the array or along the given axis so that they sum to 1.0,
@@ -909,7 +977,7 @@ def _log_normalize(arr, axis=None):
     # - result: orders-of-magnitude numbers in range -inf..+inf (eg: -4 to +4)
     # - avoid runtime warning about zeros
     arr = arr.copy()
-    arr[mask] = 1.0   # dummy value to avoid warnings from np.log(), will be discarded
+    arr[mask] = 1.0  # dummy value to avoid warnings from np.log(), will be discarded
     scaled = np.log(arr)
 
     # move everything into positive
@@ -993,9 +1061,11 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
     channel_sizes = [shape[-1] for shape in monitoring_model.output_shape]
     spatial_dims = [shape[1:-1] if len(shape) > 2 else () for shape in monitoring_model.output_shape]
     num_batches = tf.cast(dataset.cardinality(), dtype=tf.float32)
-    layer_channel_activity_sums = [tf.Variable(tf.zeros(size, dtype=tf.float32)) for size in channel_sizes]  # by channel
+    layer_channel_activity_sums = [tf.Variable(tf.zeros(size, dtype=tf.float32)) for size in
+                                   channel_sizes]  # by channel
     if include_spatial_activity:
-        layer_spatial_activity_sums = [tf.Variable(tf.zeros(shape, dtype=tf.float32)) for shape in spatial_dims]  # by spatial dims
+        layer_spatial_activity_sums = [tf.Variable(tf.zeros(shape, dtype=tf.float32)) for shape in
+                                       spatial_dims]  # by spatial dims
     else:
         layer_spatial_activity_sums = None
 
@@ -1208,12 +1278,12 @@ def plot_channel_stats(layer_channel_activity, model=None):
             text_col = 'tab:orange'
         elif dead_rate == 1.0:
             text_col = 'tab:red'
-        plt.text(0.5, plot_height*0.5,
+        plt.text(0.5, plot_height * 0.5,
                  f"{len_active_rate} channels\n"
-                 f"mean {mean_active_rate*100:.1f}%\n"
-                 f"min {min_active_rate*100:.1f}%\n"
-                 f"max {max_active_rate*100:.1f}%\n"
-                 f"dead {dead_rate*100:.1f}%",
+                 f"mean {mean_active_rate * 100:.1f}%\n"
+                 f"min {min_active_rate * 100:.1f}%\n"
+                 f"max {max_active_rate * 100:.1f}%\n"
+                 f"dead {dead_rate * 100:.1f}%",
                  color=text_col, horizontalalignment='center', verticalalignment='center')
     plt.show()
 
@@ -1256,7 +1326,8 @@ def plot_spatial_stats(layer_spatial_activity, model=None):
         mean_active_rate = np.mean(activation_rates)
         min_active_rate = np.min(activation_rates)
         max_active_rate = np.max(activation_rates)
-        plot_shape = (activation_rates.shape[0]-1,activation_rates.shape[1]-1) if tf.rank(activation_rates) >= 2 else (1, 1)
+        plot_shape = (activation_rates.shape[0] - 1, activation_rates.shape[1] - 1) if tf.rank(
+            activation_rates) >= 2 else (1, 1)
 
         # top plot
         plt.subplot2grid((grid_height, grid_width), (r, c))
@@ -1267,10 +1338,10 @@ def plot_spatial_stats(layer_spatial_activity, model=None):
             plt.ylabel('activations')
         if tf.rank(activation_rates) >= 2:
             plt.imshow(activation_rates, vmin=0.0)
-        plt.text(plot_shape[1]*0.5, plot_shape[0]*0.5,
-                 f"mean {mean_active_rate*100:.1f}%\n"
-                 f"min {min_active_rate*100:.1f}%\n"
-                 f"max {max_active_rate*100:.1f}%",
+        plt.text(plot_shape[1] * 0.5, plot_shape[0] * 0.5,
+                 f"mean {mean_active_rate * 100:.1f}%\n"
+                 f"min {min_active_rate * 100:.1f}%\n"
+                 f"max {max_active_rate * 100:.1f}%",
                  horizontalalignment='center', verticalalignment='center')
 
         # bottom plot
@@ -1286,9 +1357,7 @@ def plot_spatial_stats(layer_spatial_activity, model=None):
             text_col = 'tab:orange'
         elif dead_rate == 1.0:
             text_col = 'tab:red'
-        plt.text(plot_shape[1]*0.5, plot_shape[0]*0.5,
-                 f"dead rate\n{dead_rate*100:.1f}%",
+        plt.text(plot_shape[1] * 0.5, plot_shape[0] * 0.5,
+                 f"dead rate\n{dead_rate * 100:.1f}%",
                  color=text_col, horizontalalignment='center', verticalalignment='center')
     plt.show()
-
-
