@@ -588,14 +588,15 @@ class ActivityHistoryCallback(BaseGradientCallback):
             by the top-level list, with each layer entry being None if that layer is not captured.
     """
 
-    def __init__(self, per_epoch=False, collection_sets=None):
+    def __init__(self, per_step=False, collection_sets=None):
         """
         Args:
-            per_epoch: bool. Whether to collect per-epoch stats, or per-step otherwise.
-                By default, activity is collected per-step, and a 'steps' list is available
+            per_step: bool. Whether to collect per-step stats, or per-epoch otherwise.
+                By default, activity is accumulated per-epoch, and an 'epochs' list is available
                 that tracks the display indices of each sample.
-                If per-epoch is set, then a `epochs` list is available instead, and activity
-                is averaged over the batches in the epoch.
+                If per-step is set, then a `steps` list is available instead, and activity
+                is collected on each update step.
+                The same applies to layer output capture if enabled.
 
             collection_sets: list of dicts. Requests that raw layer outputs are collected for certain layers.
               Dicts of form (note: 'density' and 'slices' not yet supported):
@@ -608,14 +609,14 @@ class ActivityHistoryCallback(BaseGradientCallback):
                 }
         """
         super(ActivityHistoryCallback, self).__init__()
-        self.per_epoch = per_epoch
+        self.per_step = per_step
         self.collection_sets = collection_sets
 
         # results variable creation
-        if per_epoch:
-            self.epochs = []
+        if per_step:
+            self.steps = []
         else:
-            self.steps = []  # maybe rename as 'iterations'
+            self.epochs = []
         self.model_stats = {}  # initially dict (by stat) of lists (by iteration)
         self.layer_stats = []  # initially list (by layer) of dicts (by stat) of lists (by iteration)
         self.layer_outputs = None  # initially list (by layer) of list (by step/epoch) of layer output tensors
@@ -687,10 +688,10 @@ class ActivityHistoryCallback(BaseGradientCallback):
         Cleans up tracking, and converts everything to numpy arrays for easier consumption.
         """
         # convert everything to numpy for easier consumption
-        if self.per_epoch:
-            self.epochs = np.array(self.epochs)
-        else:
+        if self.per_step:
             self.steps = np.array(self.steps)
+        else:
+            self.epochs = np.array(self.epochs)
         for key in self.model_stats.keys():
             self.model_stats[key] = np.array(self.model_stats[key])
         for l_idx in range(len(self.layer_stats)):
@@ -714,11 +715,11 @@ class ActivityHistoryCallback(BaseGradientCallback):
         self._init_on_first_update(activations)
 
         # accumulate activation data
-        accum = self.per_epoch  # accum over steps in whole epoch, or otherwise just set per step
+        accum = (not self.per_step)  # accum over steps in whole epoch, or otherwise just set per step
         self._collect_stats(activations, self._layer_channel_activity_sums, accum)
 
         # stats calculations for each step, if configured
-        if not self.per_epoch:
+        if self.per_step:
             self.steps.append(self.params['steps'] * self._epoch + batch)
             self._emit_stats(activations, 1)
 
@@ -728,7 +729,7 @@ class ActivityHistoryCallback(BaseGradientCallback):
         """
         # stats calculation across entire epoch, if configured
         # (uses partial stats that were accumulated across the steps in the batch)
-        if self.per_epoch:
+        if not self.per_step:
             self.epochs.append(self._epoch)
             self._emit_stats(activations, self._num_batches)
 
