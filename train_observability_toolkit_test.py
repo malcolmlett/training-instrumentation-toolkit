@@ -55,23 +55,27 @@ def _normalize_collection_sets_for_layers_test():
 
     # multiple closed collection sets
     res = _normalize_collection_sets_for_layers(model, [
-        {'layer_indices': [0, 1]},
+        {'layer_indices': [0, 3]},
         {'layers': [model.layers[1], model.layers[4]]},
         {'layer_names': [model.layers[2].name, model.layers[5].name]}])
     expected = [
-        {'layer_indices': [0, 1]},
-        {'layers': [model.layers[1], model.layers[4]], 'layer_indices': [2, 3, 7, 8]},
-        {'layer_names': [model.layers[2].name, model.layers[5].name], 'layer_indices': [4, 9]}]
+        {'layer_indices': [0, 3]},
+        {'layers': [model.layers[1], model.layers[4]], 'layer_indices': [1, 4]},
+        {'layer_names': [model.layers[2].name, model.layers[5].name], 'layer_indices': [2, 5]}]
     assert res == expected, f"Translates across multiple collection sets: expected {expected}, but got {res}"
 
     # open-ended collection sets
-    res = _normalize_collection_sets_for_variables(model, [{}])
-    expected = [{'layer_indices': [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]}]
-    assert res == expected, f"Expands single all-layers collection set: expected {expected}, but got {res}"
+    res = _normalize_collection_sets_for_layers(model, [{}])
+    expected = [{'layer_indices': [0, 1, 3, 4, 6, 7, 8, 9]}]
+    assert res == expected, f"Expands single all-layers collection set with all trainable layers: expected {expected}, but got {res}"
 
-    res = _normalize_collection_sets_for_variables(model, [{'layer_indices': [2, 3, 4]}, {}])
+    res = _normalize_collection_sets_for_layers(model, [{'include_non_trainable': True}])
+    expected = [{'include_non_trainable': True, 'layer_indices': [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]}]
+    assert res == expected, f"Expands single all-layers collection set with all layers: expected {expected}, but got {res}"
+
+    res = _normalize_collection_sets_for_layers(model, [{'layer_indices': [2, 3, 4]}, {}])
     expected = [{'layer_indices': [2, 3, 4]},
-                {'variable_indices': [0, 1, 5, 6, 7, 8, 9]}]
+                {'layer_indices': [0, 1, 6, 7, 8, 9]}]
     assert res == expected, f"Expands open-ended collection set with remaining layers: expected {expected}, but got {res}"
 
     # error conditions
@@ -130,7 +134,7 @@ def _normalize_collection_sets_for_variables_test():
 
     # open-ended collection sets
     res = _normalize_collection_sets_for_variables(model, [{}])
-    expected = [{'layer_indices': [0, 1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 13, 16, 17, 18, 19]}]
+    expected = [{'variable_indices': [0, 1, 2, 3, 5, 6, 7, 8, 10, 11, 12, 13, 16, 17, 18, 19]}]
     assert res == expected, f"Expands single all-variables collection set with all trainable variables: " \
                             f"expected {expected}, but got {res}"
 
@@ -146,7 +150,7 @@ def _normalize_collection_sets_for_variables_test():
         {'include_non_trainable': True}])
     expected = [
         {'variable_indices': [2, 3, 4]},
-        {'variable_indices': [0, 1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}]
+        {'include_non_trainable': True, 'variable_indices': [0, 1, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]}]
     assert res == expected, f"Expands open-ended collection set with all remaining variables: " \
                             f"expected {expected}, but got {res}"
 
