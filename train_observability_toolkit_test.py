@@ -1,0 +1,51 @@
+import tensorflow as tf
+from train_observability_toolkit import *
+from train_observability_toolkit import _normalize_collection_sets_for_layers
+
+
+def run_test_suite():
+    variable_indices_by_layer_test()
+    trainable_variable_indices_by_layer_test()
+    print("All train_observability_toolkit tests passed.")
+
+
+def variable_indices_by_layer_test():
+    model = _create_test_model()
+
+    res = variable_indices_by_layer(model)
+    expected = [[0, 1], [2, 3], [4], [5, 6], [7, 8], [9], [10, 11], [12, 13, 14, 15], [16, 17], [18, 19]]
+    assert res == expected, f"include_trainable_only=Default: expected {expected}, but got {res}"
+
+    res = variable_indices_by_layer(model, include_trainable_only=False)
+    expected = [[0, 1], [2, 3], [4], [5, 6], [7, 8], [9], [10, 11], [12, 13, 14, 15], [16, 17], [18, 19]]
+    assert res == expected, f"include_trainable_only=False: expected {expected}, but got {res}"
+
+    res = variable_indices_by_layer(model, include_trainable_only=True)
+    expected = [[0, 1], [2, 3], [4], [5, 6], [7, 8], [9], [10, 11], [12, 13, 14, 15], [16, 17], [18, 19]]
+    assert res == expected, f"include_trainable_only=True: expected {expected}, but got {res}"
+
+
+def trainable_variable_indices_by_layer_test():
+    model = _create_test_model()
+
+    res = trainable_variable_indices_by_layer(model)
+    expected = [[0, 1], [2, 3], [], [4, 5], [6, 7], [], [8, 9], [10, 11], [12, 13], [14, 15]]
+    assert res == expected, f"Expected {expected}, but got {res}"
+
+
+def _create_test_model():
+    # 20 variables total, 16 trainable
+    model = tf.keras.Sequential([
+        tf.keras.layers.Input(shape=(2,)),              # omitted from layers
+        tf.keras.layers.Dense(100, activation='relu'),  # 2 trainable vars
+        tf.keras.layers.Dense(100, activation='relu'),  # 2 trainable vars
+        tf.keras.layers.Dropout(rate=0.2),              # 1 non-trainable var
+        tf.keras.layers.Dense(100, activation='relu'),  # 2 trainable vars
+        tf.keras.layers.Dense(100, activation='relu'),  # 2 trainable vars
+        tf.keras.layers.Dropout(rate=0.2),              # 1 non-trainable var
+        tf.keras.layers.Dense(100, activation='relu'),  # 2 trainable vars
+        tf.keras.layers.BatchNormalization(),           # 2 trainable vars + 2 non-trainable vars
+        tf.keras.layers.Dense(5, activation='relu'),    # 2 trainable vars
+        tf.keras.layers.Dense(1, activation='sigmoid')  # 2 trainable vars
+    ])
+    return model
