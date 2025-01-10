@@ -592,11 +592,15 @@ class ActivityHistoryCallback(BaseGradientCallback):
         self._epoch = 0
         self._variable_indices_by_layer = None
         self._layer_names = None
-        self._monitoring_model = None
+        self._layer_shapes = None
 
     @property
     def layer_names(self):
         return self._layer_names
+
+    @property
+    def layer_shapes(self):
+        return self._layer_shapes
 
     def on_train_begin(self):
         """
@@ -606,15 +610,12 @@ class ActivityHistoryCallback(BaseGradientCallback):
         self.layer_stats = [{key: [] for key in self._stat_keys()} for _ in self.model.layers]
         self._layer_names = [layer.name for layer in self.model.layers]
 
-        # only to support plot_unit_activations() function
-        self._monitoring_model = tf.keras.Model(inputs=self.model.inputs,
-                                                outputs=[layer.output for layer in self.model.layers])
-
     def _init_on_first_update(self, activations):
         """
         Finally initialises tracking, now that we have extra information needed.
         """
         if not hasattr(self, "_layer_channel_activity_sums"):
+            self._layer_shapes = [activation.shape for activation in activations]
             self._steps_per_epoch = self.params['steps']
             self._channel_sizes = [activation.shape[-1] for activation in activations]
             self._spatial_dims = [activation.shape[1:-1] if len(activation.shape) > 2 else ()
@@ -673,7 +674,7 @@ class ActivityHistoryCallback(BaseGradientCallback):
 
         # accumulate activation data
         accum = (self.verbose == 0)  # accum over steps in whole epoch, or otherwise just set per step
-        self._collect_stats_inner(activations, self._layer_channel_activity_sums, accum)
+        self._collect_stats(activations, self._layer_channel_activity_sums, accum)
 
         # stats calculations for each step, if configured
         if self.verbose >= 1:
@@ -689,17 +690,16 @@ class ActivityHistoryCallback(BaseGradientCallback):
             for l_idx, stats in enumerate(step_layer_stats):
                 self._append_dict_list(self.layer_stats[l_idx], stats)
 
-    # @tf.function -- TODO add (improved speed in other version)
-    @staticmethod
-    def _collect_stats_inner(layer_outputs, layer_channel_activity_sums_arg, accum):
+    # auto-graphed for faster iteration over layer outputs
+    @tf.function
+    def _collect_stats(self, layer_outputs, layer_channel_activity_sums_arg, accum):
         for l_idx, layer_output in enumerate(layer_outputs):
             active_outputs = tf.cast(tf.not_equal(layer_output, 0.0), tf.float32)
             active_counts_by_channel = tf.reduce_mean(active_outputs, axis=tf.range(tf.rank(active_outputs) - 1))
             if accum:
-              layer_channel_activity_sums_arg[l_idx].assign_add(active_counts_by_channel)
+                layer_channel_activity_sums_arg[l_idx].assign_add(active_counts_by_channel)
             else:
-              layer_channel_activity_sums_arg[l_idx].assign(active_counts_by_channel)
-        return layer_channel_activity_sums_arg  # TODO remove if can
+                layer_channel_activity_sums_arg[l_idx].assign(active_counts_by_channel)
 
     @staticmethod
     def _compute_channel_stats(channel_size, layer_active_sum, num_batches):
@@ -762,7 +762,7 @@ class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
             batch_size: int
                 Must be supplied in order to apply to dataset if not already batched.
         """
-        super(ActivityRateCallback, self).__init__(**kwargs)
+        super(ActivityRateMeasuringCallback, self).__init__(**kwargs)
         self.x = x
         self.interval = interval
         self.batch_size = batch_size
@@ -780,6 +780,10 @@ class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
     @property
     def layer_names(self):
         return self._layer_names
+
+    @property
+    def layer_shapes(self):
+        return self._monitoring_model.output_shape
 
     def on_train_begin(self, logs=None):
         """
@@ -1093,8 +1097,7 @@ def plot_unit_activity(activity_callback):
     layer_stats = activity_callback.layer_stats
     layer_names = activity_callback.layer_names
     model = activity_callback.model
-    monitoring_model = activity_callback._monitoring_model
-    channel_sizes = [shape[-1] for shape in monitoring_model.output_shape]
+    channel_sizes = [shape[-1] for shape in activity_callback.layer_shapes]
 
     # start figure
     # - at least 4 layer plots wide
