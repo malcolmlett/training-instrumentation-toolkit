@@ -327,13 +327,44 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             self.epochs = []
         self.model_stats = {}  # dict (by stat) of lists (by iteration)
         self.layer_stats = []  # list (by layer) of dicts (by stat) of lists (by iteration)
-        self._variables = None
+        self.variable_stats = []  # list (by variable) of dicts (by stat) of lists (by iteration)
+        self._variable_values = None
 
         # internal tracking
         self._epoch = 0
-        self._collected_variable_indices = None  # TODO rename to clarify as applying to stats or raw variables
-        self._variable_indices_by_layer = None  # TODO remove
-        self._collected_variable_indices_by_layer = None  # TODO rename to clarify as applying to stats or raw variables
+        self._filtered_stats_variable_indices_by_layer = None
+        self._filtered_stats_variable_indices = None
+        self._filtered_value_variable_indices = None
+
+    @property
+    def collected_layer_stats(self):
+        """
+        Gets stats against each layer, omitting any layers that have no collected stats.
+        Use collected_layer_indices() or collected_layer_names() to identify which layers are included.
+        """
+        return [stats for stats in self.layer_stats if stats is not None]
+
+    @property
+    def collected_layer_indices(self):
+        """
+        Indices of layers as returned by collected_layer_stats()
+        """
+        return [idx for idx, stats in enumerate(self.layer_stats) if stats is not None]
+
+    @property
+    def collected_layer_names(self):
+        """
+        Names of layers as returned by collected_layer_stats()
+        """
+        layer_names = [layer.name for layer in self.model.layers]
+        return [layer_names[idx] for idx in self.collected_layer_indices]
+
+    @property
+    def collected_layer_stats_variable_indices_by_layer(self):
+        """
+        Sets of variable indices of variables that make up the results of collected_layer_stats()
+        """
+        return self._filtered_stats_variable_indices_by_layer
 
     @property
     def variables(self):
@@ -347,30 +378,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             list (by model.variable) of list (by step/epoch) of variable tensors.
             None if variable capturing not enabled.
         """
-        return self._variables
-
-    @property
-    def collected_layer_stats(self):
-        """
-        Gets stats against each layer, omitting any layers that have no collected stats.
-        Use collected_layer_indices() or collected_layer_names() to identify which layers are included.
-        """
-        return [stats for stats in self.layer_stats if stats is not None]
-
-    @property
-    def collected_layer_indices(self):
-        """
-        Indices of layers as returned by layer_stats()
-        """
-        return [idx for idx, stats in enumerate(self.layer_stats) if stats is not None]
-
-    @property
-    def collected_layer_names(self):
-        """
-        Names of layers as returned by layer_stats()
-        """
-        layer_names = [layer.name for layer in self.model.layers]
-        return [layer_names[idx] for idx in self.collected_layer_indices]
+        return self._variable_values
 
     @property
     def collected_variables(self):
@@ -383,8 +391,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             list (by captured variable) of list (by step/epoch) of variable tensors.
             None if variable capturing not enabled.
         """
-        if self.variables is not None:
-            return [var_list for var_list in self._variables if var_list is not None]
+        if self._variable_values is not None:
+            return [var_list for var_list in self._variable_values if var_list is not None]
         else:
             return None
 
@@ -394,54 +402,46 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         Gets the indices of variables returned by collected_variables() as they
         were on the original model and returned by model.variables.
         """
-        if self._collected_variable_indices is not None:
-            return self._collected_variable_indices
+        if self._filtered_value_variable_indices is not None:
+            return self._filtered_value_variable_indices
         else:
             return None
-
-    @property
-    def variable_indices_by_layer(self):
-        """
-        Indices exactly as used by this class.
-        """
-        return self._variable_indices_by_layer
-
-    def collected_variable_indices_by_layer(self):
-        """
-        Indices exactly as used by this class.
-        """
-        return self._variable_indices_by_layer
 
     def on_train_begin(self, logs=None):
         """
         Initialises tracking, now that we know the model etc.
         """
         # pre-compute lookups
-        self._variable_indices_by_layer = variable_indices_by_layer(
-            self.model, include_trainable_only=False)
-        self._collected_variable_indices_by_layer = variable_indices_by_layer(
+        self._filtered_stats_variable_indices_by_layer = variable_indices_by_layer(
             self.model, include_trainable_only=self.trainable_only)
+        stats_variables = self.model.trainable_variables if self.trainable_only else self.model.variables
+        self._filtered_stats_variable_indices = [_index_by_identity(self.model.variables, var)
+                                                 for var in stats_variables]
 
         # init stats
-        self.model_stats = {key: [] for key in _compute_common_stats_keys()}
+        stats_keys = _compute_common_stats_keys()
+        self.model_stats = {key: [] for key in stats_keys}
+        self.variable_stats = [{key: [] for key in stats_keys} if var_idx in self._filtered_stats_variable_indices
+                               else None for var_idx in range(len(self.model.variables))]
         for layer in self.model.layers:
             if self.trainable_only and layer.trainable_variables:
-                self.layer_stats.append({key: [] for key in _compute_common_stats_keys()})
+                self.layer_stats.append({key: [] for key in stats_keys})
             elif not self.trainable_only and layer.variables:
-                self.layer_stats.append({key: [] for key in _compute_common_stats_keys()})
+                self.layer_stats.append({key: [] for key in stats_keys})
             else:
                 self.layer_stats.append(None)
 
         # expand collection_sets
         if self.collection_sets:
             self.collection_sets = _normalize_collection_sets_for_variables(self.model, self.collection_sets)
-            self._collected_variable_indices = [index for collection_set in self.collection_sets
-                                                for index in collection_set['variable_indices']]
+            self._filtered_value_variable_indices = [index for collection_set in self.collection_sets
+                                                     for index in collection_set['variable_indices']]
 
-            # initialise list of variable storages across variables and iterations
-            # (TODO also prepare slicing rules)
-            self._variables = [[] if var_idx in self._collected_variable_indices else None
-                               for var_idx in range(len(self.model.variables))]
+        # initialise list of variable storages across variables and iterations
+        # (TODO also prepare slicing rules)
+        if self.collection_sets:
+            self._variable_values = [[] if var_idx in self._filtered_value_variable_indices else None
+                                     for var_idx in range(len(self.model.variables))]
 
     def on_train_end(self, logs=None):
         """
@@ -459,6 +459,10 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             if self.layer_stats[l_idx] is not None:
                 for key in self.layer_stats[l_idx].keys():
                     self.layer_stats[l_idx][key] = np.array(self.layer_stats[l_idx][key])
+        for var_idx in range(len(self.variable_stats)):
+            if self.variable_stats[var_idx] is not None:
+                for key in self.variable_stats[var_idx].keys():
+                    self.variable_stats[var_idx][key] = np.array(self.variable_stats[var_idx][key])
 
     def on_epoch_begin(self, epoch, logs=None):
         self._epoch = epoch
@@ -486,20 +490,26 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             self._collect_raw_values()
 
     def _collect_stats(self):
-        # stats across all model variables as one big bucket
+        # collect stats across all model variables as one big bucket
         model_variables = self.model.trainable_variables if self.trainable_only else self.model.variables
         _append_dict_list(self.model_stats, _compute_common_stats(model_variables))
 
-        # compute stats across the variables (eg: weights + biases) for each layer as a group
+        # compute stats across the variables for each layer as a group
         for l_idx, layer in enumerate(self.model.layers):
-            var_indices = self._collected_variable_indices_by_layer[l_idx]
+            var_indices = self._filtered_stats_variable_indices_by_layer[l_idx]
             layer_variables = [self.model.variables[i] for i in var_indices]
             if layer_variables:
                 _append_dict_list(self.layer_stats[l_idx], _compute_common_stats(layer_variables))
 
+        # compute stats for each individual variable
+        for var_idx, stat_list in enumerate(self.variable_stats):
+            if stat_list is not None:
+                variables = [self.model.variables[var_idx]]  # _compute_common_stats() needs a list
+                _append_dict_list(stat_list, _compute_common_stats(variables))
+
     def _collect_raw_values(self):
         # TODO do slicing
-        for var_idx, var_list in enumerate(self._variables):
+        for var_idx, var_list in enumerate(self._variable_values):
             if var_list is not None:
                 state = tf.identity(self.model.variables[var_idx])  # get copy of current state
                 var_list.append(state)
