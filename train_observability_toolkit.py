@@ -5,6 +5,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import tqdm
 
+# tip: to get output shape of a layer:
+#  model.layers[l].compute_output_shape(model.layers[l].input.shape)
+
 
 class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
     """
@@ -531,10 +534,11 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
 
     def _collect_raw_values(self):
         # TODO do slicing
-        for var_idx, var_list in enumerate(self._variable_values):
-            if var_list is not None:
-                state = tf.identity(self.model.variables[var_idx])  # get copy of current state
-                var_list.append(state)
+        if self._variable_values:
+            for var_idx, var_list in enumerate(self._variable_values):
+                if var_list is not None:
+                    state = tf.identity(self.model.variables[var_idx])  # get copy of current state
+                    var_list.append(state)
 
 
 # TODO add explicit properties for epochs, steps, model_stats, layer_stats
@@ -1251,6 +1255,36 @@ def trainable_variable_indices_by_layer(model: tf.keras.Model):
             for layer in model.layers]
 
 
+def layer_indices_by_variable(model):
+    """
+    Reverses variable_indices_by_layer(), providing a lookup from variable index to layer index.
+    Params:
+        model: a model
+    Returns:
+        list (by variable index) of the layer to which the variable belongs relative to model.layers
+    """
+    lookup = [None] * len(model.variables)
+    for l_idx, var_indices in enumerate(variable_indices_by_layer(model, include_trainable_only=False)):
+        for v_idx in var_indices:
+            lookup[v_idx] = l_idx
+    return lookup
+
+
+def layer_indices_by_trainable_variable(model):
+    """
+    Reverses trainable_variable_indices_by_layer(), providing a lookup from trainable variable index to layer index.
+    Params:
+        model: a model
+    Returns:
+        list (by trainable variable index) of the layer to which the variable belongs relative to model.layers
+    """
+    lookup = [None] * len(model.trainable_variables)
+    for l_idx, var_indices in enumerate(trainable_variable_indices_by_layer(model)):
+        for v_idx in var_indices:
+            lookup[v_idx] = l_idx
+    return lookup
+
+
 def _index_by_identity(lst, target):
     """
     Some classes override the equals() method s.t. you can't simply
@@ -1644,18 +1678,15 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
     return res
 
 
-def plot_variable_history(variable_callback: VariableHistoryCallback, group_by_layer=True):
+def plot_variable_history(variable_callback: VariableHistoryCallback, group_by_layer=False):
     """
     Generates a figure containing a number of plots to visualise variable stats
     from a VariableHistoryCallback object.
 
     Args:
         variable_callback: callback populated with variable stats from training.
-
-        group_by_layer: whether to group stats by layer, or show for individual variables
+        group_by_layer: whether to group stats by layer, or show for individual variables (default)
     """
-    if not group_by_layer:
-        raise ValueError("group_by_layer=False not yet supported")
 
     # collect data
     iterations = variable_callback.epochs if hasattr(variable_callback, 'epochs') else variable_callback.steps
@@ -1663,16 +1694,34 @@ def plot_variable_history(variable_callback: VariableHistoryCallback, group_by_l
     trainable_only = variable_callback.trainable_only
     magnitudes = variable_callback.magnitudes
     model_stats = variable_callback.model_stats
-    layer_ids = variable_callback.collected_layer_indices
-    layer_names = variable_callback.collected_layer_names
-    layer_stats = variable_callback.collected_layer_stats
-    num_trainable_layers = len(layer_stats)
+
+    if group_by_layer:
+        value_stats = variable_callback.collected_layer_stats
+        layer_ids = variable_callback.collected_layer_indices
+        layer_names = variable_callback.collected_layer_names
+        num_value_stats = len(value_stats)
+        value_display_names = [f"{layer_names[l_idx]} (#{layer_ids[l_idx]})" for l_idx in range(num_value_stats)]
+        variable_shapes = None
+    else:
+        model = variable_callback.model
+        value_stats = variable_callback.collected_variable_stats
+        variable_ids = variable_callback.collected_variable_stats_indices
+        num_value_stats = len(value_stats)
+        layer_id_lookup = layer_indices_by_variable(model)
+        variable_shapes = [model.variables[v_idx].shape for v_idx in variable_ids]
+
+        value_display_names = []
+        for v_idx in variable_ids:
+            layer_id = layer_id_lookup[v_idx]
+            layer_name = model.layers[layer_id].name
+            variable_name = model.variables[v_idx].name
+            value_display_names.append(f"{layer_name}(#{layer_id})/{variable_name}")
 
     # start figure
     # - at least 4 layer plots wide
     # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_trainable_layers) / 2) * 2)  # nearest even number >= 4
-    grid_height = 2 + math.ceil(num_trainable_layers / grid_width)
+    grid_width = max(4, round(math.sqrt(num_value_stats) / 2) * 2)  # nearest even number >= 4
+    grid_height = 2 + math.ceil(num_value_stats / grid_width)
     plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
 
     # all-model high-level summary
@@ -1688,24 +1737,33 @@ def plot_variable_history(variable_callback: VariableHistoryCallback, group_by_l
     plt.yscale('log' if magnitudes else 'linear')
     plt.xlabel(iteration_name)
     plt.ylabel('magnitudes' if magnitudes else 'value')
-    plt.title('All model trainable variables' if trainable_only else 'All model variables (incl. non-trainable)')
+    plt.title(('All model trainable variables' if trainable_only else 'All model variables (incl. non-trainable)') +
+      ('\n(before updates)' if 'before_updates' else '\n(after updates)'))
     plt.legend()
 
-    # individual layers
-    for l_idx in range(num_trainable_layers):
-        r = 2 + l_idx // grid_width
-        c = l_idx % grid_width
+    # individual layers or variables
+    for v_idx in range(num_value_stats):
+        r = 2 + v_idx // grid_width
+        c = v_idx % grid_width
         plt.subplot2grid((grid_height, grid_width), (r, c))
-        means = layer_stats[l_idx]['mean']
-        stds = layer_stats[l_idx]['std']
-        mins = layer_stats[l_idx]['min']
-        maxs = layer_stats[l_idx]['max']
+        means = value_stats[v_idx]['mean']
+        stds = value_stats[v_idx]['std']
+        mins = value_stats[v_idx]['min']
+        maxs = value_stats[v_idx]['max']
         plt.plot(iterations, means, label='mean', color='royalblue')
         plt.fill_between(iterations, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
         plt.fill_between(iterations, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
         plt.margins(0)
         plt.yscale('log' if magnitudes else 'linear')
-        plt.title(f"{layer_names[l_idx]} (#{layer_ids[l_idx]})")
+        plt.title(value_display_names[v_idx])
+
+        # text overlay
+        plot_width = np.max(iterations)
+        plot_mid = (np.max(maxs) + np.min(mins)) * 0.5
+        if variable_shapes:
+            plt.text(plot_width * 0.5, plot_mid,
+                     f"{variable_shapes[v_idx]}",
+                     horizontalalignment='center', verticalalignment='center')
 
     plt.show()
 
