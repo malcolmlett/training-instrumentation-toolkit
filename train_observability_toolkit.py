@@ -541,11 +541,12 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
                     var_list.append(state)
 
 
-# TODO add explicit properties for epochs, steps, model_stats, layer_stats
-# TODO add capture of the last gradients
 class GradientHistoryCallback(BaseGradientCallback):
     """
-    Properties:
+    Custom tot.fit() gradient callback that captures statistics across the gradients during training.
+    Optionally also captures selected raw gradients.
+
+    Other properties:
         epochs: list of int. Epoch numbers correlated to captured gradients/gradient-stats
             (only populated if verbose == 0)
         steps: list of int. Step numbers correlated to captured gradients/gradient-stats
@@ -554,97 +555,183 @@ class GradientHistoryCallback(BaseGradientCallback):
         layer_stats: list of dict of np-arrays. One list item for each layer, with each
             list item containing either a dict of stat np-arrays like for model_stats,
             or `None` if it doesn't have any trainable variable.
-        trainable_layer_stats: filtered version of layer_stats that omits layers with no trainable variables
-        trainable_layer_indices: indices of layers in `trainable_layer_stats`
-        trainable_layer_names: names of layers in `trainable_layer_stats`
+        gradient_stats: list of dict of np-arrays. One list item for each gradient.
     """
 
-    def __init__(self, magnitudes: bool = True, verbose=1):
+    def __init__(self, per_step=False, magnitudes=True, collection_sets=None, **kwargs):
         """
         Args:
-            verbose: int. To be refactored later:
-              1: collects stats on gradients at each step or epoch, but does
-                 not keep raw gradients.
-              2: keeps a sampling of raw gradients
-              3: keeps all raw gradients
+            per_step: bool. Whether to collect per-step stats and raw values, or per-epoch otherwise.
+                By default, data is accumulated per-epoch, and an 'epochs' list is available
+                that tracks the display indices of each sample.
+                If per-step is set, then a `steps` list is available instead, and activity
+                is collected on each update step.
+                The same applies to layer output capture if enabled.
 
-            magnitudes: whether to collect stats on gradient magnitudes (default), or on their raw values otherwise
+            magnitudes: whether to collect stats on gradient magnitudes (default), or on their raw values.
+
+            collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
+              If omitted, this callback collects nothing (in the future it may collect stats).
+              See _normalize_collection_sets_for_variables() for format details.
         """
         super(GradientHistoryCallback, self).__init__()
-        self.verbose = verbose
+        self.per_step = per_step
         self.magnitudes = magnitudes
+        self.collection_sets = collection_sets
 
         # results variable creation
-        if verbose == 0:
-            self.epochs = []
+        if per_step:
+            self.steps = []
         else:
-            self.steps = []  # maybe rename as 'iterations'
+            self.epochs = []
         self.model_stats = {}  # dict (by stat) of lists (by iteration)
         self.layer_stats = []  # list (by layer) of dicts (by stat) of lists (by iteration)
-        if verbose > 1:
-            self.gradients_list = None
+        self.gradient_stats = []  # list (by variable) of dicts (by stat) of lists (by iteration)
+        self._gradient_values = None
 
         # internal tracking
         self._epoch = 0
-        self._variable_indices_by_layer = None
-        self._layer_names = None
+        self._filtered_stats_variable_indices_by_layer = None
+        self._filtered_value_variable_indices = None
 
     @property
-    def trainable_layer_stats(self):
+    def collected_layer_stats(self):
+        """
+        Gets stats filtered only on trainable layers.
+        """
         return [stats for stats in self.layer_stats if stats is not None]
 
     @property
-    def trainable_layer_indices(self):
+    def collected_layer_indices(self):
+        """
+        Indices of layers as returned by collected_layer_stats()
+        """
         return [idx for idx, stats in enumerate(self.layer_stats) if stats is not None]
 
     @property
-    def trainable_layer_names(self):
-        return [self._layer_names[idx] for idx in self.trainable_layer_indices]
+    def collected_layer_names(self):
+        """
+        Names of layers as returned by collected_layer_stats()
+        """
+        layer_names = [layer.name for layer in self.model.layers]
+        return [layer_names[idx] for idx in self.collected_layer_indices]
 
     @property
-    def variable_indices_by_layer(self):
-        return self._variable_indices_by_layer
+    def collected_layer_variable_indices(self):
+        return self._filtered_stats_variable_indices_by_layer
+
+    @property
+    def collected_gradient_stats(self):
+        """
+        Gets stats against each gradient, omitting any gradient that have no collected stats.
+        Use collected_gradient_stats_indices() to identify which gradients are included.
+        """
+        return [stats for stats in self.gradient_stats if stats is not None]
+
+    @property
+    def collected_gradient_stats_indices(self):
+        """
+        Indices of gradients for which stats are returned by collected_gradient_stats.
+        Indices are as per the source variable's position in model.variables.
+        """
+        return [idx for idx, stats in enumerate(self.gradient_stats) if stats is not None]
+
+    @property
+    def gradients(self):
+        """
+        Gets a list corresponding to all gradients, with lists of collected
+        values for those being collected and Nones for the rest.
+        The order and size of the returned list corresponds exactly to that returned
+        by model.variables.
+
+        Returns:
+            list (by model.variable) of list (by step/epoch) of gradient tensors.
+            None if variable capturing not enabled.
+        """
+        return self._gradient_values
+
+    @property
+    def collected_gradients(self):
+        """
+        Gets the list of collected gradients, containing only those that are collected.
+        The indices of the returned gradients relative to the original model can only be
+        determined via collected_gradient_indices().
+
+        Returns:
+            list (by captured gradient) of list (by step/epoch) of gradient tensors.
+            None if variable capturing not enabled.
+        """
+        if self._gradient_values is not None:
+            return [var_list for var_list in self._gradient_values if var_list is not None]
+        else:
+            return None
+
+    @property
+    def collected_gradient_indices(self):
+        """
+        Gets the indices of variables returned by collected_gradients() as they
+        were on the original model and returned by model.variables.
+        """
+        if self._filtered_value_variable_indices is not None:
+            return self._filtered_value_variable_indices
+        else:
+            return None
 
     def on_train_begin(self):
         """
         Initialises tracking, now that we know the model and number of epochs and steps per epoch.
         """
+        # pre-compute lookups
+        self._filtered_stats_variable_indices_by_layer = variable_indices_by_layer(
+            self.model, include_trainable_only=True)
+
         # init stats
-        self.model_stats = {key: [] for key in _compute_common_stats_keys()}
+        stats_keys = _compute_common_stats_keys()
+        self.model_stats = {key: [] for key in stats_keys}
+
+        filtered_stats_variable_indices = [_index_by_identity(self.model.variables, var)
+                                           for var in self.model.trainable_variables]
+        self.gradient_stats = [{key: [] for key in stats_keys} if var_idx in filtered_stats_variable_indices
+                               else None for var_idx in range(len(self.model.variables))]
+
         for layer in self.model.layers:
             if layer.trainable_variables:
-                self.layer_stats.append({key: [] for key in _compute_common_stats_keys()})
+                self.layer_stats.append({key: [] for key in stats_keys})
             else:
                 self.layer_stats.append(None)
 
-        # pre-compute lookups
-        self._layer_names = [layer.name for layer in self.model.layers]
-        self._variable_indices_by_layer = [[]] * len(self.model.layers)
-        for l_idx, layer in enumerate(self.model.layers):
-            if layer.trainable_variables:
-                indices = [_index_by_identity(self.model.trainable_variables, var) for var in
-                           layer.trainable_variables]
-                self._variable_indices_by_layer[l_idx] = indices
+        # expand collection_sets
+        if self.collection_sets:
+            self.collection_sets = _normalize_collection_sets_for_variables(self.model, self.collection_sets)
+            self._filtered_value_variable_indices = [index for collection_set in self.collection_sets
+                                                     for index in collection_set['variable_indices']]
 
-        if self.verbose > 1:
-            self.gradients_list = []
+        # initialise list of gradient storages across gradients and iterations
+        # (TODO also prepare slicing rules)
+        if self.collection_sets:
+            self._gradient_values = [[] if var_idx in self._filtered_value_variable_indices else None
+                                     for var_idx in range(len(self.model.variables))]
 
     def on_train_end(self):
         """
-        Cleans up tracking, and converts everything to numpy arrays for easier consumption.
+        Cleans up tracking, and converts some things to numpy arrays for easier consumption.
+        High-level indices and stats are all converted to numpy.
+        Raw values are retained as TF values.
         """
-        if self.verbose == 0:
-            self.epochs = np.array(self.epochs)
-        else:
+        if self.per_step:
             self.steps = np.array(self.steps)
+        else:
+            self.epochs = np.array(self.epochs)
         for key in self.model_stats.keys():
-            lst = [v.numpy() for v in self.model_stats[key]]
-            self.model_stats[key] = np.array(lst)
-        for l in range(len(self.layer_stats)):
-            if self.layer_stats[l] is not None:
-                for key in self.layer_stats[l].keys():
-                    lst = [v.numpy() for v in self.layer_stats[l][key]]
-                    self.layer_stats[l][key] = np.array(lst)
+            self.model_stats[key] = np.array(self.model_stats[key])
+        for l_idx in range(len(self.layer_stats)):
+            if self.layer_stats[l_idx] is not None:
+                for key in self.layer_stats[l_idx].keys():
+                    self.layer_stats[l_idx][key] = np.array(self.layer_stats[l_idx][key])
+        for var_idx in range(len(self.gradient_stats)):
+            if self.gradient_stats[var_idx] is not None:
+                for key in self.gradient_stats[var_idx].keys():
+                    self.gradient_stats[var_idx][key] = np.array(self.gradient_stats[var_idx][key])
 
     def on_epoch_begin(self, epoch, logs=None):
         """
@@ -656,34 +743,46 @@ class GradientHistoryCallback(BaseGradientCallback):
         """
         Collects gradient stats and raw gradients after each epoch, if configured.
         """
-        if self.verbose == 0:
-            self.epochs.append(self._epoch)
+        if not self.per_step:
+            self.epochs.append(epoch)
             self._collect_stats(loss, gradients, trainable_variables, activations)
+            self._collect_raw_values(gradients)
 
     def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations=None):
         """
         Collects gradient stats and raw gradients after each update step, if configured.
         """
         # collect stats at each training step
-        if self.verbose >= 1:
+        if self.per_step:
             step = self.params['steps'] * self._epoch + batch
             self.steps.append(step)
             self._collect_stats(loss, gradients, trainable_variables, activations)
-
-        # collect raw gradients
-        if self.verbose >= 3:
-            self.gradients_list.append(gradients)
+            self._collect_raw_values(gradients)
 
     def _collect_stats(self, loss, gradients, trainable_variables, activations):
-        # stats across all gradients as one big bucket (not weight adjusted for different sized layers)
+        # collect stats across all model variables as one big bucket
         _append_dict_list(self.model_stats, _compute_common_stats(gradients, absolute=self.magnitudes))
 
-        # compute stats across all gradients (weights + biases) for each layer
+        # compute stats across the variables for each layer as a group
         for l_idx, layer in enumerate(self.model.layers):
-            grad_indices = self._variable_indices_by_layer[l_idx]
+            grad_indices = self._filtered_stats_variable_indices_by_layer[l_idx]
             layer_grads = [gradients[i] for i in grad_indices]
             if layer_grads:
-                _append_dict_list(self.layer_stats[l_idx], _compute_common_stats(layer_grads, absolute=self.magnitudes))
+                stats = _compute_common_stats(layer_grads, absolute=self.magnitudes)
+                _append_dict_list(self.layer_stats[l_idx], stats)
+
+        # compute stats for each individual variable
+        for var_idx, stat_list in enumerate(self.gradient_stats):
+            if stat_list is not None:
+                variable_grads = [gradients[var_idx]]  # _compute_common_stats() needs a list
+                _append_dict_list(stat_list, _compute_common_stats(variable_grads, absolute=self.magnitudes))
+
+    def _collect_raw_values(self, gradients):
+        # TODO do slicing
+        if self._gradient_values:
+            for var_idx, var_list in enumerate(self._gradient_values):
+                if var_list is not None:
+                    var_list.append(gradients)
 
     def plot(self):
         """
@@ -1779,14 +1878,12 @@ def plot_gradient_history(gradient_callback: GradientHistoryCallback):
     # collect data
     iterations = gradient_callback.epochs if hasattr(gradient_callback, 'epochs') else gradient_callback.steps
     iteration_name = 'epoch' if hasattr(gradient_callback, 'epochs') else 'step'
+    magnitudes = gradient_callback.magnitudes
     model_stats = gradient_callback.model_stats
-    layer_ids = gradient_callback.trainable_layer_indices
-    layer_names = gradient_callback.trainable_layer_names
-    layer_stats = gradient_callback.trainable_layer_stats
+    layer_ids = gradient_callback.collected_layer_indices
+    layer_names = gradient_callback.collected_layer_names
+    layer_stats = gradient_callback.collected_layer_stats
     num_trainable_layers = len(layer_stats)
-
-    layer_log_means = np.column_stack([stats['mean'] for stats in layer_stats])
-    layer_log_means = _log_normalize(layer_log_means, axis=1)
 
     # start figure
     # - at least 4 layer plots wide
@@ -1805,24 +1902,29 @@ def plot_gradient_history(gradient_callback: GradientHistoryCallback):
     plt.fill_between(iterations, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
     plt.fill_between(iterations, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
     plt.margins(0)
-    plt.yscale('log')
+    plt.yscale('log' if magnitudes else 'linear')
     plt.xlabel(iteration_name)
-    plt.ylabel('gradient magnitude')
+    plt.ylabel('gradient magnitude' if magnitudes else 'gradient')
     plt.title('All model gradients')
     plt.legend()
 
     # layer contributions - high-level summary
-    plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
-    plt.stackplot(iterations, layer_log_means.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
-    plt.margins(0)
-    plt.xlabel(iteration_name)
-    plt.ylabel('Log-proportion contribution')
-    plt.title('Layer contributions')
-    # layer labels placed on centre of layer band on left-hand side
-    placement = layer_log_means[0, :] * 0.5
-    placement[1:] += np.cumsum(layer_log_means[0, :])[0:-1]
-    for l_idx in range(num_trainable_layers):
-        plt.text(len(iterations) / 100, placement[l_idx], f"{layer_names[l_idx]} (#{layer_ids[l_idx]})", ha="left")
+    # unfortunately it's only meaningful if gradients magnitudes are being reported on
+    if magnitudes:
+        layer_log_means = np.column_stack([stats['mean'] for stats in layer_stats])
+        layer_log_means = _log_normalize(layer_log_means, axis=1)
+
+        plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
+        plt.stackplot(iterations, layer_log_means.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
+        plt.margins(0)
+        plt.xlabel(iteration_name)
+        plt.ylabel('Log-proportion contribution')
+        plt.title('Layer contributions')
+        # layer labels placed on centre of layer band on left-hand side
+        placement = layer_log_means[0, :] * 0.5
+        placement[1:] += np.cumsum(layer_log_means[0, :])[0:-1]
+        for l_idx in range(num_trainable_layers):
+            plt.text(len(iterations) / 100, placement[l_idx], f"{layer_names[l_idx]} (#{layer_ids[l_idx]})", ha="left")
 
     # individual layers
     for l_idx in range(num_trainable_layers):
@@ -1837,7 +1939,7 @@ def plot_gradient_history(gradient_callback: GradientHistoryCallback):
         plt.fill_between(iterations, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
         plt.fill_between(iterations, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
         plt.margins(0)
-        plt.yscale('log')
+        plt.yscale('log' if magnitudes else 'linear')
         plt.title(f"{layer_names[l_idx]} (#{layer_ids[l_idx]})")
 
     plt.show()
