@@ -423,12 +423,12 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             self.model, include_trainable_only=self.trainable_only)
 
         # init stats
-        self.model_stats = {key: [] for key in self._stat_keys()}
+        self.model_stats = {key: [] for key in _compute_common_stats_keys()}
         for layer in self.model.layers:
-            if self.include_trainable_only and layer.trainable_variables:
-                self.layer_stats.append({key: [] for key in self._stat_keys()})
-            elif not self.include_trainable_only and layer.variables:
-                self.layer_stats.append({key: [] for key in self._stat_keys()})
+            if self.trainable_only and layer.trainable_variables:
+                self.layer_stats.append({key: [] for key in _compute_common_stats_keys()})
+            elif not self.trainable_only and layer.variables:
+                self.layer_stats.append({key: [] for key in _compute_common_stats_keys()})
             else:
                 self.layer_stats.append(None)
 
@@ -449,20 +449,16 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         High-level indices and stats are all converted to numpy.
         Raw values are retained as TF values.
         """
-
-        # Convert high-level indices and stats to numpy
-        if self.verbose == 0:
-            self.epochs = np.array(self.epochs)
-        else:
+        if self.per_step:
             self.steps = np.array(self.steps)
+        else:
+            self.epochs = np.array(self.epochs)
         for key in self.model_stats.keys():
-            lst = [v.numpy() for v in self.model_stats[key]]
-            self.model_stats[key] = np.array(lst)
+            self.model_stats[key] = np.array(self.model_stats[key])
         for l_idx in range(len(self.layer_stats)):
             if self.layer_stats[l_idx] is not None:
                 for key in self.layer_stats[l_idx].keys():
-                    lst = [v.numpy() for v in self.layer_stats[l_idx][key]]
-                    self.layer_stats[l_idx][key] = np.array(lst)
+                    self.layer_stats[l_idx][key] = np.array(self.layer_stats[l_idx][key])
 
     def on_epoch_begin(self, epoch, logs=None):
         self._epoch = epoch
