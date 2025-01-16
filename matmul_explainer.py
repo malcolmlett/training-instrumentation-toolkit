@@ -76,8 +76,6 @@ def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, 
         threshold1 = np.percentile(np.abs(x1), 100 * (1 - confidence))
     if threshold2 is None:
         threshold2 = np.percentile(np.abs(x2), 100 * (1 - confidence))
-    print(f"X1 threshold: {threshold1}")
-    print(f"X2 threshold: {threshold2}")
 
     # create masks that classify each input individually
     x1_p = x1 > threshold1
@@ -87,14 +85,6 @@ def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, 
     x2_p = x2 > threshold2
     x2_z = np.abs(x2) <= threshold2
     x2_n = x2 < -threshold2
-
-    # print(f"X1_p: {x1_p}")
-    # print(f"X1_z: {x1_z}")
-    # print(f"X1_n: {x1_n}")
-
-    # print(f"X2_p: {x2_p}")
-    # print(f"X2_z: {x2_z}")
-    # print(f"X2_n: {x2_n}")
 
     # compute counts
     counts = np.zeros((x1.shape[0], x2.shape[1], 9), dtype=int)
