@@ -476,81 +476,14 @@ class GradientHistoryCallback(BaseGradientCallback):
     def plot(self):
         """
         Alias for plot_summary().
-        Sets the default plot method, once I have multiple.
+        Determines the default once there are multiple plot methods.
         """
 
     def plot_summary(self):
         """
-        Generates a figure containing a number of plots to visualise gradient stats
-        from a GradientHistoryCallback object.
-
-        Args:
-            self: gradients collected during training.
+        Alias for calling tot.plot_gradient_history(gradient_callback).
         """
-        steps = self.steps
-
-        # get filtered set of layer stats (dropping those with no stats)
-        layer_ids = self.trainable_layer_indices
-        layer_names = self.trainable_layer_names
-        layer_stats = self.trainable_layer_stats
-        num_trainable_layers = len(layer_stats)
-
-        layer_log_means = np.column_stack([stats['mean'] for stats in layer_stats])
-        layer_log_means = _log_normalize(layer_log_means, axis=1)
-
-        # start figure
-        # - at least 4 layer plots wide
-        # - otherwise target a square grid of layer plots
-        grid_width = max(4, round(math.sqrt(num_trainable_layers) / 2) * 2)  # nearest even number >= 4
-        grid_height = 2 + math.ceil(num_trainable_layers / grid_width)
-        plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
-
-        # all-model high-level summary
-        plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
-        means = self.model_stats['mean']
-        stds = self.model_stats['std']
-        mins = self.model_stats['min']
-        maxs = self.model_stats['max']
-        plt.plot(steps, means, label='mean', color='royalblue')
-        plt.fill_between(steps, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
-        plt.fill_between(steps, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
-        plt.margins(0)
-        plt.yscale('log')
-        plt.xlabel('step')
-        plt.ylabel('gradient magnitude')
-        plt.title('All model gradients')
-        plt.legend()
-
-        # layer contributions - high-level summary
-        plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
-        plt.stackplot(steps, layer_log_means.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
-        plt.margins(0)
-        plt.xlabel('step')
-        plt.ylabel('Log-proportion contribution')
-        plt.title('Layer contributions')
-        # layer labels placed on centre of layer band on left-hand side
-        placement = layer_log_means[0, :] * 0.5
-        placement[1:] += np.cumsum(layer_log_means[0, :])[0:-1]
-        for l_idx in range(num_trainable_layers):
-            plt.text(len(steps) / 100, placement[l_idx], f"{layer_names[l_idx]} (#{layer_ids[l_idx]})", ha="left")
-
-        # individual layers
-        for l_idx in range(num_trainable_layers):
-            r = 2 + l_idx // grid_width
-            c = l_idx % grid_width
-            plt.subplot2grid((grid_height, grid_width), (r, c))
-            means = layer_stats[l_idx]['mean']
-            stds = layer_stats[l_idx]['std']
-            mins = layer_stats[l_idx]['min']
-            maxs = layer_stats[l_idx]['max']
-            plt.plot(steps, means, label='mean', color='royalblue')
-            plt.fill_between(steps, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
-            plt.fill_between(steps, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
-            plt.margins(0)
-            plt.yscale('log')
-            plt.title(f"{layer_names[l_idx]} (#{layer_ids[l_idx]})")
-
-        plt.show()
+        plot_gradient_history(self)
 
 
 class ActivityHistoryCallback(BaseGradientCallback):
@@ -806,7 +739,7 @@ class ActivityHistoryCallback(BaseGradientCallback):
 
     def plot_summary(self):
         """
-        Alias for calling tv.plot_unit_activity(activity_callback).
+        Alias for calling tot.plot_unit_activity(activity_callback).
         """
         plot_unit_activity(self)
 
@@ -964,7 +897,7 @@ class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
 
     def plot_summary(self):
         """
-        Alias for calling tv.plot_unit_activity(activity_callback).
+        Alias for calling tot.plot_unit_activity(activity_callback).
         """
         plot_unit_activity(self)
 
@@ -1566,6 +1499,81 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
     if layer_spatial_activities is not None:
         res += (layer_spatial_activities,)
     return res
+
+
+def plot_gradient_history(gradient_callback: GradientHistoryCallback):
+    """
+    Generates a figure containing a number of plots to visualise gradient stats
+    from a GradientHistoryCallback object.
+
+    Args:
+        gradient_callback: callback populated with gradient stats from training.
+    """
+    # collect data
+    iterations = gradient_callback.epochs if hasattr(gradient_callback, 'epochs') else gradient_callback.steps
+    iteration_name = 'epoch' if hasattr(gradient_callback, 'epochs') else 'step'
+    model_stats = gradient_callback.model_stats
+    layer_ids = gradient_callback.trainable_layer_indices
+    layer_names = gradient_callback.trainable_layer_names
+    layer_stats = gradient_callback.trainable_layer_stats
+    num_trainable_layers = len(layer_stats)
+
+    layer_log_means = np.column_stack([stats['mean'] for stats in layer_stats])
+    layer_log_means = _log_normalize(layer_log_means, axis=1)
+
+    # start figure
+    # - at least 4 layer plots wide
+    # - otherwise target a square grid of layer plots
+    grid_width = max(4, round(math.sqrt(num_trainable_layers) / 2) * 2)  # nearest even number >= 4
+    grid_height = 2 + math.ceil(num_trainable_layers / grid_width)
+    plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
+
+    # all-model high-level summary
+    plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
+    means = gradient_callback.model_stats['mean']
+    stds = model_stats['std']
+    mins = model_stats['min']
+    maxs = model_stats['max']
+    plt.plot(iterations, means, label='mean', color='royalblue')
+    plt.fill_between(iterations, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
+    plt.fill_between(iterations, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
+    plt.margins(0)
+    plt.yscale('log')
+    plt.xlabel(iteration_name)
+    plt.ylabel('gradient magnitude')
+    plt.title('All model gradients')
+    plt.legend()
+
+    # layer contributions - high-level summary
+    plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
+    plt.stackplot(iterations, layer_log_means.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
+    plt.margins(0)
+    plt.xlabel(iteration_name)
+    plt.ylabel('Log-proportion contribution')
+    plt.title('Layer contributions')
+    # layer labels placed on centre of layer band on left-hand side
+    placement = layer_log_means[0, :] * 0.5
+    placement[1:] += np.cumsum(layer_log_means[0, :])[0:-1]
+    for l_idx in range(num_trainable_layers):
+        plt.text(len(iterations) / 100, placement[l_idx], f"{layer_names[l_idx]} (#{layer_ids[l_idx]})", ha="left")
+
+    # individual layers
+    for l_idx in range(num_trainable_layers):
+        r = 2 + l_idx // grid_width
+        c = l_idx % grid_width
+        plt.subplot2grid((grid_height, grid_width), (r, c))
+        means = layer_stats[l_idx]['mean']
+        stds = layer_stats[l_idx]['std']
+        mins = layer_stats[l_idx]['min']
+        maxs = layer_stats[l_idx]['max']
+        plt.plot(iterations, means, label='mean', color='royalblue')
+        plt.fill_between(iterations, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
+        plt.fill_between(iterations, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
+        plt.margins(0)
+        plt.yscale('log')
+        plt.title(f"{layer_names[l_idx]} (#{layer_ids[l_idx]})")
+
+    plt.show()
 
 
 # TODO make more generic show that passing the activity_callback is a convenience,
