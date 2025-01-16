@@ -276,6 +276,239 @@ class BaseGradientCallback:
         """
 
 
+class VariableHistoryCallback(tf.keras.callbacks.Callback):
+    """
+    Standard model.fit() callback that captures the state of variables during training.
+    Variable states may be captured BEFORE or AFTER each update step or epoch, depending on the needs.
+
+    Other properties:
+        model: the model captured
+        epochs: list of int. Epoch numbers correlated to captured gradients/gradient-stats
+            (only populated if verbose == 0)
+        steps: list of int. Step numbers correlated to captured gradients/gradient-stats
+            (only populated if verbose > 0)
+        model_stats: dict of np-arrays. Keys list out different stats, eg: mean, min, max, std
+        layer_stats: list of dict of np-arrays. One list item for each layer, with each
+            list item containing either a dict of stat np-arrays like for model_stats,
+            or `None` if it doesn't have any variables.
+    """
+
+    def __init__(self, per_step=False, before_updates=False, trainable_only=True, collection_sets=None, **kwargs):
+        """
+        Args:
+            per_step: bool. Whether to collect per-step stats and raw values, or per-epoch otherwise.
+                By default, data is accumulated per-epoch, and an 'epochs' list is available
+                that tracks the display indices of each sample.
+                If per-step is set, then a `steps` list is available instead, and activity
+                is collected on each update step.
+                The same applies to layer output capture if enabled.
+
+            before_updates: bool. Whether to sample variables BEFORE they are updated, or AFTER otherwise.
+                If False, this reflects the notion of capturing the weights and biases as a RESULT of each update step.
+                If True, this reflects the notion of capturing the weights and biases that were used DURING
+                the update step.
+
+            trainable_only: bool. Whether to only include stats for trainable variables, or all variables otherwise.
+
+            collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
+              If omitted, this callback collects nothing (in the future it may collect stats).
+              See _normalize_collection_sets_for_variables() for format details.
+        """
+        super(VariableHistoryCallback, self).__init__(**kwargs)
+        self.per_step = per_step
+        self.before_updates = before_updates
+        self.trainable_only = trainable_only
+        self.collection_sets = collection_sets
+
+        # results variable creation
+        if per_step:
+            self.steps = []
+        else:
+            self.epochs = []
+        self.model_stats = {}  # dict (by stat) of lists (by iteration)
+        self.layer_stats = []  # list (by layer) of dicts (by stat) of lists (by iteration)
+        self._variables = None
+
+        # internal tracking
+        self._epoch = 0
+        self._collected_variable_indices = None  # TODO rename to clarify as applying to stats or raw variables
+        self._variable_indices_by_layer = None  # TODO remove
+        self._collected_variable_indices_by_layer = None  # TODO rename to clarify as applying to stats or raw variables
+
+    @property
+    def variables(self):
+        """
+        Gets a list corresponding to all variables, with lists of collected
+        values for those being collected and Nones for the rest.
+        The order and size of the returned list corresponds exactly to that returned
+        by model.variables.
+
+        Returns:
+            list (by model.variable) of list (by step/epoch) of variable tensors.
+            None if variable capturing not enabled.
+        """
+        return self._variables
+
+    @property
+    def collected_layer_stats(self):
+        """
+        Gets stats against each layer, omitting any layers that have no collected stats.
+        Use collected_layer_indices() or collected_layer_names() to identify which layers are included.
+        """
+        return [stats for stats in self.layer_stats if stats is not None]
+
+    @property
+    def collected_layer_indices(self):
+        """
+        Indices of layers as returned by layer_stats()
+        """
+        return [idx for idx, stats in enumerate(self.layer_stats) if stats is not None]
+
+    @property
+    def collected_layer_names(self):
+        """
+        Names of layers as returned by layer_stats()
+        """
+        layer_names = [layer.name for layer in self.model.layers]
+        return [layer_names[idx] for idx in self.collected_layer_indices]
+
+    @property
+    def collected_variables(self):
+        """
+        Gets the list of collected variables, containing only those that are collected.
+        The indices of the returned variables relative to the original model can only be
+        determined via collected_variable_indices().
+
+        Returns:
+            list (by captured variable) of list (by step/epoch) of variable tensors.
+            None if variable capturing not enabled.
+        """
+        if self.variables is not None:
+            return [var_list for var_list in self._variables if var_list is not None]
+        else:
+            return None
+
+    @property
+    def collected_variable_indices(self):
+        """
+        Gets the indices of variables returned by collected_variables() as they
+        were on the original model and returned by model.variables.
+        """
+        if self._collected_variable_indices is not None:
+            return self._collected_variable_indices
+        else:
+            return None
+
+    @property
+    def variable_indices_by_layer(self):
+        """
+        Indices exactly as used by this class.
+        """
+        return self._variable_indices_by_layer
+
+    def collected_variable_indices_by_layer(self):
+        """
+        Indices exactly as used by this class.
+        """
+        return self._variable_indices_by_layer
+
+    def on_train_begin(self, logs=None):
+        """
+        Initialises tracking, now that we know the model etc.
+        """
+        # pre-compute lookups
+        self._variable_indices_by_layer = variable_indices_by_layer(
+            self.model, include_trainable_only=False)
+        self._collected_variable_indices_by_layer = variable_indices_by_layer(
+            self.model, include_trainable_only=self.trainable_only)
+
+        # init stats
+        self.model_stats = {key: [] for key in self._stat_keys()}
+        for layer in self.model.layers:
+            if self.include_trainable_only and layer.trainable_variables:
+                self.layer_stats.append({key: [] for key in self._stat_keys()})
+            elif not self.include_trainable_only and layer.variables:
+                self.layer_stats.append({key: [] for key in self._stat_keys()})
+            else:
+                self.layer_stats.append(None)
+
+        # expand collection_sets
+        if self.collection_sets:
+            self.collection_sets = _normalize_collection_sets_for_variables(self.model, self.collection_sets)
+            self._collected_variable_indices = [index for collection_set in self.collection_sets
+                                                for index in collection_set['variable_indices']]
+
+            # initialise list of variable storages across variables and iterations
+            # (TODO also prepare slicing rules)
+            self._variables = [[] if var_idx in self._collected_variable_indices else None
+                               for var_idx in range(len(self.model.variables))]
+
+    def on_train_end(self, logs=None):
+        """
+        Cleans up tracking, and converts some things to numpy arrays for easier consumption.
+        High-level indices and stats are all converted to numpy.
+        Raw values are retained as TF values.
+        """
+
+        # Convert high-level indices and stats to numpy
+        if self.verbose == 0:
+            self.epochs = np.array(self.epochs)
+        else:
+            self.steps = np.array(self.steps)
+        for key in self.model_stats.keys():
+            lst = [v.numpy() for v in self.model_stats[key]]
+            self.model_stats[key] = np.array(lst)
+        for l_idx in range(len(self.layer_stats)):
+            if self.layer_stats[l_idx] is not None:
+                for key in self.layer_stats[l_idx].keys():
+                    lst = [v.numpy() for v in self.layer_stats[l_idx][key]]
+                    self.layer_stats[l_idx][key] = np.array(lst)
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self._epoch = epoch
+        if not self.per_step and self.before_updates:
+            self.epochs.append(epoch)
+            self._collect_stats()
+            self._collect_raw_values()
+
+    def on_epoch_end(self, epoch, logs=None):
+        if not self.per_step and not self.before_updates:
+            self.epochs.append(epoch)
+            self._collect_stats()
+            self._collect_raw_values()
+
+    def on_train_batch_begin(self, batch, logs=None):
+        if self.per_step and self.before_updates:
+            self.steps.append(self.params['steps'] * self._epoch + batch)
+            self._collect_stats()
+            self._collect_raw_values()
+
+    def on_train_batch_end(self, batch, logs=None):
+        if self.per_step and not self.before_updates:
+            self.steps.append(self.params['steps'] * self._epoch + batch)
+            self._collect_stats()
+            self._collect_raw_values()
+
+    def _collect_stats(self):
+        # stats across all model variables as one big bucket
+        model_variables = self.model.trainable_variables if self.trainable_only else self.model.variables
+        _append_dict_list(self.model_stats, _compute_common_stats(model_variables))
+
+        # compute stats across the variables (eg: weights + biases) for each layer as a group
+        for l_idx, layer in enumerate(self.model.layers):
+            var_indices = self._collected_variable_indices_by_layer[l_idx]
+            layer_variables = [self.model.variables[i] for i in var_indices]
+            if layer_variables:
+                _append_dict_list(self.layer_stats[l_idx], _compute_common_stats(layer_variables))
+
+    def _collect_raw_values(self):
+        # TODO do slicing
+        for var_idx, var_list in enumerate(self._variables):
+            if var_list is not None:
+                state = tf.identity(self.model.variables[var_idx])  # get copy of current state
+                var_list.append(state)
+
+
 # TODO add explicit properties for epochs, steps, model_stats, layer_stats
 # TODO add capture of the last gradients
 class GradientHistoryCallback(BaseGradientCallback):
@@ -342,10 +575,10 @@ class GradientHistoryCallback(BaseGradientCallback):
         Initialises tracking, now that we know the model and number of epochs and steps per epoch.
         """
         # init stats
-        self.model_stats = {key: [] for key in self._stat_keys()}
+        self.model_stats = {key: [] for key in _compute_common_stats_keys()}
         for layer in self.model.layers:
             if layer.trainable_variables:
-                self.layer_stats.append({key: [] for key in self._stat_keys()})
+                self.layer_stats.append({key: [] for key in _compute_common_stats_keys()})
             else:
                 self.layer_stats.append(None)
 
@@ -354,7 +587,7 @@ class GradientHistoryCallback(BaseGradientCallback):
         self._variable_indices_by_layer = [[]] * len(self.model.layers)
         for l, layer in enumerate(self.model.layers):
             if layer.trainable_variables:
-                indices = [self._index_by_identity(self.model.trainable_variables, var) for var in
+                indices = [_index_by_identity(self.model.trainable_variables, var) for var in
                            layer.trainable_variables]
                 self._variable_indices_by_layer[l] = indices
 
@@ -408,70 +641,14 @@ class GradientHistoryCallback(BaseGradientCallback):
 
     def _collect_stats(self, loss, gradients, trainable_variables, activations):
         # stats across all gradients as one big bucket (not weight adjusted for different sized layers)
-        self._append_dict_list(self.model_stats, self._compute_stats(gradients))
+        _append_dict_list(self.model_stats, _compute_common_stats(gradients))
 
         # compute stats across all gradients (weights + biases) for each layer
         for l_idx, layer in enumerate(self.model.layers):
             grad_indices = self._variable_indices_by_layer[l_idx]
             layer_grads = [gradients[i] for i in grad_indices]
             if layer_grads:
-                self._append_dict_list(self.layer_stats[l_idx], self._compute_stats(layer_grads))
-
-    @staticmethod
-    def _stat_keys():
-        """
-        Gets the list of stats that will be computed.
-        Currently static but may be computed based on configuration in the future.
-        """
-        return ['mean', 'min', 'max', 'std']
-
-    # Note: may issue warnings about retracing, but they can be ignored.
-    # This method must deal with the variations across each of the ways that it's called during a train step,
-    # (eg: whole model vs each layer), but after the first train step it will be fully optimised.
-    @tf.function
-    def _compute_stats(self, gradients):
-        tot_n = tf.constant(0.0, dtype=tf.float32)
-        tot_mean = tf.constant(0.0, dtype=tf.float32)
-        tot_m2 = tf.constant(0.0, dtype=tf.float32)  # Sum of squared differences from the mean
-        tot_min = tf.constant(float("inf"), dtype=tf.float32)
-        tot_max = tf.constant(float("-inf"), dtype=tf.float32)
-
-        for g in gradients:
-            g_mags = tf.abs(g)
-            g_size = tf.size(g, out_type=tf.float32)
-            g_min = tf.reduce_min(g_mags)
-            g_max = tf.reduce_max(g_mags)
-            g_sum = tf.reduce_sum(g_mags)
-            g_mean = g_sum / g_size
-            g_var = tf.reduce_sum((g_mags - g_mean) ** 2)
-
-            tot_min = tf.minimum(tot_min, g_min)
-            tot_max = tf.maximum(tot_max, g_max)
-
-            # Welford's algorithm for computing running statistics
-            delta = g_mean - tot_mean
-            tot_n += g_size
-            tot_mean += delta * (g_size / tot_n)
-            tot_m2 += g_var + delta ** 2 * (g_size * (tot_n - g_size) / tot_n)
-
-        return {
-            'mean': tot_mean,
-            'min': tot_min,
-            'max': tot_max,
-            'std': tf.sqrt(tot_m2 / tot_n)  # population std.dev
-        }
-
-    @staticmethod
-    def _index_by_identity(lst, target):
-        return next((i for i, v in enumerate(lst) if id(v) == id(target)), -1)
-
-    # note: experiments have found that this is faster than trying to optimise it
-    # (for example, trying to use TF Variables to store the lists goes considerably
-    #  slower - on scale of 40ms vs 14ms per epoch)
-    @staticmethod
-    def _append_dict_list(dic, addendum_dict):
-        for key in addendum_dict.keys():
-            dic[key].append(addendum_dict[key])
+                _append_dict_list(self.layer_stats[l_idx], _compute_common_stats(layer_grads))
 
     def plot(self):
         """
@@ -902,142 +1079,6 @@ class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
         plot_unit_activity(self)
 
 
-class VariableHistoryCallback(tf.keras.callbacks.Callback):
-    """
-    Standard model.fit() callback that captures the state of variables during training.
-    Variable states may be captured BEFORE or AFTER each update step or epoch, depending on the needs.
-
-    Properties:
-        variables: list (by model.variable) of list (by step/epoch) of variable tensors.
-            Property is None if variable capturing not enabled.
-            Each variable is always represented according to its index in the list, but has value None
-            if it wasn't captured.
-
-        captured_variables: list (by variable) of list (by step/epoch) of variable tensors.
-            Filtered version of `variables` containing only non-None entries.
-    """
-
-    def __init__(self, per_step=False, before_updates=False, collection_sets=None, **kwargs):
-        """
-        Args:
-            per_step: bool. Whether to collect per-step stats, or per-epoch otherwise.
-                By default, activity is accumulated per-epoch, and an 'epochs' list is available
-                that tracks the display indices of each sample.
-                If per-step is set, then a `steps` list is available instead, and activity
-                is collected on each update step.
-                The same applies to layer output capture if enabled.
-
-            before_updates: bool. Whether to sample variables BEFORE they are updated, or AFTER otherwise.
-                If False, this reflects the notion of capturing the weights and biases as a RESULT of each update step.
-                If True, this reflects the notion of capturing the weights and biases that were used DURING
-                the update step.
-
-            collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
-              If omitted, this callback collects nothing (in the future it may collect stats).
-              See _normalize_collection_sets_for_variables() for format details.
-        """
-        super(VariableHistoryCallback, self).__init__(**kwargs)
-        self.per_step = per_step
-        self.before_updates = before_updates
-        self.collection_sets = collection_sets
-
-        # results variable creation
-        if per_step:
-            self.steps = []
-        else:
-            self.epochs = []
-        self._variables = None
-
-        # internal tracking
-        self._epoch = 0
-
-    @property
-    def variables(self):
-        """
-        Gets a list corresponding to all variables, with lists of collected
-        values for those being collected and Nones for the rest.
-        The order and size of the returned list corresponds exactly to that returned
-        by model.variables.
-
-        Returns:
-            list of lists of variables, or None if collection sets were not enabled.
-        """
-        return self._variables
-
-    @property
-    def collected_variables(self):
-        """
-        Gets the list of collected variables, containing only those that are collected.
-        The indices of the returned variables relative to the original model can only be
-        determined via collected_variable_indices().
-
-        Returns:
-            list of lists of variables, or None if collection sets were not enabled.
-        """
-        if self.variables is not None:
-            return [var_list for var_list in self._variables if var_list is not None]
-        else:
-            return None
-
-    @property
-    def collected_variable_indices(self):
-        """
-        Gets the indices of variables returned by collected_variables() as they
-        were on the original model and returned by model.variables.
-        """
-        if self._collected_variable_indices is not None:
-            return self._collected_variable_indices
-        else:
-            return None
-
-    def on_train_begin(self, logs=None):
-        """
-        Initialises tracking, now that we know the model etc.
-        """
-        # expand collection_sets
-        if self.collection_sets:
-            self.collection_sets = _normalize_collection_sets_for_variables(self.model, self.collection_sets)
-            self._collected_variable_indices = [index for collection_set in self.collection_sets
-                                                for index in collection_set['variable_indices']]
-
-            # initialise list of variable storages across variables and iterations
-            # (TODO also prepare slicing rules)
-            self._variables = [[] if var_idx in self._collected_variable_indices else None for var_idx in range(len(model.variables))]
-            print(f"variable indices to collect: {self._collected_variable_indices}")
-            print(f"initialised variables storage: {self._variables}")
-
-    def on_train_end(self, logs=None):
-        pass
-
-    def on_epoch_begin(self, epoch, logs=None):
-        self._epoch = epoch
-        if not self.per_step and self.before_updates:
-            self.epochs.append(epoch)
-            self._collect_stats()
-
-    def on_epoch_end(self, epoch, logs=None):
-        if not self.per_step and not self.before_updates:
-            self.epochs.append(epoch)
-            self._collect_stats()
-
-    def on_train_batch_begin(self, batch, logs=None):
-        if self.per_step and self.before_updates:
-            self.steps.append(self.params['steps'] * self._epoch + batch)
-            self._collect_stats()
-
-    def on_train_batch_end(self, batch, logs=None):
-        if self.per_step and not self.before_updates:
-            self.steps.append(self.params['steps'] * self._epoch + batch)
-            self._collect_stats()
-
-    def _collect_stats(self):
-        # TODO do slicing
-        for var_idx, var_list in enumerate(self._variables):
-          if var_list is not None:
-            state = tf.identity(self.model.variables[var_idx])  # get copy of current state
-            var_list.append(state)
-
-
 def _log_normalize(arr, axis=None):
     """
     Normalises all values in the array or along the given axis so that they sum to 1.0,
@@ -1078,6 +1119,68 @@ def _log_normalize(arr, axis=None):
     tots[tots == 0.0] = 1.0  # avoid divide-by-zero
     scaled = scaled / tots
     return scaled
+
+
+# Implementation note: optimised for efficient use within TF loops
+# TODO may need to add some div-by-zero protection at some point
+@tf.function
+def _compute_common_stats(tensors: list):
+    """
+    Computes common statistics across the provided values.
+
+    Note: may issue warnings about retracing, but they can be ignored.
+    This method must deal with the variations across each of the ways that it's called during a train step,
+    (eg: whole model vs each layer), but after the first train step it will be fully optimised.
+
+    Args:
+        tensors: a list of tensors, all  assumed to be of type float, but may have different shapes
+    Returns:
+        dict of form: {
+            'mean': float,
+            'min': float,
+            'max': float,
+            'std': float   # standard deviation
+        }
+    """
+    tot_n = tf.constant(0.0, dtype=tf.float32)
+    tot_mean = tf.constant(0.0, dtype=tf.float32)
+    tot_m2 = tf.constant(0.0, dtype=tf.float32)  # Sum of squared differences from the mean
+    tot_min = tf.constant(float("inf"), dtype=tf.float32)
+    tot_max = tf.constant(float("-inf"), dtype=tf.float32)
+
+    for value in tensors:
+        g_mags = tf.abs(value)
+        g_size = tf.size(value, out_type=tf.float32)
+        g_min = tf.reduce_min(g_mags)
+        g_max = tf.reduce_max(g_mags)
+        g_sum = tf.reduce_sum(g_mags)
+        g_mean = g_sum / g_size
+        g_var = tf.reduce_sum((g_mags - g_mean) ** 2)  # variance
+
+        tot_min = tf.minimum(tot_min, g_min)
+        tot_max = tf.maximum(tot_max, g_max)
+
+        # Welford's algorithm for computing running statistics
+        delta = g_mean - tot_mean
+        tot_n += g_size
+        tot_mean += delta * (g_size / tot_n)
+        tot_m2 += g_var + delta ** 2 * (g_size * (tot_n - g_size) / tot_n)
+
+    return {
+        'mean': tot_mean,
+        'min': tot_min,
+        'max': tot_max,
+        'std': tf.sqrt(tot_m2 / tot_n)  # population std.dev
+    }
+
+
+def _compute_common_stats_keys():
+    """
+    Gets the dictionary keys that are always returned by _compute_stats().
+    Returns:
+        list of string
+    """
+    return ['mean', 'min', 'max', 'std']
 
 
 def variable_indices_by_layer(model: tf.keras.Model, include_trainable_only: bool = False):
@@ -1122,6 +1225,14 @@ def _index_by_identity(lst, target):
     do `lst.index(target)`. This function overcomes that problem.
     """
     return next((i for i, v in enumerate(lst) if id(v) == id(target)), -1)
+
+
+# note: experiments have found that using a dict and iterating over it like this is not as performant
+# as I'd like, but all attempts I've tried to do better ultimately fail.
+# For example, using TF Variables to store lists goes considerably slower - on scale of 40ms vs 14ms per epoch.
+def _append_dict_list(dic, addendum_dict):
+    for key in addendum_dict.keys():
+        dic[key].append(addendum_dict[key])
 
 
 def _normalize_collection_sets_for_layers(model: tf.keras.Model, collection_sets: list):
