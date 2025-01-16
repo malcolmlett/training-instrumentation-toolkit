@@ -81,13 +81,13 @@ def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, 
         threshold2 = np.percentile(np.abs(x2), 100 * (1 - confidence), method='midpoint')
 
     # create masks that classify each input individually
-    x1_p = x1 > threshold1
+    x1_p = x1 >= threshold1
     x1_z = np.abs(x1) < threshold1
-    x1_n = x1 < -threshold1
+    x1_n = x1 <= -threshold1
 
-    x2_p = x2 > threshold2
+    x2_p = x2 >= threshold2
     x2_z = np.abs(x2) < threshold2
-    x2_n = x2 < -threshold2
+    x2_n = x2 <= -threshold2
 
     # compute counts
     counts = np.zeros((x1.shape[0], x2.shape[1], 9), dtype=int)
@@ -162,13 +162,13 @@ def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float 
         kernel_threshold = tfp.stats.percentile(tf.abs(kernel), 100 * (1 - confidence), interpolation='midpoint')
 
     # create masks that classify each input individually
-    inputs_p = inputs > inputs_threshold
+    inputs_p = inputs >= inputs_threshold
     inputs_z = np.abs(inputs) < inputs_threshold
-    inputs_n = inputs < -inputs_threshold
+    inputs_n = inputs <= -inputs_threshold
 
-    kernel_p = kernel > kernel_threshold
+    kernel_p = kernel >= kernel_threshold
     kernel_z = np.abs(kernel) < kernel_threshold
-    kernel_n = kernel < -kernel_threshold
+    kernel_n = kernel <= -kernel_threshold
 
     # compute counts and sums for each classification
     counts = []
