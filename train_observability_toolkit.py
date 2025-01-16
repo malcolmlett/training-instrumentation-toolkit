@@ -293,7 +293,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             or `None` if it doesn't have any variables.
     """
 
-    def __init__(self, per_step=False, before_updates=False, trainable_only=True, collection_sets=None, **kwargs):
+    def __init__(self, per_step=False, before_updates=False, trainable_only=True, magnitudes=False,
+                 collection_sets=None, **kwargs):
         """
         Args:
             per_step: bool. Whether to collect per-step stats and raw values, or per-epoch otherwise.
@@ -310,6 +311,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
 
             trainable_only: bool. Whether to only include stats for trainable variables, or all variables otherwise.
 
+            magnitudes: whether to collect stats on variable magnitudes, or on their raw values (default)
+
             collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
               If omitted, this callback collects nothing (in the future it may collect stats).
               See _normalize_collection_sets_for_variables() for format details.
@@ -318,6 +321,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         self.per_step = per_step
         self.before_updates = before_updates
         self.trainable_only = trainable_only
+        self.magnitudes = magnitudes
         self.collection_sets = collection_sets
 
         # results variable creation
@@ -509,20 +513,21 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
     def _collect_stats(self):
         # collect stats across all model variables as one big bucket
         model_variables = self.model.trainable_variables if self.trainable_only else self.model.variables
-        _append_dict_list(self.model_stats, _compute_common_stats(model_variables))
+        _append_dict_list(self.model_stats, _compute_common_stats(model_variables, absolute=self.magnitudes))
 
         # compute stats across the variables for each layer as a group
         for l_idx, layer in enumerate(self.model.layers):
             var_indices = self._filtered_stats_variable_indices_by_layer[l_idx]
             layer_variables = [self.model.variables[i] for i in var_indices]
             if layer_variables:
-                _append_dict_list(self.layer_stats[l_idx], _compute_common_stats(layer_variables))
+                stats = _compute_common_stats(layer_variables, absolute=self.magnitudes)
+                _append_dict_list(self.layer_stats[l_idx], stats)
 
         # compute stats for each individual variable
         for var_idx, stat_list in enumerate(self.variable_stats):
             if stat_list is not None:
                 variables = [self.model.variables[var_idx]]  # _compute_common_stats() needs a list
-                _append_dict_list(stat_list, _compute_common_stats(variables))
+                _append_dict_list(stat_list, _compute_common_stats(variables, absolute=self.magnitudes))
 
     def _collect_raw_values(self):
         # TODO do slicing
@@ -550,7 +555,7 @@ class GradientHistoryCallback(BaseGradientCallback):
         trainable_layer_names: names of layers in `trainable_layer_stats`
     """
 
-    def __init__(self, verbose=1):
+    def __init__(self, magnitudes: bool = True, verbose=1):
         """
         Args:
             verbose: int. To be refactored later:
@@ -558,9 +563,12 @@ class GradientHistoryCallback(BaseGradientCallback):
                  not keep raw gradients.
               2: keeps a sampling of raw gradients
               3: keeps all raw gradients
+
+            magnitudes: whether to collect stats on gradient magnitudes (default), or on their raw values otherwise
         """
         super(GradientHistoryCallback, self).__init__()
         self.verbose = verbose
+        self.magnitudes = magnitudes
 
         # results variable creation
         if verbose == 0:
@@ -608,11 +616,11 @@ class GradientHistoryCallback(BaseGradientCallback):
         # pre-compute lookups
         self._layer_names = [layer.name for layer in self.model.layers]
         self._variable_indices_by_layer = [[]] * len(self.model.layers)
-        for l, layer in enumerate(self.model.layers):
+        for l_idx, layer in enumerate(self.model.layers):
             if layer.trainable_variables:
                 indices = [_index_by_identity(self.model.trainable_variables, var) for var in
                            layer.trainable_variables]
-                self._variable_indices_by_layer[l] = indices
+                self._variable_indices_by_layer[l_idx] = indices
 
         if self.verbose > 1:
             self.gradients_list = []
@@ -664,14 +672,14 @@ class GradientHistoryCallback(BaseGradientCallback):
 
     def _collect_stats(self, loss, gradients, trainable_variables, activations):
         # stats across all gradients as one big bucket (not weight adjusted for different sized layers)
-        _append_dict_list(self.model_stats, _compute_common_stats(gradients))
+        _append_dict_list(self.model_stats, _compute_common_stats(gradients, absolute=self.magnitudes))
 
         # compute stats across all gradients (weights + biases) for each layer
         for l_idx, layer in enumerate(self.model.layers):
             grad_indices = self._variable_indices_by_layer[l_idx]
             layer_grads = [gradients[i] for i in grad_indices]
             if layer_grads:
-                _append_dict_list(self.layer_stats[l_idx], _compute_common_stats(layer_grads))
+                _append_dict_list(self.layer_stats[l_idx], _compute_common_stats(layer_grads, absolute=self.magnitudes))
 
     def plot(self):
         """
@@ -1147,7 +1155,7 @@ def _log_normalize(arr, axis=None):
 # Implementation note: optimised for efficient use within TF loops
 # TODO may need to add some div-by-zero protection at some point
 @tf.function
-def _compute_common_stats(tensors: list):
+def _compute_common_stats(tensors: list, absolute: bool = False):
     """
     Computes common statistics across the provided values.
 
@@ -1157,6 +1165,7 @@ def _compute_common_stats(tensors: list):
 
     Args:
         tensors: a list of tensors, all  assumed to be of type float, but may have different shapes
+        absolute: whether to take `abs(tensors)` or to use their raw values otherwise
     Returns:
         dict of form: {
             'mean': float,
@@ -1171,23 +1180,23 @@ def _compute_common_stats(tensors: list):
     tot_min = tf.constant(float("inf"), dtype=tf.float32)
     tot_max = tf.constant(float("-inf"), dtype=tf.float32)
 
-    for value in tensors:
-        g_mags = tf.abs(value)
-        g_size = tf.size(value, out_type=tf.float32)
-        g_min = tf.reduce_min(g_mags)
-        g_max = tf.reduce_max(g_mags)
-        g_sum = tf.reduce_sum(g_mags)
-        g_mean = g_sum / g_size
-        g_var = tf.reduce_sum((g_mags - g_mean) ** 2)  # variance
+    for tensor in tensors:
+        values = tf.abs(tensor) if absolute else tensor
+        t_size = tf.size(tensor, out_type=tf.float32)
+        t_min = tf.reduce_min(values)
+        t_max = tf.reduce_max(values)
+        t_sum = tf.reduce_sum(values)
+        t_mean = t_sum / t_size
+        t_var = tf.reduce_sum((values - t_mean) ** 2)  # variance
 
-        tot_min = tf.minimum(tot_min, g_min)
-        tot_max = tf.maximum(tot_max, g_max)
+        tot_min = tf.minimum(tot_min, t_min)
+        tot_max = tf.maximum(tot_max, t_max)
 
         # Welford's algorithm for computing running statistics
-        delta = g_mean - tot_mean
-        tot_n += g_size
-        tot_mean += delta * (g_size / tot_n)
-        tot_m2 += g_var + delta ** 2 * (g_size * (tot_n - g_size) / tot_n)
+        delta = t_mean - tot_mean
+        tot_n += t_size
+        tot_mean += delta * (t_size / tot_n)
+        tot_m2 += t_var + delta ** 2 * (t_size * (tot_n - t_size) / tot_n)
 
     return {
         'mean': tot_mean,
@@ -1633,6 +1642,83 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
     if layer_spatial_activities is not None:
         res += (layer_spatial_activities,)
     return res
+
+
+def plot_variable_history(variable_callback: VariableHistoryCallback, group_by_layer=True):
+    """
+    Generates a figure containing a number of plots to visualise variable stats
+    from a VariableHistoryCallback object.
+
+    Args:
+        variable_callback: callback populated with variable stats from training.
+
+        group_by_layer: whether to group stats by layer, or show for individual variables
+    """
+    # collect data
+    iterations = variable_callback.epochs if hasattr(variable_callback, 'epochs') else variable_callback.steps
+    iteration_name = 'epoch' if hasattr(variable_callback, 'epochs') else 'step'
+    model_stats = variable_callback.model_stats
+    layer_ids = variable_callback.trainable_layer_indices
+    layer_names = variable_callback.trainable_layer_names
+    layer_stats = variable_callback.trainable_layer_stats
+    num_trainable_layers = len(layer_stats)
+
+    layer_log_means = np.column_stack([stats['mean'] for stats in layer_stats])
+    layer_log_means = _log_normalize(layer_log_means, axis=1)
+
+    # start figure
+    # - at least 4 layer plots wide
+    # - otherwise target a square grid of layer plots
+    grid_width = max(4, round(math.sqrt(num_trainable_layers) / 2) * 2)  # nearest even number >= 4
+    grid_height = 2 + math.ceil(num_trainable_layers / grid_width)
+    plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
+
+    # all-model high-level summary
+    plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
+    means = variable_callback.model_stats['mean']
+    stds = model_stats['std']
+    mins = model_stats['min']
+    maxs = model_stats['max']
+    plt.plot(iterations, means, label='mean', color='royalblue')
+    plt.fill_between(iterations, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
+    plt.fill_between(iterations, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
+    plt.margins(0)
+    plt.yscale('log')
+    plt.xlabel(iteration_name)
+    plt.ylabel('gradient magnitude')
+    plt.title('All model gradients')
+    plt.legend()
+
+    # layer contributions - high-level summary
+    plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
+    plt.stackplot(iterations, layer_log_means.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
+    plt.margins(0)
+    plt.xlabel(iteration_name)
+    plt.ylabel('Log-proportion contribution')
+    plt.title('Layer contributions')
+    # layer labels placed on centre of layer band on left-hand side
+    placement = layer_log_means[0, :] * 0.5
+    placement[1:] += np.cumsum(layer_log_means[0, :])[0:-1]
+    for l_idx in range(num_trainable_layers):
+        plt.text(len(iterations) / 100, placement[l_idx], f"{layer_names[l_idx]} (#{layer_ids[l_idx]})", ha="left")
+
+    # individual layers
+    for l_idx in range(num_trainable_layers):
+        r = 2 + l_idx // grid_width
+        c = l_idx % grid_width
+        plt.subplot2grid((grid_height, grid_width), (r, c))
+        means = layer_stats[l_idx]['mean']
+        stds = layer_stats[l_idx]['std']
+        mins = layer_stats[l_idx]['min']
+        maxs = layer_stats[l_idx]['max']
+        plt.plot(iterations, means, label='mean', color='royalblue')
+        plt.fill_between(iterations, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
+        plt.fill_between(iterations, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
+        plt.margins(0)
+        plt.yscale('log')
+        plt.title(f"{layer_names[l_idx]} (#{layer_ids[l_idx]})")
+
+    plt.show()
 
 
 def plot_gradient_history(gradient_callback: GradientHistoryCallback):
