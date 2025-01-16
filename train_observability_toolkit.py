@@ -333,7 +333,6 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         # internal tracking
         self._epoch = 0
         self._filtered_stats_variable_indices_by_layer = None
-        self._filtered_stats_variable_indices = None
         self._filtered_value_variable_indices = None
 
     @property
@@ -360,11 +359,27 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         return [layer_names[idx] for idx in self.collected_layer_indices]
 
     @property
-    def collected_layer_stats_variable_indices_by_layer(self):
+    def collected_layer_variable_indices(self):
         """
         Sets of variable indices of variables that make up the results of collected_layer_stats()
         """
         return self._filtered_stats_variable_indices_by_layer
+
+    @property
+    def collected_variable_stats(self):
+        """
+        Gets stats against each variable, omitting any variable that have no collected stats.
+        Use collected_variable_stats_indices() to identify which layers are included.
+        """
+        return [stats for stats in self.variable_stats if stats is not None]
+
+    @property
+    def collected_variable_stats_indices(self):
+        """
+        Indices of variables for which stats are returned by collected_variable_stats.
+        Indices are as per the variable's position in model.variables.
+        """
+        return [idx for idx, stats in enumerate(self.variable_stats) if stats is not None]
 
     @property
     def variables(self):
@@ -414,15 +429,17 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         # pre-compute lookups
         self._filtered_stats_variable_indices_by_layer = variable_indices_by_layer(
             self.model, include_trainable_only=self.trainable_only)
-        stats_variables = self.model.trainable_variables if self.trainable_only else self.model.variables
-        self._filtered_stats_variable_indices = [_index_by_identity(self.model.variables, var)
-                                                 for var in stats_variables]
 
         # init stats
         stats_keys = _compute_common_stats_keys()
         self.model_stats = {key: [] for key in stats_keys}
-        self.variable_stats = [{key: [] for key in stats_keys} if var_idx in self._filtered_stats_variable_indices
+
+        stats_variables = self.model.trainable_variables if self.trainable_only else self.model.variables
+        filtered_stats_variable_indices = [_index_by_identity(self.model.variables, var)
+                                           for var in stats_variables]
+        self.variable_stats = [{key: [] for key in stats_keys} if var_idx in filtered_stats_variable_indices
                                else None for var_idx in range(len(self.model.variables))]
+
         for layer in self.model.layers:
             if self.trainable_only and layer.trainable_variables:
                 self.layer_stats.append({key: [] for key in stats_keys})
