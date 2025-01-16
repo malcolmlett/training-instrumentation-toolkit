@@ -1013,10 +1013,49 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             self.steps = []
         else:
             self.epochs = []
-        self.variables = None
+        self._variables = None
 
         # internal tracking
         self._epoch = 0
+
+    @property
+    def variables(self):
+        """
+        Gets a list corresponding to all variables, with lists of collected
+        values for those being collected and Nones for the rest.
+        The order and size of the returned list corresponds exactly to that returned
+        by model.variables.
+
+        Returns:
+            list of lists of variables, or None if collection sets were not enabled.
+        """
+        return self._variables
+
+    @property
+    def collected_variables(self):
+        """
+        Gets the list of collected variables, containing only those that are collected.
+        The indices of the returned variables relative to the original model can only be
+        determined via collected_variable_indices().
+
+        Returns:
+            list of lists of variables, or None if collection sets were not enabled.
+        """
+        if self.variables is not None:
+            return [var_list for var_list in self._variables if var_list is not None]
+        else:
+            return None
+
+    @property
+    def collected_variable_indices(self):
+        """
+        Gets the indices of variables returned by collected_variables() as they
+        were on the original model and returned by model.variables.
+        """
+        if self._collected_variable_indices is not None:
+            return self._collected_variable_indices
+        else:
+            return None
 
     def on_train_begin(self, logs=None):
         """
@@ -1028,8 +1067,11 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             self._collected_variable_indices = [index for collection_set in self.collection_sets
                                                 for index in collection_set['variable_indices']]
 
-            # TODO initialise list of variable storages across variables and iterations, like:
-            self.variables = [None, None, [], [], None, None]
+            # initialise list of variable storages across variables and iterations
+            # (TODO also prepare slicing rules)
+            self._variables = [[] if var_idx in self._collected_variable_indices else None for var_idx in range(len(model.variables))]
+            print(f"variable indices to collect: {self._collected_variable_indices}")
+            print(f"initialised variables storage: {self._variables}")
 
     def on_train_end(self, logs=None):
         pass
@@ -1050,16 +1092,16 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             self.steps.append(self.params['steps'] * self._epoch + batch)
             self._collect_stats()
 
-    def on_train_batch_end(self, batch, loss=None):
+    def on_train_batch_end(self, batch, logs=None):
         if self.per_step and not self.before_updates:
             self.steps.append(self.params['steps'] * self._epoch + batch)
             self._collect_stats()
 
     def _collect_stats(self):
-        # TODO complete
-        # TODO later on, do slicing
-        for var_idx, var_list in enumerate(self.variables):
-            state = self.model.variables[var_idx].copy()
+        # TODO do slicing
+        for var_idx, var_list in enumerate(self._variables):
+          if var_list is not None:
+            state = tf.identity(self.model.variables[var_idx])  # get copy of current state
             var_list.append(state)
 
 
