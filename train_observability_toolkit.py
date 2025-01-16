@@ -1654,17 +1654,19 @@ def plot_variable_history(variable_callback: VariableHistoryCallback, group_by_l
 
         group_by_layer: whether to group stats by layer, or show for individual variables
     """
+    if not group_by_layer:
+        raise ValueError("group_by_layer=False not yet supported")
+
     # collect data
     iterations = variable_callback.epochs if hasattr(variable_callback, 'epochs') else variable_callback.steps
     iteration_name = 'epoch' if hasattr(variable_callback, 'epochs') else 'step'
+    trainable_only = variable_callback.trainable_only
+    magnitudes = variable_callback.magnitudes
     model_stats = variable_callback.model_stats
-    layer_ids = variable_callback.trainable_layer_indices
-    layer_names = variable_callback.trainable_layer_names
-    layer_stats = variable_callback.trainable_layer_stats
+    layer_ids = variable_callback.collected_layer_indices
+    layer_names = variable_callback.collected_layer_names
+    layer_stats = variable_callback.collected_layer_stats
     num_trainable_layers = len(layer_stats)
-
-    layer_log_means = np.column_stack([stats['mean'] for stats in layer_stats])
-    layer_log_means = _log_normalize(layer_log_means, axis=1)
 
     # start figure
     # - at least 4 layer plots wide
@@ -1683,24 +1685,11 @@ def plot_variable_history(variable_callback: VariableHistoryCallback, group_by_l
     plt.fill_between(iterations, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
     plt.fill_between(iterations, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
     plt.margins(0)
-    plt.yscale('log')
+    plt.yscale('log' if magnitudes else 'linear')
     plt.xlabel(iteration_name)
-    plt.ylabel('gradient magnitude')
-    plt.title('All model gradients')
+    plt.ylabel('magnitudes' if magnitudes else 'value')
+    plt.title('All model trainable variables' if trainable_only else 'All model variables (incl. non-trainable)')
     plt.legend()
-
-    # layer contributions - high-level summary
-    plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
-    plt.stackplot(iterations, layer_log_means.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
-    plt.margins(0)
-    plt.xlabel(iteration_name)
-    plt.ylabel('Log-proportion contribution')
-    plt.title('Layer contributions')
-    # layer labels placed on centre of layer band on left-hand side
-    placement = layer_log_means[0, :] * 0.5
-    placement[1:] += np.cumsum(layer_log_means[0, :])[0:-1]
-    for l_idx in range(num_trainable_layers):
-        plt.text(len(iterations) / 100, placement[l_idx], f"{layer_names[l_idx]} (#{layer_ids[l_idx]})", ha="left")
 
     # individual layers
     for l_idx in range(num_trainable_layers):
@@ -1715,7 +1704,7 @@ def plot_variable_history(variable_callback: VariableHistoryCallback, group_by_l
         plt.fill_between(iterations, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
         plt.fill_between(iterations, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
         plt.margins(0)
-        plt.yscale('log')
+        plt.yscale('log' if magnitudes else 'linear')
         plt.title(f"{layer_names[l_idx]} (#{layer_ids[l_idx]})")
 
     plt.show()
