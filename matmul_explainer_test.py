@@ -38,7 +38,7 @@ def conv_classify_2d_test():
     ]).astype(np.float32)
     k = tf.reshape(k, shape=(3, 3, 1, 1))
 
-    counts, sums = conv_classify(a, k, confidence=0.95)
+    counts, sums = conv_classify(a, k, confidence=0.75)
 
     expected_counts = [126, 84, 168, 21, 14, 28, 0, 0, 0]
     actual_counts = np.sum(counts, axis=(0, 1, 2, 3))
@@ -46,10 +46,8 @@ def conv_classify_2d_test():
 
     expected_sums = [57.4, 0., -77., 1.4000002, 0., -1.4000001, 0., 0., 0.,]
     actual_sums = np.sum(sums, axis=(0, 1, 2, 3))
-    assert np.allclose(actual_sums == expected_sums), f"Expected sums {expected_sums}, got: {actual_sums}"
+    assert np.allclose(actual_sums, expected_sums), f"Expected sums {expected_sums}, got: {actual_sums}"
 
-    real_matmul = np.matmul(a, a)
-    derived_matmul = np.sum(sums, axis=-1)
     expected_conv = tf.nn.convolution(a, k)
     derived_conv = tf.reduce_sum(sums, axis=-1)
     assert np.allclose(expected_conv, derived_conv), "real conv and derived conv are different"
