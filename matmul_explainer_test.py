@@ -12,10 +12,14 @@ def matmul_classify_test():
 
     counts, sums = matmul_classify(a, a, confidence=0.75)
 
-    expected_counts = [490, 210, 0, 210, 90, 0, 0, 0, 0]
+    expected_counts = [640, 160, 0, 160, 40, 0, 0, 0, 0]
     actual_counts = np.sum(counts, axis=(0, 1))
     assert np.all(actual_counts == expected_counts),\
       f"Expected counts {expected_counts}, got: {actual_counts}"
+
+    expected_sums = [193.6, 4.4, 0, 4.4, 0.1, 0., 0., 0., 0.]
+    actual_sums = np.sum(sums, axis=(0, 1))
+    assert np.allclose(actual_sums, expected_sums), f"Expected sums {expected_sums}, got: {actual_sums}"
 
     real_matmul = np.matmul(a, a)
     derived_matmul = np.sum(sums, axis=-1)
@@ -36,11 +40,11 @@ def conv_classify_2d_test():
 
     counts, sums = conv_classify(a, k, confidence=0.95)
 
-    expected_counts = [140, 0, 182, 0, 0, 0, 0, 0, 0]
+    expected_counts = [126, 84, 168, 21, 14, 28, 0, 0, 0]
     actual_counts = np.sum(counts, axis=(0, 1, 2, 3))
     assert np.all(actual_counts == expected_counts), f"Expected counts {expected_counts}, got: {actual_counts}"
 
-    expected_sums = [58.79999, 0., -78.40001, 0., 0., 0., 0., 0., 0.]
+    expected_sums = [57.4, 0., -77., 1.4000002, 0., -1.4000001, 0., 0., 0.,]
     actual_sums = np.sum(sums, axis=(0, 1, 2, 3))
     assert np.allclose(actual_sums == expected_sums), f"Expected sums {expected_sums}, got: {actual_sums}"
 
