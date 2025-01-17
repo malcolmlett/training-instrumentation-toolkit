@@ -1891,20 +1891,27 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
     return res
 
 
-def plot_variable_history(variable_callback: VariableHistoryCallback):
+def plot_variable_history(variable_callback: VariableHistoryCallback, magnitudes=False):
     """
     Generates a figure containing a number of plots to visualise variable stats
     from a VariableHistoryCallback object.
 
     Args:
         variable_callback: callback populated with variable stats from training.
+        magnitudes: whether to show raw values or estimate stats for magnitudes.
+            When showing magnitudes, automatically switches to a log plot for easier
+            comparison across differing scales.
+            Forced when the original callback collected magnitude data.
     """
 
     # collect data
     iterations = variable_callback.epochs if hasattr(variable_callback, 'epochs') else variable_callback.steps
     iteration_name = 'epoch' if hasattr(variable_callback, 'epochs') else 'step'
     trainable_only = variable_callback.trainable_only
-    magnitudes = variable_callback.magnitudes
+    needs_conversion_to_magnitudes = magnitudes
+    if variable_callback.magnitudes:
+        magnitudes = True  # forced
+        needs_conversion_to_magnitudes = False
     model_stats = variable_callback.model_stats
 
     model = variable_callback.model
@@ -1933,10 +1940,10 @@ def plot_variable_history(variable_callback: VariableHistoryCallback):
     _plot_add_quantiles(iterations, model_stats)
     plt.margins(0)
     plt.yscale('log')
-    plt.xlabel(iteration_name)
-    plt.ylabel('scale')
     plt.title(('All model trainable variables' if trainable_only else 'All model variables (incl. non-trainable)') +
               ('\n(before updates)' if 'before_updates' else '\n(after updates)'))
+    plt.xlabel(iteration_name)
+    plt.ylabel('mean scale of variable magnitudes')
     plt.legend()
 
     # layer contributions - high-level summary
@@ -1959,9 +1966,9 @@ def plot_variable_history(variable_callback: VariableHistoryCallback):
     plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
     plt.stackplot(iterations, band_log_scales.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
     plt.margins(0)
+    plt.title('Layer comparison')
     plt.xlabel(iteration_name)
     plt.ylabel('Variable scale log-proportion')
-    plt.title('Layer comparison')
     # layer labels placed on centre of layer band on left-hand side
     x_loc = round(band_log_scales.shape[0] / 100)
     placement = band_log_scales[x_loc, :] * 0.5
@@ -1975,14 +1982,22 @@ def plot_variable_history(variable_callback: VariableHistoryCallback):
         r = 2 + v_idx // grid_width
         c = v_idx % grid_width
         plt.subplot2grid((grid_height, grid_width), (r, c))
-        _plot_add_quantiles(iterations, variable_stats[v_idx])
+        data = variable_stats[v_idx]
+        if needs_conversion_to_magnitudes:
+            # approximate stats over magnitudes
+            data = np.abs(data.to_numpy())
+            data = np.sort(data, axis=-1)
+            data = pd.DataFrame(data, columns=variable_stats[v_idx].columns)
+        _plot_add_quantiles(iterations, data)
         plt.margins(0)
         plt.yscale('log' if magnitudes else 'linear')
+        if c == 0:
+            plt.ylabel('log-magnitude' if magnitudes else 'value')
         plt.title(variable_display_names[v_idx])
 
         # text overlay
-        plot_min = np.min(variable_stats[v_idx].to_numpy())
-        plot_max = np.max(variable_stats[v_idx].to_numpy())
+        plot_min = np.min(data.to_numpy())
+        plot_max = np.max(data.to_numpy())
         plot_width = np.max(iterations)
         plot_mid = (plot_min + plot_max) * 0.5
         if variable_shapes:
@@ -2040,9 +2055,9 @@ def plot_gradient_history(gradient_callback: GradientHistoryCallback, magnitudes
     _plot_add_quantiles(iterations, model_stats)
     plt.margins(0)
     plt.yscale('log')
+    plt.title('All model gradients')
     plt.xlabel(iteration_name)
     plt.ylabel('mean scale of gradient magnitudes')
-    plt.title('All model gradients')
     plt.legend()
 
     # layer contributions - high-level summary
@@ -2065,9 +2080,9 @@ def plot_gradient_history(gradient_callback: GradientHistoryCallback, magnitudes
     plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
     plt.stackplot(iterations, band_log_scales.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
     plt.margins(0)
+    plt.title('Layer comparison')
     plt.xlabel(iteration_name)
     plt.ylabel('Gradient scale log-proportion')
-    plt.title('Layer comparison')
     # layer labels placed on centre of layer band on left-hand side
     x_loc = round(band_log_scales.shape[0] / 100)
     placement = band_log_scales[x_loc, :] * 0.5
