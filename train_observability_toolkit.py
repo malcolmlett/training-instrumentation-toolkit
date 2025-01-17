@@ -968,7 +968,7 @@ class ActivityHistoryCallback(BaseGradientCallback):
         self._num_batches = tf.cast(self._steps_per_epoch, dtype=tf.float32)  # TODO needs refining
 
         # init stats
-        stats_keys = _compute_common_stats_keys()
+        stats_keys = self._stat_keys()
         self.model_stats = {key: [] for key in stats_keys}
         self.layer_stats = [{key: [] for key in stats_keys} for _ in self.model.layers]
 
