@@ -1074,9 +1074,9 @@ class ActivityHistoryCallback(BaseGradientCallback):
         iteration_model_stats = self._compute_model_stats(iteration_layer_stats)
 
         # emit for results
-        self._append_dict_list(self.model_stats, iteration_model_stats)
+        _append_dict_list(self.model_stats, iteration_model_stats)
         for l_idx, stats in enumerate(iteration_layer_stats):
-            self._append_dict_list(self.layer_stats[l_idx], stats)
+            _append_dict_list(self.layer_stats[l_idx], stats)
 
     def _collect_raw_values(self, activations):
         # TODO do slicing
@@ -1103,13 +1103,6 @@ class ActivityHistoryCallback(BaseGradientCallback):
             dic[f"max_{key}"] = max([stats[key] for stats in layer_stats_list])
             dic[f"mean_{key}"] = np.mean([stats[key] for stats in layer_stats_list])
         return dic
-
-    @staticmethod
-    def _append_dict_list(dic, addendum_dict):
-        for key in addendum_dict.keys():
-            if key not in dic:
-                dic[key] = []
-            dic[key].append(addendum_dict[key])
 
     @staticmethod
     def _stat_keys():
