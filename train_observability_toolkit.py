@@ -1939,6 +1939,37 @@ def plot_variable_history(variable_callback: VariableHistoryCallback):
               ('\n(before updates)' if 'before_updates' else '\n(after updates)'))
     plt.legend()
 
+    # layer contributions - high-level summary
+    # - for easier visual display uses only the largest variable from each layer
+    # - also only includes trainable layers
+    filtered_layer_metas = []  # list of tuples: (l_idx, layer, var_idx)
+    for l_idx, layer in enumerate(model.layers):
+        biggest_var = None
+        if layer.trainable:
+            for var in layer.variables:
+                if biggest_var is None or tf.size(var) > tf.size(biggest_var):
+                    biggest_var = var
+        if biggest_var is not None:
+            var_idx = _index_by_identity(model.trainable_variables, biggest_var)
+            filtered_layer_metas.append((l_idx, layer, var_idx))
+    filtered_variables = [variable_stats[v_idx] for l_idx, layer, v_idx in filtered_layer_metas]
+    scales = get_scales_across_stats_list(filtered_variables, scale_quantile=75)
+    band_log_scales = _log_normalize(scales, axis=-1)
+
+    plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
+    plt.stackplot(iterations, band_log_scales.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
+    plt.margins(0)
+    plt.xlabel(iteration_name)
+    plt.ylabel('Variable scale log-proportion')
+    plt.title('Layer comparison')
+    # layer labels placed on centre of layer band on left-hand side
+    x_loc = round(band_log_scales.shape[0] / 100)
+    placement = band_log_scales[x_loc, :] * 0.5
+    placement[1:] += np.cumsum(band_log_scales[0, :])[0:-1]
+    for f_idx in range(len(filtered_layer_metas)):
+        l_idx, layer, v_idx = filtered_layer_metas[f_idx]
+        plt.text(len(iterations) / 100, placement[l_idx], layer.name, ha="left")
+
     # individual layers or variables
     for v_idx in range(num_variable_stats):
         r = 2 + v_idx // grid_width
@@ -2060,9 +2091,7 @@ def plot_gradient_history(gradient_callback: GradientHistoryCallback):
     plt.show()
 
 
-# TODO make more generic show that passing the activity_callback is a convenience, but can take raw params too
-# TODO rename to plot_activity_history()
-def plot_unit_activity(activity_callback):
+def plot_activity_rate_history(activity_callback):
     """
     Plots a high-level summary of unit activity rates across the entire model
     and across each layer.
