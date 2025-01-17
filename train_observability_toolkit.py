@@ -1993,18 +1993,25 @@ def plot_variable_history(variable_callback: VariableHistoryCallback):
     plt.show()
 
 
-def plot_gradient_history(gradient_callback: GradientHistoryCallback):
+def plot_gradient_history(gradient_callback: GradientHistoryCallback, magnitudes=False):
     """
     Generates a figure containing a number of plots to visualise gradient stats
     from a GradientHistoryCallback object.
 
     Args:
         gradient_callback: callback populated with gradient stats from training.
+        magnitudes: whether to show raw values or estimate stats for magnitudes.
+            When showing magnitudes, automatically switches to a log plot for easier
+            comparison across differing scales.
+            Forced when the original callback collected magnitude data.
     """
     # collect data
     iterations = gradient_callback.epochs if hasattr(gradient_callback, 'epochs') else gradient_callback.steps
     iteration_name = 'epoch' if hasattr(gradient_callback, 'epochs') else 'step'
-    magnitudes = gradient_callback.magnitudes
+    needs_conversion_to_magnitudes = magnitudes
+    if gradient_callback.magnitudes:
+        magnitudes = True  # forced
+        needs_conversion_to_magnitudes = False
     model_stats = gradient_callback.model_stats
 
     model = gradient_callback.model
@@ -2034,7 +2041,7 @@ def plot_gradient_history(gradient_callback: GradientHistoryCallback):
     plt.margins(0)
     plt.yscale('log')
     plt.xlabel(iteration_name)
-    plt.ylabel('scale of gradient magnitudes')
+    plt.ylabel('mean scale of gradient magnitudes')
     plt.title('All model gradients')
     plt.legend()
 
@@ -2074,20 +2081,29 @@ def plot_gradient_history(gradient_callback: GradientHistoryCallback):
         r = 2 + v_idx // grid_width
         c = v_idx % grid_width
         plt.subplot2grid((grid_height, grid_width), (r, c))
-        _plot_add_quantiles(iterations, gradient_stats[v_idx])
+        data = gradient_stats[v_idx]
+        if needs_conversion_to_magnitudes:
+            # approximate stats over magnitudes
+            data = np.abs(data.to_numpy())
+            data = np.sort(data, axis=-1)
+            data = pd.DataFrame(data, columns=gradient_stats[v_idx].columns)
+        _plot_add_quantiles(iterations, data)
         plt.margins(0)
         plt.yscale('log' if magnitudes else 'linear')
+        if c == 0:
+            plt.ylabel('log-magnitude' if magnitudes else 'value')
         plt.title(variable_display_names[v_idx])
 
         # text overlay
-        plot_min = np.min(gradient_stats[v_idx].to_numpy())
-        plot_max = np.max(gradient_stats[v_idx].to_numpy())
+        plot_min = np.min(data.to_numpy())
+        plot_max = np.max(data.to_numpy())
         plot_width = np.max(iterations)
         plot_mid = (plot_min + plot_max) * 0.5
         if variable_shapes:
             plt.text(plot_width * 0.5, plot_mid,
                      f"{variable_shapes[v_idx]}",
                      horizontalalignment='center', verticalalignment='center')
+
     plt.show()
 
 
