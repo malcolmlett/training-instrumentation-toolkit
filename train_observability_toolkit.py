@@ -964,8 +964,6 @@ class ActivityHistoryCallback(BaseGradientCallback):
         """
         # pre-compute lookups
         self._layer_names = [layer.name for layer in self.model.layers]
-        self._steps_per_epoch = self.params['steps']
-        self._num_batches = tf.cast(self._steps_per_epoch, dtype=tf.float32)  # TODO needs refining
 
         # init stats
         stats_keys = self._stat_keys()
@@ -1050,7 +1048,7 @@ class ActivityHistoryCallback(BaseGradientCallback):
         # (uses partial stats that were accumulated across the steps in the batch)
         if not self.per_step:
             self.epochs.append(epoch)
-            self._collect_stats(self._num_batches)
+            self._collect_stats(self.params['steps'])
             self._collect_raw_values(activations)
 
     # auto-graphed for faster iteration over layer outputs
@@ -1108,7 +1106,6 @@ class ActivityHistoryCallback(BaseGradientCallback):
             dic[f"mean_{key}"] = np.mean([stats[key] for stats in layer_stats_list])
         return dic
 
-    # TODO check if can use common version of this instead
     @staticmethod
     def _append_dict_list(dic, addendum_dict):
         for key in addendum_dict.keys():
