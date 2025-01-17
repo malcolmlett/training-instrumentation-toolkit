@@ -340,7 +340,6 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
 
         # internal tracking
         self._epoch = 0
-        self._filtered_stats_variable_indices_by_layer = None
         self._filtered_value_variable_indices = None
         self._variable_stats_quantiles = [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
 
@@ -405,10 +404,6 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         """
         Initialises tracking, now that we know the model etc.
         """
-        # pre-compute lookups
-        self._filtered_stats_variable_indices_by_layer = variable_indices_by_layer(
-            self.model, include_trainable_only=self.trainable_only)
-
         # init stats
         stats_variables = self.model.trainable_variables if self.trainable_only else self.model.variables
         filtered_stats_variable_indices = [_index_by_identity(self.model.variables, var)
@@ -478,10 +473,10 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         for var_idx, stat_list in enumerate(self.variable_stats):
             if stat_list is not None:
                 var = self.model.variables[var_idx]
-                stats_tensor = self._compute_percentile_stats(
+                stats_tensor = _compute_percentile_stats(
                     var,
                     quartiles=self._variable_stats_quantiles,
-                    do_abs=self.magnitudes)
+                    magnitudes=self.magnitudes)
                 stat_list.append(stats_tensor)
 
     def _collect_raw_values(self):
@@ -491,21 +486,6 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
                 if val_list is not None:
                     state = tf.identity(self.model.variables[var_idx])  # get copy of current state
                     val_list.append(state)
-
-    @tf.function
-    def _compute_percentile_stats(self, tensor, quartiles, do_abs):
-        """
-        Computes a set of percentiles across the given tensor.
-        For tensors that commonly have values distributed either side of zero, the median will
-        typically be around zero, and the 25th and 75th percentiles represent the respective medians
-        in the positive and negative halves.
-        Note: I haven't done experiments yet but in theory auto-graphing this function still adds some
-        performance improvement even though it's only calling into a single standard TF function.
-        :returns: tensor of values
-        """
-        if do_abs:
-            tensor = tf.abs(tensor)
-        return tfp.stats.percentile(tensor, quartiles, interpolation='linear')
 
 
 class GradientHistoryCallback(BaseGradientCallback):
@@ -519,13 +499,10 @@ class GradientHistoryCallback(BaseGradientCallback):
         steps: list of int. Step numbers correlated to captured gradients/gradient-stats
             (only populated if verbose > 0)
         model_stats: dict of np-arrays. Keys list out different stats, eg: mean, min, max, std
-        layer_stats: list of dict of np-arrays. One list item for each layer, with each
-            list item containing either a dict of stat np-arrays like for model_stats,
-            or `None` if it doesn't have any trainable variable.
         gradient_stats: list of dict of np-arrays. One list item for each gradient.
     """
 
-    def __init__(self, per_step=False, magnitudes=True, collection_sets=None, **kwargs):
+    def __init__(self, per_step=False, magnitudes=False, collection_sets=None, **kwargs):
         """
         Args:
             per_step: bool. Whether to collect per-step stats and raw values, or per-epoch otherwise.
@@ -535,7 +512,7 @@ class GradientHistoryCallback(BaseGradientCallback):
                 is collected on each update step.
                 The same applies to layer output capture if enabled.
 
-            magnitudes: whether to collect stats on gradient magnitudes (default), or on their raw values.
+            magnitudes: whether to collect stats on gradient magnitudes, or on their raw values (default).
 
             collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
               If omitted, this callback collects nothing (in the future it may collect stats).
@@ -551,43 +528,15 @@ class GradientHistoryCallback(BaseGradientCallback):
             self.steps = []
         else:
             self.epochs = []
-        self.model_stats = {}  # dict (by stat) of lists (by iteration)
-        self.layer_stats = []  # list (by layer) of dicts (by stat) of lists (by iteration)
-        self.gradient_stats = []  # list (by variable) of dicts (by stat) of lists (by iteration)
+        self.model_stats = None
+        self.gradient_stats = []  # initially list (by variable) of list (by iteration) of tensors
         self._gradient_values = None
 
         # internal tracking
         self._epoch = 0
-        self._filtered_stats_variable_indices_by_layer = None
         self._filtered_value_variable_indices = None
         self._trainable_variable_index_by_variable_index = None
-
-    @property
-    def collected_layer_stats(self):
-        """
-        Gets stats filtered only on trainable layers.
-        """
-        return [stats for stats in self.layer_stats if stats is not None]
-
-    @property
-    def collected_layer_stats_indices(self):
-        """
-        Indices of layers as returned by collected_layer_stats()
-        """
-        return [idx for idx, stats in enumerate(self.layer_stats) if stats is not None]
-
-    # TODO remove this method
-    @property
-    def collected_layer_names(self):
-        """
-        Names of layers as returned by collected_layer_stats()
-        """
-        layer_names = [layer.name for layer in self.model.layers]
-        return [layer_names[idx] for idx in self.collected_layer_stats_indices]
-
-    @property
-    def collected_layer_stats_variable_indices(self):
-        return self._filtered_stats_variable_indices_by_layer
+        self._gradient_stats_quantiles = [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
 
     @property
     def collected_gradient_stats(self):
@@ -651,35 +600,21 @@ class GradientHistoryCallback(BaseGradientCallback):
         Initialises tracking, now that we know the model and number of epochs and steps per epoch.
         """
         # pre-compute lookups
-        self._filtered_stats_variable_indices_by_layer = variable_indices_by_layer(
-            self.model, include_trainable_only=True)
         v_to_t = [_index_by_identity(self.model.trainable_variables, var) for var in self.model.variables]
         self._trainable_variable_index_by_variable_index = [idx if idx >= 0 else None for idx in v_to_t]
 
         # init stats
-        stats_keys = _compute_common_stats_keys()
-        self.model_stats = {key: [] for key in stats_keys}
-
         filtered_stats_variable_indices = [_index_by_identity(self.model.variables, var)
                                            for var in self.model.trainable_variables]
-        self.gradient_stats = [{key: [] for key in stats_keys} if var_idx in filtered_stats_variable_indices
+        self.gradient_stats = [[] if var_idx in filtered_stats_variable_indices
                                else None for var_idx in range(len(self.model.variables))]
 
-        for layer in self.model.layers:
-            if layer.trainable_variables:
-                self.layer_stats.append({key: [] for key in stats_keys})
-            else:
-                self.layer_stats.append(None)
-
-        # expand collection_sets
+        # expand collection_sets and initialise gradient storages
+        # (TODO also prepare slicing rules)
         if self.collection_sets:
             self.collection_sets = _normalize_collection_sets_for_variables(self.model, self.collection_sets)
             self._filtered_value_variable_indices = [index for collection_set in self.collection_sets
                                                      for index in collection_set['variable_indices']]
-
-        # initialise list of gradient storages across gradients and iterations
-        # (TODO also prepare slicing rules)
-        if self.collection_sets:
             self._gradient_values = [[] if var_idx in self._filtered_value_variable_indices else None
                                      for var_idx in range(len(self.model.variables))]
 
@@ -693,16 +628,18 @@ class GradientHistoryCallback(BaseGradientCallback):
             self.steps = np.array(self.steps)
         else:
             self.epochs = np.array(self.epochs)
-        for key in self.model_stats.keys():
-            self.model_stats[key] = np.array(self.model_stats[key])
-        for l_idx in range(len(self.layer_stats)):
-            if self.layer_stats[l_idx] is not None:
-                for key in self.layer_stats[l_idx].keys():
-                    self.layer_stats[l_idx][key] = np.array(self.layer_stats[l_idx][key])
+
+        # convert per-variable stats
+        # - from: list (by var) of list (by iteration) of tensor
+        # - to:   list (by var) of pd-dataframe: iterations x quartiles
         for var_idx in range(len(self.gradient_stats)):
             if self.gradient_stats[var_idx] is not None:
-                for key in self.gradient_stats[var_idx].keys():
-                    self.gradient_stats[var_idx][key] = np.array(self.gradient_stats[var_idx][key])
+                table = [stats.numpy() for stats in self.gradient_stats[var_idx]]
+                df = pd.DataFrame(table, columns=self._gradient_stats_quantiles)
+                self.gradient_stats[var_idx] = df
+
+        # calculate global model stats
+        self.model_stats = compute_scale_distribution_across_stats_list(self.gradient_stats, scale_quantile=75)
 
     def on_epoch_begin(self, epoch, logs=None):
         """
@@ -735,22 +672,15 @@ class GradientHistoryCallback(BaseGradientCallback):
         # the model.variables list as the internal reference point, so we must convert indices.
         v_to_t = self._trainable_variable_index_by_variable_index
 
-        # collect stats across all model variables as one big bucket
-        _append_dict_list(self.model_stats, _compute_common_stats(gradients, absolute=self.magnitudes))
-
-        # compute stats across the variables for each layer as a group
-        for l_idx, layer in enumerate(self.model.layers):
-            grad_indices = self._filtered_stats_variable_indices_by_layer[l_idx]
-            layer_grads = [gradients[v_to_t[i]] for i in grad_indices]
-            if layer_grads:
-                stats = _compute_common_stats(layer_grads, absolute=self.magnitudes)
-                _append_dict_list(self.layer_stats[l_idx], stats)
-
         # compute stats for each individual variable
         for var_idx, stat_list in enumerate(self.gradient_stats):
             if stat_list is not None:
-                variable_grads = [gradients[v_to_t[var_idx]]]  # _compute_common_stats() needs a list
-                _append_dict_list(stat_list, _compute_common_stats(variable_grads, absolute=self.magnitudes))
+                var = gradients[v_to_t[var_idx]]
+                stats_tensor = _compute_percentile_stats(
+                    var,
+                    quartiles=self._gradient_stats_quantiles,
+                    magnitudes=self.magnitudes)
+                stat_list.append(stats_tensor)
 
     def _collect_raw_values(self, gradients):
         # note: gradients list is always relative to model.trainable_variables, but I use
@@ -1367,6 +1297,30 @@ def _compute_common_stats(tensors: list, absolute: bool = False):
     }
 
 
+@tf.function
+def _compute_percentile_stats(tensor, quartiles, magnitudes=False):
+    """
+    Computes a set of percentiles across the given tensor.
+
+    For tensors that commonly have values distributed either side of zero, the median will
+    typically be around zero, and the 25th and 75th percentiles represent the respective medians
+    in the positive and negative halves.
+
+    Note: I haven't done experiments yet but in theory auto-graphing this function still adds some
+    performance improvement even though it's only calling into a single standard TF function.
+
+    Args:
+        tensor: single tensor of values
+        quartiles: list of quantiles to compute values for
+        magnitudes: whether to calculate against the magnitudes of the tensor values, or the raw values otherwise
+    Returns:
+        single tensor of percentile values
+    """
+    if magnitudes:
+        tensor = tf.abs(tensor)
+    return tfp.stats.percentile(tensor, quartiles, interpolation='linear')
+
+
 def variable_indices_by_layer(model: tf.keras.Model, include_trainable_only: bool = False):
     """
     Groups indices of model.variable by layer.
@@ -1504,38 +1458,53 @@ def _append_dict_list(dic, addendum_dict):
         dic[key].append(addendum_dict[key])
 
 
+def get_scales_across_stats_list(stats_dataframes, scale_quantile=75):
+    """
+    Extracts a set of "scale" heuristics from a set of quantile stats.
+    Assumes the use of dataframes where each column represents a quantile, represented as a number in range 0 to 100.
+    Args:
+        stats_dataframes: list of pandas dataframes of shape (iterations, quantiles)
+        scale_quantile: the quantile used as a proxy for the "scale" of the typical values.
+            Must be present within the columns of the dataframe.
+            Its opposite (100-scale-quantile) must also be present.
+    Returns:
+        np-array with shape (iterations, variables)
+    """
+    scales = []
+    for variable_stat in stats_dataframes:
+        if variable_stat is not None:
+            # estimate the overall magnitude scale at the target quantile
+            pos_mean = variable_stat[scale_quantile].to_numpy()
+            neg_mean = variable_stat[100-scale_quantile].to_numpy()
+            if np.any(neg_mean < 0):
+                # assume source dataset falls either side of zero
+                # - scale is average of the positive and negative mean magnitudes
+                scale = (pos_mean + abs(neg_mean)) * 0.5
+            else:
+                # assume source dataset is positive-only
+                # - scale is just the target quantile alone
+                scale = pos_mean
+            scales.append(scale)  # shape: variables x iterations
+    return np.stack(scales, axis=-1)  # shape: iterations x variables
+
+
 def compute_scale_distribution_across_stats_list(stats_dataframes, scale_quantile=75, quantiles=None):
     """
     Calculates meta-stats against a set of quantile stats.
     Assumes the use of dataframes where each column represents a quantile, represented as a number in range 0 to 100.
     Args:
-        stats_dataframes: list of pandas dataframes
+        stats_dataframes: list of pandas dataframes of shape (iterations, quantiles)
         scale_quantile: the quantile used as a proxy for the "scale" of the typical values.
             Must be present within the columns of the dataframe.
             Its opposite (100-scale-quantile) must also be present.
         quantiles: set of quantiles to return in final result.
     Returns:
-        pandas dataframe
+        pandas dataframe with shape (iterations, quantiles)
     """
     quantiles = quantiles or [0, 25, 50, 75, 100]
 
     # collect a table of all scales across all stats
-    scales = []
-    for variable_stat in stats_dataframes:
-        if variable_stat is not None:
-            if quantiles is None:
-                quantiles = variable_stat.columns.to_numpy()
-
-            # estimate the overall magnitude scale at the target quantile
-            pos_mean = variable_stat[scale_quantile].to_numpy()
-            neg_mean = variable_stat[100-scale_quantile].to_numpy()
-            if np.any(neg_mean < 0):
-                scale = (pos_mean + abs(neg_mean)) * 0.5
-            else:
-                # assume stats are drawn from a positive-only dataset so pos_mean is our target quantile already
-                scale = pos_mean
-            scales.append(scale)  # shape: variables x iterations
-    scales = np.stack(scales, axis=-1)  # shape: iterations x variables
+    scales = get_scales_across_stats_list(stats_dataframes, scale_quantile)
 
     # calculate stats across the table
     stats = tfp.stats.percentile(scales, quantiles, axis=-1, interpolation='linear')
@@ -2006,67 +1975,73 @@ def plot_gradient_history(gradient_callback: GradientHistoryCallback):
     iteration_name = 'epoch' if hasattr(gradient_callback, 'epochs') else 'step'
     magnitudes = gradient_callback.magnitudes
     model_stats = gradient_callback.model_stats
-    layer_ids = gradient_callback.collected_layer_stats_indices
-    layer_names = gradient_callback.collected_layer_names
-    layer_stats = gradient_callback.collected_layer_stats
-    num_trainable_layers = len(layer_stats)
+
+    model = gradient_callback.model
+    gradient_stats = gradient_callback.collected_gradient_stats
+    variable_ids = gradient_callback.collected_gradient_stats_indices
+    num_gradient_stats = len(gradient_stats)
+    layer_id_lookup = layer_indices_by_variable(model)
+    variable_shapes = [model.variables[v_idx].shape for v_idx in variable_ids]
+
+    variable_display_names = []
+    for v_idx in variable_ids:
+        layer_id = layer_id_lookup[v_idx]
+        layer_name = model.layers[layer_id].name
+        variable_name = model.variables[v_idx].name
+        variable_display_names.append(f"{layer_name}(#{layer_id})/{variable_name}")
 
     # start figure
     # - at least 4 layer plots wide
     # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_trainable_layers) / 2) * 2)  # nearest even number >= 4
-    grid_height = 2 + math.ceil(num_trainable_layers / grid_width)
+    grid_width = max(4, round(math.sqrt(num_gradient_stats) / 2) * 2)  # nearest even number >= 4
+    grid_height = 2 + math.ceil(num_gradient_stats / grid_width)
     plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
 
     # all-model high-level summary
     plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
-    means = gradient_callback.model_stats['mean']
-    stds = model_stats['std']
-    mins = model_stats['min']
-    maxs = model_stats['max']
-    plt.plot(iterations, means, label='mean', color='royalblue')
-    plt.fill_between(iterations, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
-    plt.fill_between(iterations, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
+    _plot_add_quantiles(iterations, model_stats)
     plt.margins(0)
-    plt.yscale('log' if magnitudes else 'linear')
+    plt.yscale('log')
     plt.xlabel(iteration_name)
-    plt.ylabel('gradient magnitude' if magnitudes else 'gradient')
+    plt.ylabel('scale of gradient magnitudes')
     plt.title('All model gradients')
     plt.legend()
 
     # layer contributions - high-level summary
-    # unfortunately it's only meaningful if gradients magnitudes are being reported on
-    if magnitudes:
-        layer_log_means = np.column_stack([stats['mean'] for stats in layer_stats])
-        layer_log_means = _log_normalize(layer_log_means, axis=1)
+    scales = get_scales_across_stats_list(gradient_stats, scale_quantile=75)
+    band_log_means = _log_normalize(scales, axis=-1)
 
-        plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
-        plt.stackplot(iterations, layer_log_means.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
-        plt.margins(0)
-        plt.xlabel(iteration_name)
-        plt.ylabel('Log-proportion contribution')
-        plt.title('Layer contributions')
-        # layer labels placed on centre of layer band on left-hand side
-        placement = layer_log_means[0, :] * 0.5
-        placement[1:] += np.cumsum(layer_log_means[0, :])[0:-1]
-        for l_idx in range(num_trainable_layers):
-            plt.text(len(iterations) / 100, placement[l_idx], f"{layer_names[l_idx]} (#{layer_ids[l_idx]})", ha="left")
+    plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
+    plt.stackplot(iterations, band_log_means.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
+    plt.margins(0)
+    plt.xlabel(iteration_name)
+    plt.ylabel('Log-proportion contribution')
+    plt.title('Layer contributions')
+    # layer labels placed on centre of layer band on left-hand side
+    placement = band_log_means[0, :] * 0.5
+    placement[1:] += np.cumsum(band_log_means[0, :])[0:-1]
+    for v_idx in range(num_gradient_stats):
+        plt.text(len(iterations) / 100, placement[v_idx], variable_display_names[v_idx], ha="left")
 
     # individual layers
-    for l_idx in range(num_trainable_layers):
+    for l_idx in range(num_gradient_stats):
         r = 2 + l_idx // grid_width
         c = l_idx % grid_width
         plt.subplot2grid((grid_height, grid_width), (r, c))
-        means = layer_stats[l_idx]['mean']
-        stds = layer_stats[l_idx]['std']
-        mins = layer_stats[l_idx]['min']
-        maxs = layer_stats[l_idx]['max']
-        plt.plot(iterations, means, label='mean', color='royalblue')
-        plt.fill_between(iterations, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
-        plt.fill_between(iterations, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
+        _plot_add_quantiles(iterations, gradient_stats[v_idx])
         plt.margins(0)
         plt.yscale('log' if magnitudes else 'linear')
-        plt.title(f"{layer_names[l_idx]} (#{layer_ids[l_idx]})")
+        plt.title(variable_display_names[v_idx])
+
+        # text overlay
+        plot_min = np.min(gradient_stats[v_idx].to_numpy())
+        plot_max = np.max(gradient_stats[v_idx].to_numpy())
+        plot_width = np.max(iterations)
+        plot_mid = (plot_min + plot_max) * 0.5
+        if variable_shapes:
+            plt.text(plot_width * 0.5, plot_mid,
+                     f"{variable_shapes[v_idx]}",
+                     horizontalalignment='center', verticalalignment='center')
 
     plt.show()
 
