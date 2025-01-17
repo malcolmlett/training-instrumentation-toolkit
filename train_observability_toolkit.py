@@ -966,9 +966,8 @@ class ActivityHistoryCallback(BaseGradientCallback):
         self._layer_names = [layer.name for layer in self.model.layers]
 
         # init stats
-        stats_keys = self._stat_keys()
-        self.model_stats = {key: [] for key in stats_keys}
-        self.layer_stats = [{key: [] for key in stats_keys} for _ in self.model.layers]
+        self.model_stats = {key: [] for key in self._model_stat_keys()}
+        self.layer_stats = [{key: [] for key in self._stat_keys()} for _ in self.model.layers]
 
         # expand collection_sets
         if self.collection_sets:
@@ -1097,10 +1096,9 @@ class ActivityHistoryCallback(BaseGradientCallback):
         }
 
     # TODO consider doing this at end once have already converted these values to numpy(). Will be faster.
-    @staticmethod
-    def _compute_model_stats(layer_stats_list):
+    def _compute_model_stats(self, layer_stats_list):
         dic = {}
-        for key in ['dead_rate', 'activation_rate']:
+        for key in self._stat_keys():
             dic[f"min_{key}"] = min([stats[key] for stats in layer_stats_list])
             dic[f"max_{key}"] = max([stats[key] for stats in layer_stats_list])
             dic[f"mean_{key}"] = np.mean([stats[key] for stats in layer_stats_list])
@@ -1120,6 +1118,18 @@ class ActivityHistoryCallback(BaseGradientCallback):
         Currently static but may be computed based on configuration in the future.
         """
         return ['dead_rate', 'activation_rate']
+
+    def _model_stat_keys(self):
+        """
+        Gets the list of stats that will be computed.
+        Currently static but may be computed based on configuration in the future.
+        """
+        keys = []
+        for key in self._stat_keys():
+            keys.append(f"min_{key}")
+            keys.append(f"max_{key}")
+            keys.append(f"mean_{key}")
+        return keys
 
     def plot(self):
         """
