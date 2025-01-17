@@ -298,7 +298,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             or None for untracked variables. The dataframe has rows = iterations, and columns = stats (quartiles).
     """
 
-    def __init__(self, per_step=False, before_updates=False, trainable_only=True,
+    def __init__(self, per_step=False, before_updates=False, magnitudes=False, trainable_only=True,
                  collection_sets=None, **kwargs):
         """
         Args:
@@ -314,6 +314,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
                 If True, this reflects the notion of capturing the weights and biases that were used DURING
                 the update step.
 
+            magnitudes: whether to collect stats on variables magnitudes, or on their raw values (default).
+
             trainable_only: bool. Whether to only include stats for trainable variables, or all variables otherwise.
 
             collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
@@ -323,6 +325,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         super(VariableHistoryCallback, self).__init__(**kwargs)
         self.per_step = per_step
         self.before_updates = before_updates
+        self.magnitudes = magnitudes
         self.trainable_only = trainable_only
         self.collection_sets = collection_sets
 
@@ -407,32 +410,18 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             self.model, include_trainable_only=self.trainable_only)
 
         # init stats
-        stats_keys = _compute_common_stats_keys()
-        self.model_stats = {key: [] for key in stats_keys}
-
         stats_variables = self.model.trainable_variables if self.trainable_only else self.model.variables
         filtered_stats_variable_indices = [_index_by_identity(self.model.variables, var)
                                            for var in stats_variables]
         self.variable_stats = [[] if var_idx in filtered_stats_variable_indices else None
                                for var_idx in range(len(self.model.variables))]
 
-        for layer in self.model.layers:
-            if self.trainable_only and layer.trainable_variables:
-                self.layer_stats.append({key: [] for key in stats_keys})
-            elif not self.trainable_only and layer.variables:
-                self.layer_stats.append({key: [] for key in stats_keys})
-            else:
-                self.layer_stats.append(None)
-
-        # expand collection_sets
+        # expand collection_sets and initialise variable storages
+        # (TODO also prepare slicing rules)
         if self.collection_sets:
             self.collection_sets = _normalize_collection_sets_for_variables(self.model, self.collection_sets)
             self._filtered_value_variable_indices = [index for collection_set in self.collection_sets
                                                      for index in collection_set['variable_indices']]
-
-        # initialise list of variable storages across variables and iterations
-        # (TODO also prepare slicing rules)
-        if self.collection_sets:
             self._variable_values = [[] if var_idx in self._filtered_value_variable_indices else None
                                      for var_idx in range(len(self.model.variables))]
 
