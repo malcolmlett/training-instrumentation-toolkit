@@ -2008,25 +2008,40 @@ def plot_gradient_history(gradient_callback: GradientHistoryCallback):
     plt.legend()
 
     # layer contributions - high-level summary
-    scales = get_scales_across_stats_list(gradient_stats, scale_quantile=75)
-    band_log_means = _log_normalize(scales, axis=-1)
+    # - for easier visual display uses only the largest variable from each layer
+    # - also only includes trainable layers
+    filtered_layer_metas = []  # list of tuples: (l_idx, layer, var_idx)
+    for l_idx, layer in enumerate(model.layers):
+        biggest_var = None
+        if layer.trainable:
+            for var in layer.variables:
+                if biggest_var is None or tf.size(var) > tf.size(biggest_var):
+                    biggest_var = var
+        if biggest_var is not None:
+            var_idx = _index_by_identity(model.trainable_variables, biggest_var)
+            filtered_layer_metas.append((l_idx, layer, var_idx))
+    filtered_gradients = [gradient_stats[v_idx] for l_idx, layer, v_idx in filtered_layer_metas]
+    scales = get_scales_across_stats_list(filtered_gradients, scale_quantile=75)
+    band_log_scales = _log_normalize(scales, axis=-1)
 
     plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
-    plt.stackplot(iterations, band_log_means.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
+    plt.stackplot(iterations, band_log_scales.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
     plt.margins(0)
     plt.xlabel(iteration_name)
-    plt.ylabel('Log-proportion contribution')
-    plt.title('Layer contributions')
+    plt.ylabel('Gradient scale log-proportion')
+    plt.title('Layer comparison')
     # layer labels placed on centre of layer band on left-hand side
-    placement = band_log_means[0, :] * 0.5
-    placement[1:] += np.cumsum(band_log_means[0, :])[0:-1]
-    for v_idx in range(num_gradient_stats):
-        plt.text(len(iterations) / 100, placement[v_idx], variable_display_names[v_idx], ha="left")
+    x_loc = round(band_log_scales.shape[0] / 100)
+    placement = band_log_scales[x_loc, :] * 0.5
+    placement[1:] += np.cumsum(band_log_scales[0, :])[0:-1]
+    for f_idx in range(len(filtered_layer_metas)):
+        l_idx, layer, v_idx = filtered_layer_metas[f_idx]
+        plt.text(len(iterations) / 100, placement[l_idx], layer.name, ha="left")
 
     # individual layers
-    for l_idx in range(num_gradient_stats):
-        r = 2 + l_idx // grid_width
-        c = l_idx % grid_width
+    for v_idx in range(num_gradient_stats):
+        r = 2 + v_idx // grid_width
+        c = v_idx % grid_width
         plt.subplot2grid((grid_height, grid_width), (r, c))
         _plot_add_quantiles(iterations, gradient_stats[v_idx])
         plt.margins(0)
@@ -2042,12 +2057,11 @@ def plot_gradient_history(gradient_callback: GradientHistoryCallback):
             plt.text(plot_width * 0.5, plot_mid,
                      f"{variable_shapes[v_idx]}",
                      horizontalalignment='center', verticalalignment='center')
-
     plt.show()
 
 
-# TODO make more generic show that passing the activity_callback is a convenience,
-# but can take raw params too
+# TODO make more generic show that passing the activity_callback is a convenience, but can take raw params too
+# TODO rename to plot_activity_history()
 def plot_unit_activity(activity_callback):
     """
     Plots a high-level summary of unit activity rates across the entire model
