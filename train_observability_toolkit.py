@@ -334,7 +334,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             self.steps = []
         else:
             self.epochs = []
-        self.model_stats = {}  # dict (by stat) of lists (by iteration)
+        self.model_stats = None
         self.variable_stats = []  # initially list (by variable) of list (by iteration) of tensors
         self._variable_values = None
 
@@ -1961,19 +1961,13 @@ def plot_variable_history(variable_callback: VariableHistoryCallback):
 
     # all-model high-level summary
     plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
-    means = variable_callback.model_stats['mean']
-    stds = model_stats['std']
-    mins = model_stats['min']
-    maxs = model_stats['max']
-    plt.plot(iterations, means, label='mean', color='royalblue')
-    plt.fill_between(iterations, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
-    plt.fill_between(iterations, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
+    _plot_add_quantiles(iterations, model_stats)
     plt.margins(0)
-    plt.yscale('log' if magnitudes else 'linear')
+    plt.yscale('log')
     plt.xlabel(iteration_name)
-    plt.ylabel('magnitudes' if magnitudes else 'value')
+    plt.ylabel('scale')
     plt.title(('All model trainable variables' if trainable_only else 'All model variables (incl. non-trainable)') +
-      ('\n(before updates)' if 'before_updates' else '\n(after updates)'))
+              ('\n(before updates)' if 'before_updates' else '\n(after updates)'))
     plt.legend()
 
     # individual layers or variables
@@ -1981,20 +1975,16 @@ def plot_variable_history(variable_callback: VariableHistoryCallback):
         r = 2 + v_idx // grid_width
         c = v_idx % grid_width
         plt.subplot2grid((grid_height, grid_width), (r, c))
-        means = variable_stats[v_idx]['mean']
-        stds = variable_stats[v_idx]['std']
-        mins = variable_stats[v_idx]['min']
-        maxs = variable_stats[v_idx]['max']
-        plt.plot(iterations, means, label='mean', color='royalblue')
-        plt.fill_between(iterations, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
-        plt.fill_between(iterations, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
+        _plot_add_quantiles(iterations, variable_stats[v_idx])
         plt.margins(0)
         plt.yscale('log' if magnitudes else 'linear')
         plt.title(variable_display_names[v_idx])
 
         # text overlay
+        plot_min = np.min(variable_stats[v_idx].to_numpy())
+        plot_max = np.max(variable_stats[v_idx].to_numpy())
         plot_width = np.max(iterations)
-        plot_mid = (np.max(maxs) + np.min(mins)) * 0.5
+        plot_mid = (plot_min + plot_max) * 0.5
         if variable_shapes:
             plt.text(plot_width * 0.5, plot_mid,
                      f"{variable_shapes[v_idx]}",
@@ -2306,3 +2296,37 @@ def plot_spatial_stats(layer_spatial_activity, model=None):
                  f"dead rate\n{dead_rate * 100:.1f}%",
                  color=text_col, horizontalalignment='center', verticalalignment='center')
     plt.show()
+
+
+def _plot_add_quantiles(x, data):
+    """
+    Adds multi-quantile data to an existing plot.
+    Useful for displaying stats returned by the history callbacks.
+    Args:
+        x: list-like. X-axis values.
+        data: pandas Dataframe with columns corresponding to quantiles, labeled in range 0 to 100.
+    """
+    def _label(q1, q2):
+        if q2 is None:
+            return "median" if q1 == 50 else f"{q1}%"
+        elif q1 == 0 and q2 == 100:
+            return "min/max"
+        elif 100 - q1 == q2:
+            return f"±{q1}%"
+        else:
+            return f"{q1}% to {q2}%"
+
+    quantiles = data.columns
+    quantile_len = len(quantiles)
+    bot, top = 0, quantile_len - 1
+    while bot < top:
+        color = 'tab:grey' if quantiles[bot] == 0 and quantiles[top] == 100 else 'tab:blue'
+        plt.fill_between(x, data[quantiles[bot]], data[quantiles[top]],
+                         alpha=0.2, color=color, linewidth=0,
+                         label=_label(quantiles[bot], quantiles[top]))
+        bot += 1
+        top -= 1
+    if bot == top:
+        plt.plot(x, data[quantiles[bot]],
+                 color='tab:blue',
+                 label=_label(quantiles[bot], None))
