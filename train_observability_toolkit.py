@@ -1,7 +1,9 @@
 import tensorflow as tf
+import tensorflow_probability as tfp
 import keras
 import math
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 import tqdm
 
@@ -290,13 +292,13 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             (only populated if verbose == 0)
         steps: list of int. Step numbers correlated to captured gradients/gradient-stats
             (only populated if verbose > 0)
-        model_stats: dict of np-arrays. Keys list out different stats, eg: mean, min, max, std
-        layer_stats: list of dict of np-arrays. One list item for each layer, with each
-            list item containing either a dict of stat np-arrays like for model_stats,
-            or `None` if it doesn't have any variables.
+        model_stats: pandas data-frame with rows = iterations, columns = stats (quantiles).
+            Contains stats across the general magnitudes of weights across the variables.
+        variable_stats: list of pandas data-frames. One data-frame for each variable that is tracked,
+            or None for untracked variables. The dataframe has rows = iterations, and columns = stats (quartiles).
     """
 
-    def __init__(self, per_step=False, before_updates=False, trainable_only=True, magnitudes=False,
+    def __init__(self, per_step=False, before_updates=False, trainable_only=True,
                  collection_sets=None, **kwargs):
         """
         Args:
@@ -314,8 +316,6 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
 
             trainable_only: bool. Whether to only include stats for trainable variables, or all variables otherwise.
 
-            magnitudes: whether to collect stats on variable magnitudes, or on their raw values (default)
-
             collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
               If omitted, this callback collects nothing (in the future it may collect stats).
               See _normalize_collection_sets_for_variables() for format details.
@@ -324,7 +324,6 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         self.per_step = per_step
         self.before_updates = before_updates
         self.trainable_only = trainable_only
-        self.magnitudes = magnitudes
         self.collection_sets = collection_sets
 
         # results variable creation
@@ -333,45 +332,14 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         else:
             self.epochs = []
         self.model_stats = {}  # dict (by stat) of lists (by iteration)
-        self.layer_stats = []  # list (by layer) of dicts (by stat) of lists (by iteration)
-        self.variable_stats = []  # list (by variable) of dicts (by stat) of lists (by iteration)
+        self.variable_stats = []  # initially list (by variable) of list (by iteration) of tensors
         self._variable_values = None
 
         # internal tracking
         self._epoch = 0
         self._filtered_stats_variable_indices_by_layer = None
         self._filtered_value_variable_indices = None
-
-    @property
-    def collected_layer_stats(self):
-        """
-        Gets stats against each layer, omitting any layers that have no collected stats.
-        Use collected_layer_indices() or collected_layer_names() to identify which layers are included.
-        """
-        return [stats for stats in self.layer_stats if stats is not None]
-
-    @property
-    def collected_layer_stats_indices(self):
-        """
-        Indices of layers as returned by collected_layer_stats()
-        """
-        return [idx for idx, stats in enumerate(self.layer_stats) if stats is not None]
-
-    # TODO remove this method
-    @property
-    def collected_layer_names(self):
-        """
-        Names of layers as returned by collected_layer_stats()
-        """
-        layer_names = [layer.name for layer in self.model.layers]
-        return [layer_names[idx] for idx in self.collected_layer_stats_indices]
-
-    @property
-    def collected_layer_stats_variable_indices(self):
-        """
-        Sets of variable indices of variables that make up the results of collected_layer_stats()
-        """
-        return self._filtered_stats_variable_indices_by_layer
+        self._variable_stats_quantiles = [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
 
     @property
     def collected_variable_stats(self):
@@ -445,8 +413,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         stats_variables = self.model.trainable_variables if self.trainable_only else self.model.variables
         filtered_stats_variable_indices = [_index_by_identity(self.model.variables, var)
                                            for var in stats_variables]
-        self.variable_stats = [{key: [] for key in stats_keys} if var_idx in filtered_stats_variable_indices
-                               else None for var_idx in range(len(self.model.variables))]
+        self.variable_stats = [[] if var_idx in filtered_stats_variable_indices else None
+                               for var_idx in range(len(self.model.variables))]
 
         for layer in self.model.layers:
             if self.trainable_only and layer.trainable_variables:
@@ -478,16 +446,18 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             self.steps = np.array(self.steps)
         else:
             self.epochs = np.array(self.epochs)
-        for key in self.model_stats.keys():
-            self.model_stats[key] = np.array(self.model_stats[key])
-        for l_idx in range(len(self.layer_stats)):
-            if self.layer_stats[l_idx] is not None:
-                for key in self.layer_stats[l_idx].keys():
-                    self.layer_stats[l_idx][key] = np.array(self.layer_stats[l_idx][key])
+
+        # convert per-variable stats
+        # - from: list (by var) of list (by iteration) of tensor
+        # - to:   list (by var) of pd-dataframe: iterations x quartiles
         for var_idx in range(len(self.variable_stats)):
             if self.variable_stats[var_idx] is not None:
-                for key in self.variable_stats[var_idx].keys():
-                    self.variable_stats[var_idx][key] = np.array(self.variable_stats[var_idx][key])
+                table = [stats.numpy() for stats in self.variable_stats[var_idx]]
+                df = pd.DataFrame(table, columns=self._variable_stats_quantiles)
+                self.variable_stats[var_idx] = df
+
+        # calculate global model stats
+        self.model_stats = compute_scale_distribution_across_stats_list(self.variable_stats, scale_quantile=75)
 
     def on_epoch_begin(self, epoch, logs=None):
         self._epoch = epoch
@@ -515,23 +485,15 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             self._collect_raw_values()
 
     def _collect_stats(self):
-        # collect stats across all model variables as one big bucket
-        model_variables = self.model.trainable_variables if self.trainable_only else self.model.variables
-        _append_dict_list(self.model_stats, _compute_common_stats(model_variables, absolute=self.magnitudes))
-
-        # compute stats across the variables for each layer as a group
-        for l_idx, layer in enumerate(self.model.layers):
-            var_indices = self._filtered_stats_variable_indices_by_layer[l_idx]
-            layer_variables = [self.model.variables[i] for i in var_indices]
-            if layer_variables:
-                stats = _compute_common_stats(layer_variables, absolute=self.magnitudes)
-                _append_dict_list(self.layer_stats[l_idx], stats)
-
-        # compute stats for each individual variable
+        # compute quantile stats for each individual variable
         for var_idx, stat_list in enumerate(self.variable_stats):
             if stat_list is not None:
-                variables = [self.model.variables[var_idx]]  # _compute_common_stats() needs a list
-                _append_dict_list(stat_list, _compute_common_stats(variables, absolute=self.magnitudes))
+                var = self.model.variables[var_idx]
+                stats_tensor = self._compute_percentile_stats(
+                    var,
+                    quartiles=self._variable_stats_quantiles,
+                    do_abs=self.magnitudes)
+                stat_list.append(stats_tensor)
 
     def _collect_raw_values(self):
         # TODO do slicing
@@ -540,6 +502,21 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
                 if val_list is not None:
                     state = tf.identity(self.model.variables[var_idx])  # get copy of current state
                     val_list.append(state)
+
+    @tf.function
+    def _compute_percentile_stats(self, tensor, quartiles, do_abs):
+        """
+        Computes a set of percentiles across the given tensor.
+        For tensors that commonly have values distributed either side of zero, the median will
+        typically be around zero, and the 25th and 75th percentiles represent the respective medians
+        in the positive and negative halves.
+        Note: I haven't done experiments yet but in theory auto-graphing this function still adds some
+        performance improvement even though it's only calling into a single standard TF function.
+        :returns: tensor of values
+        """
+        if do_abs:
+            tensor = tf.abs(tensor)
+        return tfp.stats.percentile(tensor, quartiles, interpolation='linear')
 
 
 class GradientHistoryCallback(BaseGradientCallback):
@@ -1338,6 +1315,15 @@ def _log_normalize(arr, axis=None):
     return scaled
 
 
+def _compute_common_stats_keys():
+    """
+    Gets the dictionary keys that are always returned by _compute_stats().
+    Returns:
+        list of string
+    """
+    return ['mean', 'min', 'max', 'std']
+
+
 # Implementation note: optimised for efficient use within TF loops
 # TODO may need to add some div-by-zero protection at some point
 @tf.function
@@ -1390,15 +1376,6 @@ def _compute_common_stats(tensors: list, absolute: bool = False):
         'max': tot_max,
         'std': tf.sqrt(tot_m2 / tot_n)  # population std.dev
     }
-
-
-def _compute_common_stats_keys():
-    """
-    Gets the dictionary keys that are always returned by _compute_stats().
-    Returns:
-        list of string
-    """
-    return ['mean', 'min', 'max', 'std']
 
 
 def variable_indices_by_layer(model: tf.keras.Model, include_trainable_only: bool = False):
@@ -1536,6 +1513,47 @@ def _index_by_identity(lst, target):
 def _append_dict_list(dic, addendum_dict):
     for key in addendum_dict.keys():
         dic[key].append(addendum_dict[key])
+
+
+def compute_scale_distribution_across_stats_list(stats_dataframes, scale_quantile=75, quantiles=None):
+    """
+    Calculates meta-stats against a set of quantile stats.
+    Assumes the use of dataframes where each column represents a quantile, represented as a number in range 0 to 100.
+    Args:
+        stats_dataframes: list of pandas dataframes
+        scale_quantile: the quantile used as a proxy for the "scale" of the typical values.
+            Must be present within the columns of the dataframe.
+            Its opposite (100-scale-quantile) must also be present.
+        quantiles: set of quantiles to return in final result.
+    Returns:
+        pandas dataframe
+    """
+    quantiles = quantiles or [0, 25, 50, 75, 100]
+
+    # collect a table of all scales across all stats
+    scales = []
+    for variable_stat in stats_dataframes:
+        if variable_stat is not None:
+            if quantiles is None:
+                quantiles = variable_stat.columns.to_numpy()
+
+            # estimate the overall magnitude scale at the target quantile
+            pos_mean = variable_stat[scale_quantile].to_numpy()
+            neg_mean = variable_stat[100-scale_quantile].to_numpy()
+            if np.any(neg_mean < 0):
+                scale = (pos_mean + abs(neg_mean)) * 0.5
+            else:
+                # assume stats are drawn from a positive-only dataset so pos_mean is our target quantile already
+                scale = pos_mean
+            scales.append(scale)  # shape: variables x iterations
+    scales = np.stack(scales, axis=-1)  # shape: iterations x variables
+
+    # calculate stats across the table
+    stats = tfp.stats.percentile(scales, quantiles, axis=-1, interpolation='linear')
+    stats = tf.transpose(stats)
+
+    # return as dataframe with quantiles as columns
+    return pd.DataFrame(stats.numpy(), columns=quantiles)
 
 
 def _normalize_collection_sets_for_layers(model: tf.keras.Model, collection_sets: list):
@@ -1915,14 +1933,13 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
     return res
 
 
-def plot_variable_history(variable_callback: VariableHistoryCallback, group_by_layer=False):
+def plot_variable_history(variable_callback: VariableHistoryCallback):
     """
     Generates a figure containing a number of plots to visualise variable stats
     from a VariableHistoryCallback object.
 
     Args:
         variable_callback: callback populated with variable stats from training.
-        group_by_layer: whether to group stats by layer, or show for individual variables (default)
     """
 
     # collect data
@@ -1932,33 +1949,25 @@ def plot_variable_history(variable_callback: VariableHistoryCallback, group_by_l
     magnitudes = variable_callback.magnitudes
     model_stats = variable_callback.model_stats
 
-    if group_by_layer:
-        value_stats = variable_callback.collected_layer_stats
-        layer_ids = variable_callback.collected_layer_stats_indices
-        layer_names = variable_callback.collected_layer_names
-        num_value_stats = len(value_stats)
-        value_display_names = [f"{layer_names[l_idx]} (#{layer_ids[l_idx]})" for l_idx in range(num_value_stats)]
-        variable_shapes = None
-    else:
-        model = variable_callback.model
-        value_stats = variable_callback.collected_variable_stats
-        variable_ids = variable_callback.collected_variable_stats_indices
-        num_value_stats = len(value_stats)
-        layer_id_lookup = layer_indices_by_variable(model)
-        variable_shapes = [model.variables[v_idx].shape for v_idx in variable_ids]
+    model = variable_callback.model
+    variable_stats = variable_callback.collected_variable_stats
+    variable_ids = variable_callback.collected_variable_stats_indices
+    num_variable_stats = len(variable_stats)
+    layer_id_lookup = layer_indices_by_variable(model)
+    variable_shapes = [model.variables[v_idx].shape for v_idx in variable_ids]
 
-        value_display_names = []
-        for v_idx in variable_ids:
-            layer_id = layer_id_lookup[v_idx]
-            layer_name = model.layers[layer_id].name
-            variable_name = model.variables[v_idx].name
-            value_display_names.append(f"{layer_name}(#{layer_id})/{variable_name}")
+    variable_display_names = []
+    for v_idx in variable_ids:
+        layer_id = layer_id_lookup[v_idx]
+        layer_name = model.layers[layer_id].name
+        variable_name = model.variables[v_idx].name
+        variable_display_names.append(f"{layer_name}(#{layer_id})/{variable_name}")
 
     # start figure
     # - at least 4 layer plots wide
     # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_value_stats) / 2) * 2)  # nearest even number >= 4
-    grid_height = 2 + math.ceil(num_value_stats / grid_width)
+    grid_width = max(4, round(math.sqrt(num_variable_stats) / 2) * 2)  # nearest even number >= 4
+    grid_height = 2 + math.ceil(num_variable_stats / grid_width)
     plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
 
     # all-model high-level summary
@@ -1979,20 +1988,20 @@ def plot_variable_history(variable_callback: VariableHistoryCallback, group_by_l
     plt.legend()
 
     # individual layers or variables
-    for v_idx in range(num_value_stats):
+    for v_idx in range(num_variable_stats):
         r = 2 + v_idx // grid_width
         c = v_idx % grid_width
         plt.subplot2grid((grid_height, grid_width), (r, c))
-        means = value_stats[v_idx]['mean']
-        stds = value_stats[v_idx]['std']
-        mins = value_stats[v_idx]['min']
-        maxs = value_stats[v_idx]['max']
+        means = variable_stats[v_idx]['mean']
+        stds = variable_stats[v_idx]['std']
+        mins = variable_stats[v_idx]['min']
+        maxs = variable_stats[v_idx]['max']
         plt.plot(iterations, means, label='mean', color='royalblue')
         plt.fill_between(iterations, means - stds, means + stds, color='blue', alpha=0.2, linewidth=0, label='+/- sd')
         plt.fill_between(iterations, mins, maxs, color='lightgray', linewidth=0, alpha=0.2, label='min/max range')
         plt.margins(0)
         plt.yscale('log' if magnitudes else 'linear')
-        plt.title(value_display_names[v_idx])
+        plt.title(variable_display_names[v_idx])
 
         # text overlay
         plot_width = np.max(iterations)
