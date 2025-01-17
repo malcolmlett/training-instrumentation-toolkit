@@ -594,7 +594,7 @@ class GradientHistoryCallback(BaseGradientCallback):
         self._epoch = 0
         self._filtered_stats_variable_indices_by_layer = None
         self._filtered_value_variable_indices = None
-        self._variable_indices_by_trainable_variable_index = None
+        self._trainable_variable_index_by_variable_index = None
 
     @property
     def collected_layer_stats(self):
@@ -687,7 +687,8 @@ class GradientHistoryCallback(BaseGradientCallback):
         # pre-compute lookups
         self._filtered_stats_variable_indices_by_layer = variable_indices_by_layer(
             self.model, include_trainable_only=True)
-        self._variable_indices_by_trainable_variable_index = trainable_variable_indices_to_variable_indices(self.model)
+        v_to_t = [_index_by_identity(self.model.trainable_variables, var) for var in self.model.variables]
+        self._trainable_variable_index_by_variable_index = [idx if idx >= 0 else None for idx in v_to_t]
 
         # init stats
         stats_keys = _compute_common_stats_keys()
@@ -766,7 +767,7 @@ class GradientHistoryCallback(BaseGradientCallback):
     def _collect_stats(self, loss, gradients, trainable_variables, activations):
         # note: gradients list is always relative to model.trainable_variables, but I use
         # the model.variables list as the internal reference point, so we must convert indices.
-        t_to_v = self._variable_indices_by_trainable_variable_index
+        v_to_t = self._trainable_variable_index_by_variable_index
 
         # collect stats across all model variables as one big bucket
         _append_dict_list(self.model_stats, _compute_common_stats(gradients, absolute=self.magnitudes))
@@ -774,7 +775,7 @@ class GradientHistoryCallback(BaseGradientCallback):
         # compute stats across the variables for each layer as a group
         for l_idx, layer in enumerate(self.model.layers):
             grad_indices = self._filtered_stats_variable_indices_by_layer[l_idx]
-            layer_grads = [gradients[t_to_v[i]] for i in grad_indices]
+            layer_grads = [gradients[v_to_t[i]] for i in grad_indices]
             if layer_grads:
                 stats = _compute_common_stats(layer_grads, absolute=self.magnitudes)
                 _append_dict_list(self.layer_stats[l_idx], stats)
@@ -782,19 +783,19 @@ class GradientHistoryCallback(BaseGradientCallback):
         # compute stats for each individual variable
         for var_idx, stat_list in enumerate(self.gradient_stats):
             if stat_list is not None:
-                variable_grads = [gradients[t_to_v[var_idx]]]  # _compute_common_stats() needs a list
+                variable_grads = [gradients[v_to_t[var_idx]]]  # _compute_common_stats() needs a list
                 _append_dict_list(stat_list, _compute_common_stats(variable_grads, absolute=self.magnitudes))
 
     def _collect_raw_values(self, gradients):
         # note: gradients list is always relative to model.trainable_variables, but I use
         # the model.variables list as the internal reference point, so we must convert indices.
-        t_to_v = self._variable_indices_by_trainable_variable_index
+        v_to_t = self._trainable_variable_index_by_variable_index
 
         # TODO do slicing
         if self._gradient_values:
             for var_idx, val_list in enumerate(self._gradient_values):
                 if val_list is not None:
-                    val_list.append(gradients[t_to_v[var_idx]])
+                    val_list.append(gradients[v_to_t[var_idx]])
 
     def plot(self):
         """
@@ -1473,16 +1474,20 @@ def variable_indices_to_trainable_variable_indices(model, variable_indices, non_
     return filtered
 
 
-def trainable_variable_indices_to_variable_indices(model, trainable_variable_indices):
+def trainable_variable_indices_to_variable_indices(model, trainable_variable_indices=None):
     """
     Takes a list of variable indices relative to model.trainable_variables, and converts them to be relative
     to model.variables.
     Args:
         model: the model from which the variable indices came
-        trainable_variable_indices: indices of existing variables on model.trainable_variables
+        trainable_variable_indices: Optional.
+          Indices of existing variables on model.trainable_variables.
+          If not provided, this function simply returns a lookup table for all trainable variable indices.
     Returns:
         list of indices relative to model.variables
     """
+    if trainable_variable_indices is None:
+        trainable_variable_indices = range(len(model.trainable_variables))
     return [_index_by_identity(model.variables, model.trainable_variables[var_idx])
             for var_idx in trainable_variable_indices]
 
