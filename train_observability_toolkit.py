@@ -613,9 +613,17 @@ class GradientHistoryCallback(BaseGradientCallback):
         # (TODO also prepare slicing rules)
         if self.collection_sets:
             self.collection_sets = _normalize_collection_sets_for_variables(self.model, self.collection_sets)
-            self._filtered_value_variable_indices = [index for collection_set in self.collection_sets
-                                                     for index in collection_set['variable_indices']]
-            self._gradient_values = [[] if var_idx in self._filtered_value_variable_indices else None
+
+            # compute variable indices being captured
+            # note: we only ever get trainable variables, so we must enforce that filter
+            allowed_indices = [v_idx for v_idx in range(len(self.model.variables))
+                               if self.model.variables[v_idx].trainable]
+            filtered = [index for collection_set in self.collection_sets
+                        for index in collection_set['variable_indices']]
+            filtered = [v_idx for v_idx in filtered if v_idx in allowed_indices]
+            self._filtered_value_variable_indices = filtered
+
+            self._gradient_values = [[] if var_idx in filtered else None
                                      for var_idx in range(len(self.model.variables))]
 
     def on_train_end(self):
