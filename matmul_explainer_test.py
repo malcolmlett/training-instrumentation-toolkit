@@ -10,6 +10,38 @@ def run_test_suite():
     print("All matmul_explainer tests passed.")
 
 
+def classification_mask_test():
+    a = np.array([0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9])
+    p, z, n, t = classification_mask(a, confidence=0.75)
+    assert t == 0.25, f"Expected threshold 0.25, got: {t}"
+    expected_p = [False, False, False, True, True, True, True, True, True, True]
+    expected_z = [True, True, True, False, False, False, False, False, False, False]
+    expected_n = [False, False, False, False, False, False, False, False, False, False]
+    assert np.all(p == expected_p), f"Expected p {expected_p}, got: {p}"
+    assert np.all(z == expected_z), f"Expected z {expected_z}, got: {z}"
+    assert np.all(n == expected_n), f"Expected n {expected_n}, got: {n}"
+
+    a = np.array([-0.5, 0, -0.5])
+    p, z, n, t = classification_mask(a, confidence=0.95)
+    assert t == 0.25, f"Expected threshold 0.25, got: {t}"
+    expected_p = [False, False, False]
+    expected_z = [False, True, False]
+    expected_n = [True, False, True]
+    assert np.all(p == expected_p), f"Expected p {expected_p}, got: {p}"
+    assert np.all(z == expected_z), f"Expected z {expected_z}, got: {z}"
+    assert np.all(n == expected_n), f"Expected n {expected_n}, got: {n}"
+
+    a = np.array([-0.5, 0.25, 0, 0.25, -0.5])
+    p, z, n, t = classification_mask(a, confidence=0.95)
+    assert t == 0.125, f"Expected threshold 0.125, got: {t}"
+    expected_p = [False, True, False, True, False]
+    expected_z = [False, False, True, False, False]
+    expected_n = [True, False, False, False, True]
+    assert np.all(p == expected_p), f"Expected p {expected_p}, got: {p}"
+    assert np.all(z == expected_z), f"Expected z {expected_z}, got: {z}"
+    assert np.all(n == expected_n), f"Expected n {expected_n}, got: {n}"
+
+
 def matmul_classify_test():
     a = np.arange(0.0, 1.0, 0.1)
     a = np.tile(a, (10, 1))

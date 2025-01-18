@@ -117,6 +117,10 @@ def tensor_classify(x, confidence: float = 0.95, threshold: float = None,
             that a value is accurately placed within the P, Z, or N categories.
             Higher values lead to more strict requirements for "near zero".
             1.0 only considers exactly 0.0 as "near zero".
+        confidence: statistical confidence (0.0 to 1.0) that you wish to meet
+            that a value is accurately placed within the P, Z, or N categories.
+            Higher values lead to more strict requirements for "near zero".
+            1.0 only considers exactly 0.0 as "near zero".
         threshold: abs(x) values less than this are considered near-zero,
             otherwise inferred from confidence
         return_threshold: whether to additionally return the derived threshold
@@ -431,8 +435,8 @@ def classification_mask(x, confidence: float = 0.95, threshold: float = None):
     #     - zero if value < threshold
     # However, the threshold may be zero, which requires the extra rule:
     #     - zero if zero
-    zero_mask = tf.logical_or(x == 0, x < threshold)
+    zero_mask = tf.logical_or(x == 0, tf.abs(x) < threshold)
     pos_mask = tf.logical_and(x > 0, tf.logical_not(zero_mask))
     neg_mask = tf.logical_and(x < 0, tf.logical_not(zero_mask))
 
-    return pos_mask.numpy(), zero_mask.numpy(), neg_mask.numpy(), threshold
+    return pos_mask.numpy(), zero_mask.numpy(), neg_mask.numpy(), threshold.numpy()
