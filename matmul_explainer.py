@@ -71,8 +71,71 @@ def summarise(counts, sums=None):
     return summary
 
 
-def classify_terms():
-    return ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+def classify_terms(example=None):
+    """
+    Identifies the appropriate terms list based on the example given, or otherwise
+    assumes the terms for a full mat-mul like operation.
+
+    Args:
+        example: a count or sum result from a call to matmul_classify() or similar,
+            or the tensor containing both the count and sum.
+    Returns:
+        list of strings, containing the names of the terms in the default order
+    """
+    if example is None:
+        tensor_count = 2   # default
+    else:
+        if isinstance(example, tuple):
+            example, _ = example
+        shape = tf.shape(example)
+        channels = shape[-1]
+        if channels == 3:
+            tensor_count = 1
+        elif channels == 9:
+            tensor_count = 2
+        else:
+            raise ValueError("Unrecognised example with {channels} in last dim: {shape}")
+
+    if tensor_count == 1:
+        return ['P', 'Z', 'N']
+    else:
+        return ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+
+
+def tensor_classify(x, confidence: float = 0.95, threshold: float = None):
+    """
+    Calculates the usual counts and sums of positive, near-zero, and negative values in a single tensor.
+
+    This is an extension from the matmul-like operations to a single tensor.
+    It seems somewhat strange on its own, but it proves useful so that you can
+    use the other functions to get a nice summary()
+
+    Args:
+      x: np-array or tensor with shape (n, k)
+      confidence: statistical confidence (0.0 to 1.0) that you wish to meet
+        that a value is accurately placed within the P, Z, or N categories.
+        Higher values lead to more strict requirements for "near zero".
+        1.0 only considers exactly 0.0 as "near zero".
+      threshold: abs(x) values less than this are considered near-zero,
+        otherwise inferred from confidence
+
+    Returns:
+      (counts, sums) where each is an np-array with shape (n, m, 3)
+    """
+    x = np.array(x)
+    x_p, x_z, x_n = classification_mask(x, confidence, threshold)
+
+    # compute counts and sums
+    counts = np.zeros_like(x, dtype=int)
+    sums = np.zeros_like(x, dtype=x.dtype)
+    counts[:, :, 0] = x_p.astype(int)
+    counts[:, :, 1] = x_z.astype(int)
+    counts[:, :, 2] = x_n.astype(int)
+    sums[:, :, 0] = x * x_p
+    sums[:, :, 1] = x * x_z
+    sums[:, :, 2] = x * x_n
+
+    return counts, sums
 
 
 # change threshold args to 'thresholds', taking a single value or a list, eg: 0.35; [None, 0.75]; [0.45, 0.75]
@@ -129,22 +192,9 @@ def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, 
     x1 = np.array(x1)
     x2 = np.array(x2)
 
-    # determine thresholds
-    # (note: on small matrices with few discrete numbers, np.percentile will find a value on either side
-    #  of the percentage threshold, thus we should apply the threshold rule as "zero if value < threshold"
-    if threshold1 is None:
-        threshold1 = np.percentile(np.abs(x1), 100 * (1 - confidence), method='midpoint')
-    if threshold2 is None:
-        threshold2 = np.percentile(np.abs(x2), 100 * (1 - confidence), method='midpoint')
-
-    # create masks that classify each input individually
-    x1_p = x1 >= threshold1
-    x1_z = np.abs(x1) < threshold1
-    x1_n = x1 <= -threshold1
-
-    x2_p = x2 >= threshold2
-    x2_z = np.abs(x2) < threshold2
-    x2_n = x2 <= -threshold2
+    # apply thresholds and create masks
+    x1_p, x1_z, x1_n = classification_mask(x1, confidence, threshold1)
+    x2_p, x2_z, x2_n = classification_mask(x2, confidence, threshold2)
 
     # compute counts
     counts = np.zeros((x1.shape[0], x2.shape[1], 9), dtype=int)
@@ -199,31 +249,18 @@ def multiply_classify(x, y, confidence: float = 0.95, x_threshold: float = None,
     x = tf.constant(x)
     y = tf.constant(y)
 
-    # determine thresholds
-    # (note: on small matrices with few discrete numbers, percentile() will find a value on either side
-    #  of the percentage threshold, thus we should apply the threshold rule as "zero if value < threshold"
-    if x_threshold is None:
-        x_threshold = tfp.stats.percentile(tf.abs(x), 100 * (1 - confidence), interpolation='midpoint')
-    if y_threshold is None:
-        y_threshold = tfp.stats.percentile(tf.abs(y), 100 * (1 - confidence), interpolation='midpoint')
-
-    # create masks that classify each input individually
-    x_p = x >= x_threshold
-    x_z = np.abs(x) < x_threshold
-    x_n = x <= -x_threshold
-
-    y_p = y >= y_threshold
-    y_z = np.abs(y) < y_threshold
-    y_n = y <= -y_threshold
+    # apply thresholds and create masks
+    x_p, x_z, x_n = classification_mask(x, confidence, x_threshold)
+    y_p, y_z, y_n = classification_mask(y, confidence, y_threshold)
 
     # compute counts and sums for each classification
     counts = []
     x_pc = tf.cast(x_p, tf.float32)
     x_zc = tf.cast(x_z, tf.float32)
     x_nc = tf.cast(x_n, tf.float32)
-    y_pc = tf.cast(x_p, tf.float32)
-    y_zc = tf.cast(x_z, tf.float32)
-    y_nc = tf.cast(x_n, tf.float32)
+    y_pc = tf.cast(y_p, tf.float32)
+    y_zc = tf.cast(y_z, tf.float32)
+    y_nc = tf.cast(y_n, tf.float32)
     counts.append(tf.math.multiply(x_pc, y_pc))
     counts.append(tf.math.multiply(x_pc, y_zc))
     counts.append(tf.math.multiply(x_pc, y_nc))
@@ -238,9 +275,9 @@ def multiply_classify(x, y, confidence: float = 0.95, x_threshold: float = None,
     x_pv = tf.where(x_p, x, tf.zeros_like(x))
     x_zv = tf.where(x_z, x, tf.zeros_like(x))
     x_nv = tf.where(x_n, x, tf.zeros_like(x))
-    y_pv = tf.where(x_p, y, tf.zeros_like(y))
-    y_zv = tf.where(x_z, y, tf.zeros_like(y))
-    y_nv = tf.where(x_n, y, tf.zeros_like(y))
+    y_pv = tf.where(y_p, y, tf.zeros_like(y))
+    y_zv = tf.where(y_z, y, tf.zeros_like(y))
+    y_nv = tf.where(y_n, y, tf.zeros_like(y))
     sums.append(tf.math.multiply(x_pv, y_pv))
     sums.append(tf.math.multiply(x_pv, y_zv))
     sums.append(tf.math.multiply(x_pv, y_nv))
@@ -294,22 +331,9 @@ def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float 
     inputs = tf.constant(inputs)
     kernel = tf.constant(kernel)
 
-    # determine thresholds
-    # (note: on small matrices with few discrete numbers, percentile() will find a value on either side
-    #  of the percentage threshold, thus we should apply the threshold rule as "zero if value < threshold"
-    if inputs_threshold is None:
-        inputs_threshold = tfp.stats.percentile(tf.abs(inputs), 100 * (1 - confidence), interpolation='midpoint')
-    if kernel_threshold is None:
-        kernel_threshold = tfp.stats.percentile(tf.abs(kernel), 100 * (1 - confidence), interpolation='midpoint')
-
-    # create masks that classify each input individually
-    inputs_p = inputs >= inputs_threshold
-    inputs_z = np.abs(inputs) < inputs_threshold
-    inputs_n = inputs <= -inputs_threshold
-
-    kernel_p = kernel >= kernel_threshold
-    kernel_z = np.abs(kernel) < kernel_threshold
-    kernel_n = kernel <= -kernel_threshold
+    # apply thresholds and create masks
+    inputs_p, inputs_z, inputs_n = classification_mask(inputs, confidence, inputs_threshold)
+    kernel_p, kernel_z, kernel_n = classification_mask(kernel, confidence, kernel_threshold)
 
     # compute counts and sums for each classification
     counts = []
@@ -348,3 +372,36 @@ def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float 
 
     # format into final output
     return tf.stack(counts, axis=-1), tf.stack(sums, axis=-1)
+
+
+def classification_mask(x, confidence: float = 0.95, threshold: float = None):
+    """
+    Classifies the values of x as positive (P), near-zero (Z), or negative (N) according to a threshold.
+    Args:
+        x: np-array or tensor
+        confidence: statistical confidence (0.0 to 1.0) that you wish to meet
+            that a value is accurately placed within the P, Z, or N categories.
+            Higher values lead to more strict requirements for "near zero".
+            1.0 only considers exactly 0.0 as "near zero".
+        threshold: abs(x) values less than this are considered near-zero,
+            otherwise inferred by using confidence to draw an appropriate percentile from the
+            values of x.
+    Returns:
+        (pos_mask, zero_mask, neg_mask) - np-array bool tensors
+
+    """
+    # determine threshold
+    if threshold is None:
+        threshold = tfp.stats.percentile(tf.abs(x), 100 * (1 - confidence), interpolation='midpoint')
+
+    # apply threshold
+    # Note: on small matrices with few discrete numbers, percentile() will find a value on either side
+    #  of the percentage threshold, thus we should apply the threshold rule:
+    #     - zero if value < threshold
+    # However, the threshold may be zero, which requires the extra rule:
+    #     - zero if zero
+    zero_mask = tf.logical_or(x == 0, x < threshold)
+    pos_mask = tf.logical_and(x > 0, tf.logical_not(zero_mask))
+    neg_mask = tf.logical_and(x < 0, tf.logical_not(zero_mask))
+
+    return pos_mask.numpy(), zero_mask.numpy(), neg_mask.numpy()
