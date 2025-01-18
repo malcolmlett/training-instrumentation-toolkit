@@ -42,7 +42,7 @@ def summarise(counts, sums=None):
     """
     if isinstance(counts, tuple):
         counts, sums = counts
-    terms = classify_terms()
+    terms = classify_terms(counts)
     counts_by_class = np.sum(counts, axis=tuple(range(counts.ndim - 1)))
     sums_by_class = np.sum(sums, axis=tuple(range(counts.ndim - 1)))
 
