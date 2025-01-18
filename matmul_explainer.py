@@ -14,7 +14,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 
-def summarise(counts, sums):
+def summarise(counts, sums=None):
     """
     Generates a concise summary text from the result of calling matmul_classify() or any of its variants.
 
