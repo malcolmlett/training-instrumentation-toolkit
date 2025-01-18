@@ -102,7 +102,8 @@ def classify_terms(example=None):
         return ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
 
 
-def tensor_classify(x, confidence: float = 0.95, threshold: float = None):
+def tensor_classify(x, confidence: float = 0.95, threshold: float = None,
+                    return_threshold=False):
     """
     Calculates the usual counts and sums of positive, near-zero, and negative values in a single tensor.
 
@@ -111,19 +112,22 @@ def tensor_classify(x, confidence: float = 0.95, threshold: float = None):
     use the other functions to get a nice summary()
 
     Args:
-      x: np-array or tensor with shape (n, k)
-      confidence: statistical confidence (0.0 to 1.0) that you wish to meet
-        that a value is accurately placed within the P, Z, or N categories.
-        Higher values lead to more strict requirements for "near zero".
-        1.0 only considers exactly 0.0 as "near zero".
-      threshold: abs(x) values less than this are considered near-zero,
-        otherwise inferred from confidence
+        x: np-array or tensor with shape (n, k)
+            confidence: statistical confidence (0.0 to 1.0) that you wish to meet
+            that a value is accurately placed within the P, Z, or N categories.
+            Higher values lead to more strict requirements for "near zero".
+            1.0 only considers exactly 0.0 as "near zero".
+        threshold: abs(x) values less than this are considered near-zero,
+            otherwise inferred from confidence
+        return_threshold: whether to additionally return the derived threshold
 
     Returns:
-      (counts, sums) where each is an np-array with shape (n, m, 3)
+        (counts, sums) where each is an np-array with shape (n, m, 3)
+        OR
+        (counts, sums, thresholds) with list of thresholds also returned
     """
     x = np.array(x)
-    x_p, x_z, x_n = classification_mask(x, confidence, threshold)
+    x_p, x_z, x_n, threshold = classification_mask(x, confidence, threshold)
 
     # compute counts and sums
     counts = np.zeros_like(x, dtype=int)
@@ -135,11 +139,15 @@ def tensor_classify(x, confidence: float = 0.95, threshold: float = None):
     sums[:, :, 1] = x * x_z
     sums[:, :, 2] = x * x_n
 
-    return counts, sums
+    if return_threshold:
+        return counts, sums, threshold
+    else:
+        return counts, sums
 
 
 # change threshold args to 'thresholds', taking a single value or a list, eg: 0.35; [None, 0.75]; [0.45, 0.75]
-def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, threshold2: float = None):
+def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, threshold2: float = None,
+                    return_thresholds=False):
     """
     Calculates how the dot-product of x1 . x2 comes to have the range of values that it does.
 
@@ -183,9 +191,12 @@ def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, 
         otherwise inferred from confidence
       threshold2: abs(X2) values less than this are considered near-zero,
         otherwise inferred from confidence
+      return_thresholds: whether to additionally return the derived thresholds
 
     Returns:
       (counts, sums) where each is an np-array with shape (n, m, 9)
+      OR
+      (counts, sums, thresholds) with list of thresholds also returned
     """
 
     # standardise on data format
@@ -193,8 +204,8 @@ def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, 
     x2 = np.array(x2)
 
     # apply thresholds and create masks
-    x1_p, x1_z, x1_n = classification_mask(x1, confidence, threshold1)
-    x2_p, x2_z, x2_n = classification_mask(x2, confidence, threshold2)
+    x1_p, x1_z, x1_n, threshold1 = classification_mask(x1, confidence, threshold1)
+    x2_p, x2_z, x2_n, threshold2 = classification_mask(x2, confidence, threshold2)
 
     # compute counts
     counts = np.zeros((x1.shape[0], x2.shape[1], 9), dtype=int)
@@ -220,11 +231,15 @@ def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, 
     sums[:, :, 7] = np.matmul(x1 * x1_n, x2 * x2_z)
     sums[:, :, 8] = np.matmul(x1 * x1_n, x2 * x2_n)
 
-    return counts, sums
+    if return_thresholds:
+        return counts, sums, [threshold1, threshold2]
+    else:
+        return counts, sums
 
 
 # change threshold args to 'thresholds', taking a single value or a list, eg: 0.35; [None, 0.75]; [0.45, 0.75]
-def multiply_classify(x, y, confidence: float = 0.95, x_threshold: float = None, y_threshold: float = None):
+def multiply_classify(x, y, confidence: float = 0.95, x_threshold: float = None, y_threshold: float = None,
+                      return_thresholds=False):
     """
     Like matmul_classify but for elementwise multiplication.
 
@@ -240,18 +255,21 @@ def multiply_classify(x, y, confidence: float = 0.95, x_threshold: float = None,
           otherwise inferred from confidence
         y_threshold: abs(X2) values less than this are considered near-zero,
           otherwise inferred from confidence
+        return_thresholds: whether to additionally return the derived thresholds
 
     Returns:
         (counts, sums) containing the counts and sums of each component, respectively.
         Each a tensor with shape `x_shape + (9,)`.
+        OR
+        (counts, sums, thresholds) with list of thresholds also returned
     """
     # standardise on data format
     x = tf.constant(x)
     y = tf.constant(y)
 
     # apply thresholds and create masks
-    x_p, x_z, x_n = classification_mask(x, confidence, x_threshold)
-    y_p, y_z, y_n = classification_mask(y, confidence, y_threshold)
+    x_p, x_z, x_n, x_threshold = classification_mask(x, confidence, x_threshold)
+    y_p, y_z, y_n, y_threshold = classification_mask(y, confidence, y_threshold)
 
     # compute counts and sums for each classification
     counts = []
@@ -289,12 +307,18 @@ def multiply_classify(x, y, confidence: float = 0.95, x_threshold: float = None,
     sums.append(tf.math.multiply(x_nv, y_nv))
 
     # format into final output
-    return tf.stack(counts, axis=-1), tf.stack(sums, axis=-1)
+    counts = tf.stack(counts, axis=-1)
+    sums = tf.stack(sums, axis=-1)
+    if return_thresholds:
+        return counts, sums, [x_threshold, y_threshold]
+    else:
+        return counts, sums
 
 
 # change threshold args to 'thresholds', taking a single value or a list, eg: 0.35; [None, 0.75]; [0.45, 0.75]
 def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float = 0.95,
-                  inputs_threshold: float = None, kernel_threshold: float = None):
+                  inputs_threshold: float = None, kernel_threshold: float = None,
+                  return_thresholds=False):
     """
     Like matmul_classify but for convolutions.
     Supports 1D, 2D and 3D convolution.
@@ -326,14 +350,16 @@ def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float 
     Returns:
         (counts, sums) containing the counts and sums of each component, respectively.
         Each a tensor with shape `(batch_size,) + inputs_spatial_shape + (num_channels,9)`.
+        OR
+        (counts, sums, thresholds) with list of thresholds also returned
     """
     # standardise on data format
     inputs = tf.constant(inputs)
     kernel = tf.constant(kernel)
 
     # apply thresholds and create masks
-    inputs_p, inputs_z, inputs_n = classification_mask(inputs, confidence, inputs_threshold)
-    kernel_p, kernel_z, kernel_n = classification_mask(kernel, confidence, kernel_threshold)
+    inputs_p, inputs_z, inputs_n, inputs_threshold = classification_mask(inputs, confidence, inputs_threshold)
+    kernel_p, kernel_z, kernel_n, kernel_threshold = classification_mask(kernel, confidence, kernel_threshold)
 
     # compute counts and sums for each classification
     counts = []
@@ -371,7 +397,12 @@ def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float 
     sums.append(tf.nn.convolution(input=inputs_nv, filters=kernel_nv, strides=strides, padding=padding))
 
     # format into final output
-    return tf.stack(counts, axis=-1), tf.stack(sums, axis=-1)
+    counts = tf.stack(counts, axis=-1)
+    sums = tf.stack(sums, axis=-1)
+    if return_thresholds:
+        return counts, sums, [inputs_threshold, kernel_threshold]
+    else:
+        return counts, sums
 
 
 def classification_mask(x, confidence: float = 0.95, threshold: float = None):
@@ -387,7 +418,7 @@ def classification_mask(x, confidence: float = 0.95, threshold: float = None):
             otherwise inferred by using confidence to draw an appropriate percentile from the
             values of x.
     Returns:
-        (pos_mask, zero_mask, neg_mask) - np-array bool tensors
+        (pos_mask, zero_mask, neg_mask, threshold) - np-array bool tensors, plus the derived threshold
 
     """
     # determine threshold
@@ -404,4 +435,4 @@ def classification_mask(x, confidence: float = 0.95, threshold: float = None):
     pos_mask = tf.logical_and(x > 0, tf.logical_not(zero_mask))
     neg_mask = tf.logical_and(x < 0, tf.logical_not(zero_mask))
 
-    return pos_mask.numpy(), zero_mask.numpy(), neg_mask.numpy()
+    return pos_mask.numpy(), zero_mask.numpy(), neg_mask.numpy(), threshold
