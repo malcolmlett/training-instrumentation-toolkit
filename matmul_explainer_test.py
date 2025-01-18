@@ -50,7 +50,6 @@ def tensor_classify_test():
     a = np.tile(a, (10, 1))
 
     counts, sums = tensor_classify(a, confidence=0.75)
-    print(f"Counts: {counts.shape}")
 
     expected_counts = [80, 20, 0]
     actual_counts = np.sum(counts, axis=(0, 1))
