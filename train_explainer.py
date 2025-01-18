@@ -210,6 +210,56 @@ def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float 
     return tf.stack(counts, axis=-1), tf.stack(sums, axis=-1)
 
 
+def _find_inbound_layers(model, layer, return_type='layer'):
+    """
+    :return_type: one of 'layer', 'index'
+    """
+    if return_type not in ['layer', 'index']:
+        raise ValueError(f"return_type must be one of 'layer', 'index', got: {return_type}")
+    layers = [_find_layer_by_node(model, node, return_type) for inbound in layer._inbound_nodes for node in
+              inbound.parent_nodes]
+    return [node for node in layers if node is not None]
+
+
+def _find_outbound_layers(model, layer, return_type='layer'):
+    """
+    :return_type: one of 'layer', 'index'
+    """
+    if return_type not in ['layer', 'index']:
+        raise ValueError(f"return_type must be one of 'layer', 'index', got: {return_type}")
+    layers = [_find_layer_by_node(model, node, return_type) for node in layer._outbound_nodes]
+    return [node for node in layers if node is not None]
+
+
+def _find_layer_by_node(model, node, return_type='layer'):
+    """
+    :return_type: one of 'layer', 'index'
+    """
+    for l_idx, layer in enumerate(model.layers):
+        if node in layer._inbound_nodes:
+            return layer if return_type == 'layer' else l_idx
+    return None
+
+
+def _split_by_largest(tensors):
+    """
+    Splits the given list of tensors into the single largest tensor, and the rest.
+    Useful as a heuristic for identifying the main weights tensor in a layer and the rest, without assuming
+    a particular order.
+    If there are multiple largest tensors, the first one is returned.
+    Returns:
+      largest_tensor, [rest]
+    """
+    biggest_t, biggest_idx = None, None
+    for t_idx, t in enumerate(tensors):
+        if t is not None:
+            if biggest_t is None or tf.size(t) > tf.size(biggest_t):
+                biggest_t = t
+                biggest_idx = t_idx
+    rest = [t for t_idx, t in enumerate(tensors) if t_idx != biggest_idx]
+    return biggest_t, rest
+
+
 def explain_near_zero_gradients(layer_index: int,
                                 gradients: tot.GradientHistoryCallback,
                                 activity: tot.ActivityHistoryCallback,
@@ -343,8 +393,5 @@ def explain_near_zero_gradients(layer_index: int,
     #     For dense target layers, the pre-activation z values can be calculated simply via
     #     np.matmul(weights, input_activations) + biases.
     #     For conv target layers, ....
-
-
-
 
 
