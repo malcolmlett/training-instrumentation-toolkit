@@ -4,6 +4,9 @@ import numpy as np
 
 
 def run_test_suite():
+    classification_mask_test()
+    tensor_classify_test()
+    multiply_classify_test()
     matmul_classify_test()
     conv_classify_1d_test()
     conv_classify_2d_test()
@@ -40,6 +43,44 @@ def classification_mask_test():
     assert np.all(p == expected_p), f"Expected p {expected_p}, got: {p}"
     assert np.all(z == expected_z), f"Expected z {expected_z}, got: {z}"
     assert np.all(n == expected_n), f"Expected n {expected_n}, got: {n}"
+
+
+def tensor_classify_test():
+    a = np.arange(0.0, 1.0, 0.1)
+    a = np.tile(a, (10, 1))
+
+    counts, sums = tensor_classify(a, confidence=0.75)
+    print(f"Counts: {counts.shape}")
+
+    expected_counts = [80, 20, 0]
+    actual_counts = np.sum(counts, axis=(0, 1))
+    assert np.all(actual_counts == expected_counts), f"Expected counts {expected_counts}, got: {actual_counts}"
+
+    expected_sums = [44., 1., 0.]
+    actual_sums = np.sum(sums, axis=(0, 1))
+    assert np.allclose(actual_sums, expected_sums), f"Expected sums {expected_sums}, got: {actual_sums}"
+
+    derived_value = np.sum(sums, axis=-1)
+    assert np.allclose(a, derived_value), "real value and derived value are different"
+
+
+def multiply_classify_test():
+    a = np.arange(0.0, 1.0, 0.1)
+    a = np.tile(a, (10, 1))
+
+    counts, sums = multiply_classify(a, a.transpose(), confidence=0.75)
+
+    expected_counts = [64, 16, 0, 16, 4, 0, 0, 0, 0]
+    actual_counts = np.sum(counts, axis=(0, 1))
+    assert np.all(actual_counts == expected_counts), f"Expected counts {expected_counts}, got: {actual_counts}"
+
+    expected_sums = [19.36, 0.44, 0, 0.44, 0.01, 0., 0., 0., 0.]
+    actual_sums = np.sum(sums, axis=(0, 1))
+    assert np.allclose(actual_sums, expected_sums), f"Expected sums {expected_sums}, got: {actual_sums}"
+
+    real_matmul = np.multiply(a, a.transpose())
+    derived_matmul = np.sum(sums, axis=-1)
+    assert np.allclose(real_matmul, derived_matmul), "real multiply and derived multiply are different"
 
 
 def matmul_classify_test():

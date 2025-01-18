@@ -109,14 +109,10 @@ def tensor_classify(x, confidence: float = 0.95, threshold: float = None,
 
     This is an extension from the matmul-like operations to a single tensor.
     It seems somewhat strange on its own, but it proves useful so that you can
-    use the other functions to get a nice summary()
+    use the other functions to get a nice summary().
 
     Args:
-        x: np-array or tensor with shape (n, k)
-            confidence: statistical confidence (0.0 to 1.0) that you wish to meet
-            that a value is accurately placed within the P, Z, or N categories.
-            Higher values lead to more strict requirements for "near zero".
-            1.0 only considers exactly 0.0 as "near zero".
+        x: np-array or tensor with any shape
         confidence: statistical confidence (0.0 to 1.0) that you wish to meet
             that a value is accurately placed within the P, Z, or N categories.
             Higher values lead to more strict requirements for "near zero".
@@ -126,23 +122,29 @@ def tensor_classify(x, confidence: float = 0.95, threshold: float = None,
         return_threshold: whether to additionally return the derived threshold
 
     Returns:
-        (counts, sums) where each is an np-array with shape (n, m, 3)
+        (counts, sums) containing the counts and sums of each component, respectively.
+        Each a tensor with shape `x_shape + (3,)`.
         OR
         (counts, sums, thresholds) with list of thresholds also returned
     """
-    x = np.array(x)
+    # apply thresholds and create masks
+    x = tf.constant(x)
     x_p, x_z, x_n, threshold = classification_mask(x, confidence, threshold)
 
-    # compute counts and sums
-    counts = np.zeros_like(x, dtype=int)
-    sums = np.zeros_like(x, dtype=x.dtype)
-    counts[:, :, 0] = x_p.astype(int)
-    counts[:, :, 1] = x_z.astype(int)
-    counts[:, :, 2] = x_n.astype(int)
-    sums[:, :, 0] = x * x_p
-    sums[:, :, 1] = x * x_z
-    sums[:, :, 2] = x * x_n
+    # compute counts and sums for each classification
+    counts = []
+    counts.append(tf.cast(x_p, tf.float32))
+    counts.append(tf.cast(x_z, tf.float32))
+    counts.append(tf.cast(x_n, tf.float32))
 
+    sums = []
+    sums.append(tf.where(x_p, x, tf.zeros_like(x)))
+    sums.append(tf.where(x_z, x, tf.zeros_like(x)))
+    sums.append(tf.where(x_n, x, tf.zeros_like(x)))
+
+    # format into final output
+    counts = tf.stack(counts, axis=-1)
+    sums = tf.stack(sums, axis=-1)
     if return_threshold:
         return counts, sums, threshold
     else:
@@ -350,6 +352,7 @@ def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float 
           otherwise inferred from confidence
         kernel_threshold: abs(X2) values less than this are considered near-zero,
           otherwise inferred from confidence
+        return_thresholds: whether to additionally return the derived thresholds
 
     Returns:
         (counts, sums) containing the counts and sums of each component, respectively.
