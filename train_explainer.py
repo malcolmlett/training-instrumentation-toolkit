@@ -20,6 +20,7 @@ def classify_terms():
     return ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
 
 
+# change threshold args to 'thresholds', taking a single value or a list, eg: 0.35; [None, 0.75]; [0.45, 0.75]
 def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, threshold2: float = None):
     """
     Calculates how the dot-product of x1 . x2 comes to have the range of values that it does.
@@ -117,7 +118,91 @@ def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, 
     return counts, sums
 
 
-def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float = 0.95, inputs_threshold: float = None, kernel_threshold: float = None):
+# change threshold args to 'thresholds', taking a single value or a list, eg: 0.35; [None, 0.75]; [0.45, 0.75]
+def multiply_classify(x, y, confidence: float = 0.95, x_threshold: float = None, y_threshold: float = None):
+    """
+    Like matmul_classify but for elementwise multiplication.
+
+    Args:
+        x: np-array or tensor
+        y: np-array or tensor, must have the same type and shape as x
+
+        confidence: statistical confidence (0.0 to 1.0) that you wish to meet
+          that a value is accurately placed within the P, Z, or N categories.
+          Higher values lead to more strict requirements for "near zero".
+          1.0 only considers exactly 0.0 as "near zero".
+        x_threshold: abs(X1) values less than this are considered near-zero,
+          otherwise inferred from confidence
+        y_threshold: abs(X2) values less than this are considered near-zero,
+          otherwise inferred from confidence
+
+    Returns:
+        (counts, sums) containing the counts and sums of each component, respectively.
+        Each a tensor with shape `x_shape + (9,)`.
+    """
+    # standardise on data format
+    x = tf.constant(x)
+    y = tf.constant(y)
+
+    # determine thresholds
+    # (note: on small matrices with few discrete numbers, percentile() will find a value on either side
+    #  of the percentage threshold, thus we should apply the threshold rule as "zero if value < threshold"
+    if x_threshold is None:
+        x_threshold = tfp.stats.percentile(tf.abs(x), 100 * (1 - confidence), interpolation='midpoint')
+    if y_threshold is None:
+        y_threshold = tfp.stats.percentile(tf.abs(y), 100 * (1 - confidence), interpolation='midpoint')
+
+    # create masks that classify each input individually
+    x_p = x >= x_threshold
+    x_z = np.abs(x) < x_threshold
+    x_n = x <= -x_threshold
+
+    y_p = y >= y_threshold
+    y_z = np.abs(y) < y_threshold
+    y_n = y <= -y_threshold
+
+    # compute counts and sums for each classification
+    counts = []
+    x_pc = tf.cast(x_p, tf.float32)
+    x_zc = tf.cast(x_z, tf.float32)
+    x_nc = tf.cast(x_n, tf.float32)
+    y_pc = tf.cast(x_p, tf.float32)
+    y_zc = tf.cast(x_z, tf.float32)
+    y_nc = tf.cast(x_n, tf.float32)
+    counts.append(tf.math.multiply(x_pc, y_pc))
+    counts.append(tf.math.multiply(x_pc, y_zc))
+    counts.append(tf.math.multiply(x_pc, y_nc))
+    counts.append(tf.math.multiply(x_zc, y_pc))
+    counts.append(tf.math.multiply(x_zc, y_zc))
+    counts.append(tf.math.multiply(x_zc, y_nc))
+    counts.append(tf.math.multiply(x_nc, y_pc))
+    counts.append(tf.math.multiply(x_nc, y_zc))
+    counts.append(tf.math.multiply(x_nc, y_nc))
+
+    sums = []
+    x_pv = tf.where(x_p, x, tf.zeros_like(x))
+    x_zv = tf.where(x_z, x, tf.zeros_like(x))
+    x_nv = tf.where(x_n, x, tf.zeros_like(x))
+    y_pv = tf.where(x_p, y, tf.zeros_like(y))
+    y_zv = tf.where(x_z, y, tf.zeros_like(y))
+    y_nv = tf.where(x_n, y, tf.zeros_like(y))
+    counts.append(tf.math.multiply(x_pv, y_pv))
+    counts.append(tf.math.multiply(x_pv, y_zv))
+    counts.append(tf.math.multiply(x_pv, y_nv))
+    counts.append(tf.math.multiply(x_zv, y_pv))
+    counts.append(tf.math.multiply(x_zv, y_zv))
+    counts.append(tf.math.multiply(x_zv, y_nv))
+    counts.append(tf.math.multiply(x_nv, y_pv))
+    counts.append(tf.math.multiply(x_nv, y_zv))
+    counts.append(tf.math.multiply(x_nv, y_nv))
+
+    # format into final output
+    return tf.stack(counts, axis=-1), tf.stack(sums, axis=-1)
+
+
+# change threshold args to 'thresholds', taking a single value or a list, eg: 0.35; [None, 0.75]; [0.45, 0.75]
+def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float = 0.95,
+                  inputs_threshold: float = None, kernel_threshold: float = None):
     """
     Like matmul_classify but for convolutions.
     Supports 1D, 2D and 3D convolution.
