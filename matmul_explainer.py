@@ -11,6 +11,7 @@
 # of a given computation to explain its output.
 import numpy as np
 import tensorflow as tf
+import tensorflow_probability as tfp
 
 
 def summarise(counts, sums):
