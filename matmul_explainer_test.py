@@ -324,8 +324,70 @@ def filter_classifications_test():
 
 
 def _fixargsort_test():
+    # sort simple list
     a = ['ZZ', 'NN', 'ZP', 'NZ', 'PZ', 'PP', 'NP', 'PN', 'ZN']
     ref = ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
     order = _fixargsort(a, ref)
     fixed = np.array(a)[order]
     assert np.all(fixed == ref), f"Expected fixed: {ref}, got: {fixed}"
+
+    # sort array given list-type reference
+    a = np.array([
+        ['ZZ', 'NN', 'ZP', 'NZ', 'PZ', 'PP', 'NP', 'PN', 'ZN'],
+        ['ZN', 'PN', 'NP', 'PP', 'PZ', 'NZ', 'ZP', 'NN', 'ZZ']
+    ])
+    ref = ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+    order = _fixargsort(a, ref)
+    fixed = np.take_along_axis(a, order, axis=-1)
+    expected = np.array([
+        ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN'],
+        ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+    ])
+    assert np.all(fixed == expected), f"Expected fixed: {ref}, got: {fixed}"
+
+    # sort array given array reference
+    a = np.array([
+        ['ZZ', 'NN', 'ZP', 'NZ', 'PZ', 'PP', 'NP', 'PN', 'ZN'],
+        ['ZN', 'PN', 'NP', 'PP', 'PZ', 'NZ', 'ZP', 'NN', 'ZZ']
+    ])
+    ref = np.array([
+        ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN'],
+        ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN'],
+    ])
+    order = _fixargsort(a, ref)
+    fixed = np.take_along_axis(a, order, axis=-1)
+    expected = np.array([
+        ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN'],
+        ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+    ])
+    assert np.all(fixed == expected), f"Expected fixed: {ref}, got: {fixed}"
+
+    # sort array as flattened list
+    a = np.array([
+        ['ZZ', 'NN', 'ZP'],
+        ['NZ', 'PZ', 'PP'],
+        ['NP', 'PN', 'ZN'],
+    ])
+    ref = ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+    order = _fixargsort(a, ref, axis=None)
+    fixed = np.take_along_axis(a, order, axis=None)
+    print(f"order: {order}, fixed: {fixed.shape} = {fixed}")
+    expected = ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+    assert np.all(fixed == expected), f"Expected fixed: {ref}, got: {fixed}"
+
+    # sort array as flattened list with array-type reference
+    a = np.array([
+        ['ZZ', 'NN', 'ZP'],
+        ['NZ', 'PZ', 'PP'],
+        ['NP', 'PN', 'ZN'],
+    ])
+    ref = np.array([
+        ['PP', 'PZ', 'PN'],
+        ['ZP', 'ZZ', 'ZN'],
+        ['NP', 'NZ', 'NN'],
+    ])
+    order = _fixargsort(a, ref, axis=None)
+    fixed = np.take_along_axis(a, order, axis=None)
+    print(f"order: {order}, fixed: {fixed.shape} = {fixed}")
+    expected = ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+    assert np.all(fixed == expected), f"Expected fixed: {ref}, got: {fixed}"

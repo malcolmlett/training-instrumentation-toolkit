@@ -618,21 +618,43 @@ def _partial_filter_by_count(counts, sums, terms, masks, completeness):
     return counts, sums, terms, masks
 
 
-def _fixargsort(a, reference):
+def _fixargsort(a, reference, axis=-1):
     """
     Like np.argsort() but that it returns the indices needed to "fix" the sort order of the given
     list or array so that it has the same order as reference.
     Assumes that both lists or arrays are of the same shape and have the same values, just in different orders.
     Args:
       a: a list or array needing to have its order "fixed"
-      reference: the list or array with the reference order
+      reference: the 1D list or array with the reference order
+      axis: int or None, optional. Axis along which to sort. The default is -1 (the last axis). If None, the flattened array is used.
     Returns:
-      indices for sorting a
+      indices for sorting 'a'
     """
+    # For very simple lists, this function would look like the following:
+    #  a, reference = np.array(a), np.array(reference)
+    #  ref_meta_order = np.argsort(np.argsort(reference))
+    #  a_order = np.argsort(a)
+    #  return a_order[ref_meta_order]
+    # Everything else you see here is there in order to cope with arrays
+    # and with variations in how the reference is supplied.
+
     # normalize types
     a = np.array(a)
     reference = np.array(reference)
 
-    ref_meta_order = np.argsort(np.argsort(reference))
-    a_order = np.argsort(a)
-    return a_order[ref_meta_order]
+    # tile reference out to match shape of a
+    if reference.ndim < a.ndim and axis is not None:
+        reshape_shape = [1] * len(a.shape)
+        reshape_shape[axis] = len(reference)
+        reps = list(a.shape)
+        reps[axis] = 1
+        reference = np.reshape(reference, reshape_shape)
+        reference = np.tile(reference, reps)
+
+    # get meta-order from reference
+    ref_meta_order = np.argsort(np.argsort(reference, axis=axis), axis=axis)
+
+    # determine ordering of a
+    a_order = np.argsort(a, axis=axis)
+    indices = np.take_along_axis(a_order, ref_meta_order, axis=axis)
+    return indices
