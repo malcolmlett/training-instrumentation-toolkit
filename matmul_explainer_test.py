@@ -15,6 +15,7 @@ def run_test_suite():
 
     _partial_filter_by_sum_test()
     _partial_filter_by_count_test()
+    _fixargsort_test()
     filter_classifications_test()
     print("All matmul_explainer tests passed.")
 
@@ -57,7 +58,6 @@ def classify_terms_test():
     counts, sums = tensor_classify(a)
     terms = classify_terms(counts, retain_shape=True)
     expected_terms = np.tile(np.array([[['P', 'Z', 'N']]]), reps=(8, 10, 1))
-    print(f"expected_terms: {expected_terms.shape}")
     assert terms.shape == expected_terms.shape, f"Expected shape {expected_terms.shape}, got: {terms.shape}"
     assert np.all(terms == expected_terms), f"Expected terms {expected_terms}, got: {terms}"
 
@@ -66,7 +66,6 @@ def classify_terms_test():
     counts, sums = matmul_classify(a, a.T)
     terms = classify_terms(counts, retain_shape=True)
     expected_terms = np.tile(np.array([[['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']]]), reps=(8, 8, 1))
-    print(f"expected_terms: {expected_terms.shape}")
     assert terms.shape == expected_terms.shape, f"Expected shape {expected_terms.shape}, got: {terms.shape}"
     assert np.all(terms == expected_terms), f"Expected terms {expected_terms}, got: {terms}"
 
@@ -371,7 +370,6 @@ def _fixargsort_test():
     ref = ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
     order = _fixargsort(a, ref, axis=None)
     fixed = np.take_along_axis(a, order, axis=None)
-    print(f"order: {order}, fixed: {fixed.shape} = {fixed}")
     expected = ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
     assert np.all(fixed == expected), f"Expected fixed: {ref}, got: {fixed}"
 
@@ -388,6 +386,5 @@ def _fixargsort_test():
     ])
     order = _fixargsort(a, ref, axis=None)
     fixed = np.take_along_axis(a, order, axis=None)
-    print(f"order: {order}, fixed: {fixed.shape} = {fixed}")
     expected = ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
     assert np.all(fixed == expected), f"Expected fixed: {ref}, got: {fixed}"
