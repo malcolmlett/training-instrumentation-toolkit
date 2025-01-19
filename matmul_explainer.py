@@ -71,7 +71,7 @@ def summarise(counts, sums=None):
     return summary
 
 
-def classify_terms(example=None, retain_shape=True):
+def classify_terms(example=None, retain_shape=False):
     """
     Identifies the appropriate terms list based on the example given, or otherwise
     assumes the terms for a full mat-mul like operation.
