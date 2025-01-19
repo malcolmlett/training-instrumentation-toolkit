@@ -4,6 +4,7 @@ import numpy as np
 
 
 def run_test_suite():
+    classify_terms_test()
     classification_mask_test()
     tensor_classify_test()
     multiply_classify_test()
@@ -11,6 +12,58 @@ def run_test_suite():
     conv_classify_1d_test()
     conv_classify_2d_test()
     print("All matmul_explainer tests passed.")
+
+
+def classify_terms_test():
+    # gets default list without args
+    terms = classify_terms()
+    expected_terms = ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+    assert terms == expected_terms, f"Expected terms {expected_terms}, got: {terms}"
+
+    # gets simple list from tensor classification
+    a = np.tile(np.arange(0.0, 1.0, 0.1), (10, 1))
+    counts, sums = tensor_classify(a)
+    terms = classify_terms(counts)
+    expected_terms = ['P', 'Z', 'N']
+    assert terms == expected_terms, f"Expected terms {expected_terms}, got: {terms}"
+
+    # gets simple list from matmul classification - counts
+    a = np.tile(np.arange(0.0, 1.0, 0.1), (10, 1))
+    counts, sums = matmul_classify(a, a)
+    terms = classify_terms(counts)
+    expected_terms = ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+    assert terms == expected_terms, f"Expected terms {expected_terms}, got: {terms}"
+
+    # gets simple list from matmul classification - sums
+    a = np.tile(np.arange(0.0, 1.0, 0.1), (10, 1))
+    counts, sums = matmul_classify(a, a)
+    terms = classify_terms(counts)
+    expected_terms = ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+    assert terms == expected_terms, f"Expected terms {expected_terms}, got: {terms}"
+
+    # gets simple list from matmul classification - tuple
+    a = np.tile(np.arange(0.0, 1.0, 0.1), (10, 1))
+    terms = classify_terms(matmul_classify(a, a))
+    expected_terms = ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+    assert terms == expected_terms, f"Expected terms {expected_terms}, got: {terms}"
+
+    # retains shape from tensor classification
+    a = np.tile(np.arange(0.0, 1.0, 0.1), (8, 1))
+    counts, sums = tensor_classify(a)
+    terms = classify_terms(counts, retain_shape=True)
+    expected_terms = np.tile(np.array([[['P', 'Z', 'N']]]), reps=(8, 10, 1))
+    print(f"expected_terms: {expected_terms.shape}")
+    assert terms.shape == expected_terms.shape, f"Expected shape {expected_terms.shape}, got: {terms.shape}"
+    assert np.all(terms == expected_terms), f"Expected terms {expected_terms}, got: {terms}"
+
+    # retains shape from matmul classification
+    a = np.tile(np.arange(0.0, 1.0, 0.1), (8, 1))
+    counts, sums = matmul_classify(a, a.T)
+    terms = classify_terms(counts, retain_shape=True)
+    expected_terms = np.tile(np.array([[['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']]]), reps=(8, 8, 1))
+    print(f"expected_terms: {expected_terms.shape}")
+    assert terms.shape == expected_terms.shape, f"Expected shape {expected_terms.shape}, got: {terms.shape}"
+    assert np.all(terms == expected_terms), f"Expected terms {expected_terms}, got: {terms}"
 
 
 def classification_mask_test():

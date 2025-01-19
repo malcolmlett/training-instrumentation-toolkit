@@ -71,7 +71,7 @@ def summarise(counts, sums=None):
     return summary
 
 
-def classify_terms(example=None):
+def classify_terms(example=None, retain_shape=True):
     """
     Identifies the appropriate terms list based on the example given, or otherwise
     assumes the terms for a full mat-mul like operation.
@@ -79,15 +79,21 @@ def classify_terms(example=None):
     Args:
         example: a count or sum result from a call to matmul_classify() or similar,
             or the tensor containing both the count and sum.
+        retain_shape: whether to tile the terms out and to return an array
+            in the same shape as the provided example. Only allowed if an example is included.
+
     Returns:
         list of strings, containing the names of the terms in the default order
+        OR
+        np-array in same shape as example with identified term for each value
     """
+    shape = None
     if example is None:
         tensor_count = 2   # default
     else:
         if isinstance(example, tuple):
             example, _ = example
-        shape = tf.shape(example)
+        shape = np.shape(example)
         channels = shape[-1]
         if channels == 3:
             tensor_count = 1
@@ -97,9 +103,21 @@ def classify_terms(example=None):
             raise ValueError("Unrecognised example with {channels} in last dim: {shape}")
 
     if tensor_count == 1:
-        return ['P', 'Z', 'N']
+        term_list = ['P', 'Z', 'N']
     else:
-        return ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+        term_list = ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+
+    if retain_shape:
+        if shape is None:
+            raise ValueError("Cannot retain shape without example")
+        value_shape = shape[:-1]
+        term_count = len(term_list)
+        term_array = np.array(term_list)
+        terms = np.reshape(term_array, (1,) * len(value_shape) + (term_count,))
+        terms = np.tile(terms, reps=value_shape + (1,))
+        return terms
+    else:
+        return term_list
 
 
 def tensor_classify(x, confidence: float = 0.95, threshold: float = None,
