@@ -1,4 +1,5 @@
 from matmul_explainer import *
+from matmul_explainer import _partial_filter_by_sum, _partial_filter_by_count
 import tensorflow as tf
 import numpy as np
 
@@ -11,6 +12,10 @@ def run_test_suite():
     matmul_classify_test()
     conv_classify_1d_test()
     conv_classify_2d_test()
+
+    _partial_filter_by_sum_test()
+    _partial_filter_by_count_test()
+    filter_classifications_test()
     print("All matmul_explainer tests passed.")
 
 
@@ -202,3 +207,117 @@ def conv_classify_2d_test():
     derived_conv = tf.reduce_sum(sums, axis=-1)
     assert np.allclose(expected_conv, derived_conv), "real conv and derived conv are different"
 
+
+def _partial_filter_by_sum_test():
+    counts = np.array([
+        [0, 1, 2, 3, 4, 5, 6, 7, 8],
+        [0, 1, 2, 3, 4, 5, 6, 7, 8],
+        [8, 7, 6, 5, 4, 3, 2, 1, 0],
+    ])
+    sums = np.array([
+        [0, 1, 3, 6, 10, 15, 21, 28, 36],
+        [0, 36, 1, 28, 3, 21, 6, 15, 10],
+        [8, 15, 21, 26, 30, 33, 35, 36, 0],
+    ])
+    expected_counts = np.array([
+        [8, 7, 6, 5, 4, 3, 2, 1, 0],
+        [1, 3, 5, 7, 8, 6, 4, 2, 0],
+        [1, 2, 3, 4, 5, 6, 7, 8, 0],
+    ])
+    expected_sums = np.array([
+        [36, 28, 21, 15, 10, 6, 3, 1, 0],
+        [36, 28, 21, 15, 10, 6, 3, 1, 0],
+        [36, 35, 33, 30, 26, 21, 15, 8, 0],
+    ])
+    expected_terms = np.array([
+        ['NN', 'NZ', 'NP', 'ZN', 'ZZ', 'ZP', 'PN', 'PZ', 'PP'],
+        ['PZ', 'ZP', 'ZN', 'NZ', 'NN', 'NP', 'ZZ', 'PN', 'PP'],
+        ['NZ', 'NP', 'ZN', 'ZZ', 'ZP', 'PN', 'PZ', 'PP', 'NN'],
+    ])
+    expected_masks = np.array([
+        [True, True, True, True, False, False, False, False, False],
+        [True, True, True, True, False, False, False, False, False],
+        [True, True, True, True, True, False, False, False, False],
+    ])
+
+    terms = classify_terms(counts, retain_shape=True)
+    masks = np.zeros_like(counts, dtype=bool)
+    counts, sums, terms, masks = _partial_filter_by_sum(counts, sums, terms, masks, completeness=0.75)
+    assert np.all(counts == expected_counts), f"Expected counts {expected_counts}, got: {counts}"
+    assert np.all(sums == expected_sums), f"Expected sums {expected_sums}, got: {sums}"
+    assert np.all(terms == expected_terms), f"Expected terms {expected_terms}, got: {terms}"
+    assert np.all(masks == expected_masks), f"Expected masks {expected_masks}, got: {masks}"
+
+
+def _partial_filter_by_count_test():
+    counts = np.array([
+        [0, 1, 2, 3, 4, 5, 6, 7, 8],
+        [0, 1, 2, 3, 4, 5, 6, 7, 8],
+        [8, 7, 6, 5, 4, 3, 2, 1, 0],
+    ])
+    sums = np.array([
+        [0, 1, 3, 6, 10, 15, 21, 28, 36],
+        [0, 36, 1, 28, 3, 21, 6, 15, 10],
+        [8, 15, 21, 26, 30, 33, 35, 36, 0],
+    ])
+    expected_counts = np.array([
+        [8, 7, 6, 5, 4, 3, 2, 1, 0],
+        [8, 7, 6, 5, 4, 3, 2, 1, 0],
+        [8, 7, 6, 5, 4, 3, 2, 1, 0],
+    ])
+    expected_sums = np.array([
+        [36, 28, 21, 15, 10, 6, 3, 1, 0],
+        [10, 15, 6, 21, 3, 28, 1, 36, 0],
+        [8, 15, 21, 26, 30, 33, 35, 36, 0],
+    ])
+    expected_terms = np.array([
+        ['NN', 'NZ', 'NP', 'ZN', 'ZZ', 'ZP', 'PN', 'PZ', 'PP'],
+        ['NN', 'NZ', 'NP', 'ZN', 'ZZ', 'ZP', 'PN', 'PZ', 'PP'],
+        ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN'],
+    ])
+    expected_masks = np.array([
+        [True, True, True, True, True, False, False, False, False],
+        [True, True, True, True, True, False, False, False, False],
+        [True, True, True, True, True, False, False, False, False],
+    ])
+
+    terms = classify_terms(counts, retain_shape=True)
+    masks = np.zeros_like(counts, dtype=bool)
+    counts, sums, terms, masks = _partial_filter_by_count(counts, sums, terms, masks, completeness=0.75)
+    assert np.all(counts == expected_counts), f"Expected counts {expected_counts}, got: {counts}"
+    assert np.all(sums == expected_sums), f"Expected sums {expected_sums}, got: {sums}"
+    assert np.all(terms == expected_terms), f"Expected terms {expected_terms}, got: {terms}"
+    assert np.all(masks == expected_masks), f"Expected masks {expected_masks}, got: {masks}"
+
+
+def filter_classifications_test():
+    counts = np.array([
+        [0, 1, 2, 3, 4, 5, 6, 7, 8],
+        [0, 1, 2, 3, 4, 5, 6, 7, 8],
+        [8, 7, 6, 5, 4, 3, 2, 1, 0],
+    ])
+    sums = np.array([
+        [0, 1, 3, 6, 10, 15, 21, 28, 36],
+        [0, 36, 1, 28, 3, 21, 6, 15, 10],
+        [8, 15, 21, 26, 30, 33, 35, 36, 0],
+    ])
+    expected_counts = np.array([
+        [8, 7, 6, 5, 4, 0, 0, 0, 0],
+        [8, 7, 6, 5, 4, 3, 1, 0, 0],
+        [8, 7, 6, 5, 4, 3, 2, 1, 0],
+    ])
+    expected_sums = np.array([
+        [36, 28, 21, 15, 10, 0, 0, 0, 0],
+        [10, 15, 6, 21, 3, 28, 36, 0, 0],
+        [8, 15, 21, 26, 30, 33, 35, 36, 0],
+    ])
+    expected_terms = np.array([
+        ['NN', 'NZ', 'NP', 'ZN', 'ZZ', '--', '--', '--', '--'],
+        ['NN', 'NZ', 'NP', 'ZN', 'ZZ', 'ZP', 'PZ', '--', '--'],
+        ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', '--'],
+    ])
+
+    counts, sums, terms = filter_classifications(counts, sums, completeness=0.75)
+    assert np.all(counts == expected_counts), f"Expected counts {expected_counts}, got: {counts}"
+    assert np.all(sums == expected_sums), f"Expected sums {expected_sums}, got: {sums}"
+    assert np.all(terms == expected_terms), f"Expected terms {expected_terms}, got: {terms}"

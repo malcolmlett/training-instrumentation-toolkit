@@ -461,3 +461,160 @@ def classification_mask(x, confidence: float = 0.95, threshold: float = None):
     neg_mask = tf.logical_and(x < 0, tf.logical_not(zero_mask))
 
     return pos_mask.numpy(), zero_mask.numpy(), neg_mask.numpy(), threshold.numpy()
+
+
+def filter_classifications(counts, sums, completeness=0.75):
+    """
+    Filters classification data in order to retain a certain
+    "completeness of explanatory coverage". This eliminates less important noise,
+    making it easier to understand any summaries produced from it.
+    It is also useful for grouping similar classification results that have
+    the same major structure, while ignoring less important noise.
+
+    The final returned counts, sums, and terms are sorted for descending
+    counts.
+
+    Everything is determined independently for each each position
+    within the original value tensor, including for final sort. Thus the result
+    also includes a terms tensor, with the same shape as counts and sums,
+    in order to identify the final terms order for each position.
+
+    Args:
+        counts: the counts returned by matmul_classify() or one of its variants.
+        sums: the sums returned by matmul_classify() or one of its variants.
+        completeness: float in range 0.0 to 1.0.
+            Minimum required "completeness of explanatory coverage".
+            After filtering, the retained counts and sums will explain at least this much
+            of the final result, measured as a combined fraction of the total number of counts
+            and the maximum positive or negative extent of the sums.
+    Returns:
+        (counts, sums, terms) - sorted and filtered
+    """
+    # steps:
+    # - initialise a full tuple of (counts, sums, terms, masks) that will always be sorted
+    #   together simultaneously
+    # - do a sort and filter by sums first
+    #   - while the final output is primarily by count, sometimes there are a small number
+    #     of unusually large values and we want to see those too
+    # - then do a sort and filter by counts
+    # - combine final result masks
+    # - set all rejected values to zeros
+    # - final result is sorted according to counts, largest first
+    terms = classify_terms(counts, retain_shape=True)
+    masks = np.zeros_like(counts, dtype=bool)
+    counts, sums, terms, masks = _partial_filter_by_sum(counts, sums, terms, masks, completeness)
+    counts, sums, terms, masks = _partial_filter_by_count(counts, sums, terms, masks, completeness)
+
+    # apply masks - zero-out discarded information
+    counts = counts * masks
+    sums = sums * masks
+    terms = np.where(masks, terms, '--')
+
+    # apply final sorting - by descending count after masking
+    # - although _partial_filter_by_count() will have returned things in the right sort order,
+    #   now that we've applied the mask, some of the counts have changed to zero and the order
+    #   isn't now quite accurate.
+    # - for example, if there's a low-count high-sum, it'll be at the end somewhere
+    #   and now needs to come further forward.
+    sort_order = np.argsort(-counts, axis=-1)  # negate for descending order
+    counts = np.take_along_axis(counts, sort_order, axis=-1)
+    sums = np.take_along_axis(sums, sort_order, axis=-1)
+    terms = np.take_along_axis(terms, sort_order, axis=-1)
+    return counts, sums, terms
+
+
+def _partial_filter_by_sum(counts, sums, terms, masks, completeness):
+    """
+    Internal method for use by filter_classifications().
+
+    Applies a sort and filter over the provided counts, sums, terms and masks.
+    All are sorted according to descending sum order.
+    Masks are updated to indicate values that must be retained.
+    Args:
+        counts: counts tensor from a classification function, with shape (value_shape + (terms,))
+        sums: sums tensor from a classification function, with shape (value_shape + (terms,))
+        terms: terms tensor corresponding to the counts and sums, with shape (value_shape + (terms,))
+        masks: boolean mask indicating values to retain, with shape (value_shape + (terms,))
+            Input value will either be filled with False, or indicate values that must be retained
+            as determined by prior filter logic.
+        completeness: float in range 0.0 to 1.0.
+            Determines minimum fraction of total range that must be retained.
+    Returns:
+        (counts, sums, terms, masks) with all values sorted along terms dimension, and masks updated
+            with additional entries that must be retained
+    """
+    # determine thresholds against sums
+    pos_range = np.sum((sums * (sums > 0)), axis=-1)
+    neg_range = np.abs(np.sum((sums * (sums < 0)), axis=-1))
+    abs_range = np.maximum(pos_range, neg_range)
+    threshold = abs_range * (1 - completeness)  # shape: value_shape
+
+    # sort everything according to sum magnitudes, smallest first for cumsum
+    sort_order = np.argsort(np.abs(sums), axis=-1)
+    counts = np.take_along_axis(counts, sort_order, axis=-1)
+    sums = np.take_along_axis(sums, sort_order, axis=-1)
+    terms = np.take_along_axis(terms, sort_order, axis=-1)
+    masks = np.take_along_axis(masks, sort_order, axis=-1)  # shape: value_shape + (terms,)
+
+    # update masks
+    # - starting from front, sums up positive and negative "marginal" sums separately
+    # - the threshold point is the point where the max of the absolute margins >= threshold
+    pos_margin_sums = np.cumsum(sums * (sums > 0), axis=-1)
+    neg_margin_sums = np.cumsum(sums * (sums < 0), axis=-1)
+    mag_margin_sums = np.maximum(pos_margin_sums, np.abs(neg_margin_sums))  # shape: value_shape + (terms,)
+    threshold_mask = mag_margin_sums >= threshold[..., np.newaxis]  # shape: value_shape + (terms,)
+    masks = np.logical_or(threshold_mask, masks)
+
+    # flip final results for largest-to-smallest order
+    counts = np.flip(counts, axis=-1)
+    sums = np.flip(sums, axis=-1)
+    terms = np.flip(terms, axis=-1)
+    masks = np.flip(masks, axis=-1)
+    return counts, sums, terms, masks
+
+
+def _partial_filter_by_count(counts, sums, terms, masks, completeness):
+    """
+    Internal method for use by filter_classifications().
+
+    Applies a sort and filter over the provided counts, sums, terms and masks.
+    All are sorted according to descending count order.
+    Masks are updated to indicate values that must be retained.
+    Args:
+        counts: counts tensor from a classification function, with shape (value_shape + (terms,))
+        sums: sums tensor from a classification function, with shape (value_shape + (terms,))
+        terms: terms tensor corresponding to the counts and sums, with shape (value_shape + (terms,))
+        masks: boolean mask indicating values to retain, with shape (value_shape + (terms,))
+            Input value will either be filled with False, or indicate values that must be retained
+            as determined by prior filter logic.
+        completeness: float in range 0.0 to 1.0.
+            Determines minimum fraction of total range that must be retained.
+    Returns:
+        (counts, sums, terms, masks) with all values sorted along terms dimension, and masks updated
+            with additional entries that must be retained
+    """
+    # determine thresholds against counts
+    threshold = np.sum(counts, axis=-1) * (1 - completeness)
+    print(f"threshold (counts): {threshold.shape} in range {np.min(threshold)} .. {np.max(threshold)}")
+
+    # sort everything according to counts, smallest first for cumsum
+    sort_order = np.argsort(counts, axis=-1)
+    counts = np.take_along_axis(counts, sort_order, axis=-1)
+    sums = np.take_along_axis(sums, sort_order, axis=-1)
+    terms = np.take_along_axis(terms, sort_order, axis=-1)
+    masks = np.take_along_axis(masks, sort_order, axis=-1)  # shape: value_shape + (terms,)
+
+    # update masks
+    # - starting from front, sums up "marginal" counts
+    # - the threshold point is the point where the margins >= threshold
+    margin_counts = np.cumsum(counts, axis=-1)  # shape: value_shape + (terms,)
+    threshold_mask = margin_counts >= threshold[..., np.newaxis]  # shape: value_shape + (terms,)
+    masks = np.logical_or(threshold_mask, masks)
+
+    # flip final results for largest-to-smallest order
+    counts = np.flip(counts, axis=-1)
+    sums = np.flip(sums, axis=-1)
+    terms = np.flip(terms, axis=-1)
+    masks = np.flip(masks, axis=-1)
+    return counts, sums, terms, masks
+
