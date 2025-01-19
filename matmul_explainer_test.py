@@ -1,5 +1,5 @@
 from matmul_explainer import *
-from matmul_explainer import _partial_filter_by_sum, _partial_filter_by_count
+from matmul_explainer import _partial_filter_by_sum, _partial_filter_by_count, _fixargsort
 import tensorflow as tf
 import numpy as np
 
@@ -321,3 +321,11 @@ def filter_classifications_test():
     assert np.all(counts == expected_counts), f"Expected counts {expected_counts}, got: {counts}"
     assert np.all(sums == expected_sums), f"Expected sums {expected_sums}, got: {sums}"
     assert np.all(terms == expected_terms), f"Expected terms {expected_terms}, got: {terms}"
+
+
+def _fixargsort_test():
+    a = ['ZZ', 'NN', 'ZP', 'NZ', 'PZ', 'PP', 'NP', 'PN', 'ZN']
+    ref = ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+    order = _fixargsort(a, ref)
+    fixed = np.array(a)[order]
+    assert np.all(fixed == ref), f"Expected fixed: {ref}, got: {fixed}"

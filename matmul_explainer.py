@@ -617,3 +617,22 @@ def _partial_filter_by_count(counts, sums, terms, masks, completeness):
     masks = np.flip(masks, axis=-1)
     return counts, sums, terms, masks
 
+
+def _fixargsort(a, reference):
+    """
+    Like np.argsort() but that it returns the indices needed to "fix" the sort order of the given
+    list or array so that it has the same order as reference.
+    Assumes that both lists or arrays are of the same shape and have the same values, just in different orders.
+    Args:
+      a: a list or array needing to have its order "fixed"
+      reference: the list or array with the reference order
+    Returns:
+      indices for sorting a
+    """
+    # normalize types
+    a = np.array(a)
+    reference = np.array(reference)
+
+    ref_meta_order = np.argsort(np.argsort(reference))
+    a_order = np.argsort(a)
+    return a_order[ref_meta_order]
