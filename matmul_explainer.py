@@ -595,7 +595,6 @@ def _partial_filter_by_count(counts, sums, terms, masks, completeness):
     """
     # determine thresholds against counts
     threshold = np.sum(counts, axis=-1) * (1 - completeness)
-    print(f"threshold (counts): {threshold.shape} in range {np.min(threshold)} .. {np.max(threshold)}")
 
     # sort everything according to counts, smallest first for cumsum
     sort_order = np.argsort(counts, axis=-1)
