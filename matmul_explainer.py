@@ -14,17 +14,11 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 
-def summarise(counts, sums=None):
+def summarise(counts, sums, terms=None):
     """
     Generates a concise summary text from the result of calling matmul_classify() or any of its variants.
 
     By default, lists the components ordered by largest count first.
-
-    Example usages:
-    > counts, sums = matmul_classify(a, b)
-    > summarise(counts, sums)
-    >
-    > summarise(matmul_classify(a, b))
 
     Example output:
     > PN: 13.0 = -5.6, PZ: 7.0 = 0.0, ZN: 1.0 = 0.0
@@ -35,14 +29,17 @@ def summarise(counts, sums=None):
 
     Args:
         counts: the counts returned by matmul_classify() or one of its variants.
-            Alternatively, the first argument may be a tuple containing both counts and sums.
         sums: the sums returned by matmul_classify() or one of its variants.
+        terms: terms returned by filter_classifications(), same shape as counts and sums.
+          Must be included if filter_classifications() has been called.
     Returns:
         string description
     """
-    if isinstance(counts, tuple):
-        counts, sums = counts
+    # cleanup order for consistent order by terms
+    if terms is not None:
+        counts, sums, _ = _standardize_order(counts, sums, terms)
     terms = classify_terms(counts)
+
     counts_by_class = np.sum(counts, axis=tuple(range(counts.ndim - 1)))
     sums_by_class = np.sum(sums, axis=tuple(range(counts.ndim - 1)))
 
