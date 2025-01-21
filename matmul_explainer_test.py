@@ -271,7 +271,7 @@ def _partial_filter_by_count_test():
     ])
     expected_terms = np.array([
         ['NN', 'NZ', 'NP', 'ZN', 'ZZ', 'ZP', 'PN', 'PZ', 'PP'],
-        ['NN', 'NZ', 'NP', 'ZN', 'ZZ', 'ZP', 'PN', 'PZ', 'PP'],
+        ['NN', 'NZ', 'NP', 'ZN', 'ZZ', 'ZP', 'PZ', 'PN', 'PP'],
         ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN'],
     ])
     expected_masks = np.array([

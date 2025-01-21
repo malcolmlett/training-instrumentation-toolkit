@@ -474,7 +474,7 @@ def filter_classifications(counts, sums, completeness=0.75):
     The final returned counts, sums, and terms are sorted for descending
     counts.
 
-    Everything is determined independently for each each position
+    Everything is determined independently for each position
     within the original value tensor, including for final sort. Thus the result
     also includes a terms tensor, with the same shape as counts and sums,
     in order to identify the final terms order for each position.
@@ -488,7 +488,7 @@ def filter_classifications(counts, sums, completeness=0.75):
             of the final result, measured as a combined fraction of the total number of counts
             and the maximum positive or negative extent of the sums.
     Returns:
-        (counts, sums, terms) - sorted and filtered
+        (counts, sums, terms) - sorted and filtered (less important counts and sums zerod-out)
     """
     # steps:
     # - initialise a full tuple of (counts, sums, terms, masks) that will always be sorted
@@ -505,10 +505,12 @@ def filter_classifications(counts, sums, completeness=0.75):
     counts, sums, terms, masks = _partial_filter_by_sum(counts, sums, terms, masks, completeness)
     counts, sums, terms, masks = _partial_filter_by_count(counts, sums, terms, masks, completeness)
 
-    # apply masks - zero-out discarded information
+    # apply masks - zero-out discarded counts and sums
+    # (Must retain terms. I had initially replaced masked terms with '--',
+    #  but that causes problems when later needing to standardize the order for
+    #  summarisation.)
     counts = counts * masks
     sums = sums * masks
-    terms = np.where(masks, terms, '--')
 
     # apply final sorting - by descending count after masking
     # - although _partial_filter_by_count() will have returned things in the right sort order,
