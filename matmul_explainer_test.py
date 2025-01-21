@@ -312,9 +312,9 @@ def filter_classifications_test():
         [8, 15, 21, 26, 30, 33, 35, 36, 0],
     ])
     expected_terms = np.array([
-        ['NN', 'NZ', 'NP', 'ZN', 'ZZ', '--', '--', '--', '--'],
-        ['NN', 'NZ', 'NP', 'ZN', 'ZZ', 'ZP', 'PZ', '--', '--'],
-        ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', '--'],
+        ['NN', 'NZ', 'NP', 'ZN', 'ZZ', 'ZP', 'PN', 'PZ', 'PP'],
+        ['NN', 'NZ', 'NP', 'ZN', 'ZZ', 'ZP', 'PZ', 'PN', 'PP'],
+        ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN'],
     ])
 
     counts, sums, terms = filter_classifications(counts, sums, completeness=0.75)
