@@ -658,3 +658,22 @@ def _fixargsort(a, reference, axis=-1):
     a_order = np.argsort(a, axis=axis)
     indices = np.take_along_axis(a_order, ref_meta_order, axis=axis)
     return indices
+
+
+def _standardize_order(counts, sums, terms):
+    """
+    Reverses the ordering effects of filter_classifications().
+    Args:
+        counts, sums, terms - all must have same shape: value_shape + (terms,)
+    Returns:
+        counts, sums, terms - reordered along terms axis so that all entries all in the same
+            order as returned by classify_terms().
+    """
+    # (TODO should do some sanity checks)
+    terms_list = classify_terms(counts)
+    sort_order = _fixargsort(terms, terms_list, axis=-1)
+    counts = np.take_along_axis(counts, sort_order, axis=-1)
+    sums = np.take_along_axis(sums, sort_order, axis=-1)
+    terms = np.take_along_axis(terms, sort_order, axis=-1)
+
+    return counts, sums, terms

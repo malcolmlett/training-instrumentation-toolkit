@@ -1,5 +1,5 @@
 from matmul_explainer import *
-from matmul_explainer import _partial_filter_by_sum, _partial_filter_by_count, _fixargsort
+from matmul_explainer import _partial_filter_by_sum, _partial_filter_by_count, _fixargsort, _standardize_order
 import tensorflow as tf
 import numpy as np
 
@@ -388,3 +388,16 @@ def _fixargsort_test():
     fixed = np.take_along_axis(a, order, axis=None)
     expected = ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
     assert np.all(fixed == expected), f"Expected fixed: {ref}, got: {fixed}"
+
+
+def _standardize_order_test():
+    np.random.seed(36)
+    a = np.random.uniform(-5, +5, (100, 100)).astype(int).astype(float)
+    b = np.random.uniform(-5, +5, (100, 100)).astype(int).astype(float)
+    res = np.matmul(a, b)
+    mask = res == 0
+    counts0, sums0 = matmul_classify(a,b)
+    counts, sums, terms = filter_classifications(counts0, sums0, completeness=1.0)
+    counts, sums, terms = _standardize_order(counts, sums, terms)
+    assert np.allclose(counts, counts0), "Normalized counts aren't same as original"
+    assert np.allclose(sums, sums0), "Normalized sums aren't same as original"
