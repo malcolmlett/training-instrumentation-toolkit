@@ -14,7 +14,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 
-def summarise(counts, sums=None, terms=None, *, mask=None):
+def summarise(counts, sums=None, terms=None, *, mask=None, show_percentage=False):
     """
     Generates a concise summary text from the result of calling matmul_classify() or any of its variants.
 
@@ -44,6 +44,9 @@ def summarise(counts, sums=None, terms=None, *, mask=None):
           Must be included if filter_classifications() has been called.
     Keyword args:
         mask: bool with shape: value_shape.
+        show_percentage: False.
+          Whether to show count values as a percentage of all counts being summarised
+          (after masking), or as absolute values.
     Returns:
         string description
     """
@@ -78,6 +81,13 @@ def summarise(counts, sums=None, terms=None, *, mask=None):
     counts_by_class = counts_by_class[sort_order]
     sums_by_class = sums_by_class[sort_order]
 
+    # optional: convert counts to fractions
+    if show_percentage:
+        factor = np.sum(counts_by_class)
+        if factor == 0:
+            factor = 1.0  # avoid div-by-zero
+        counts_by_class = np.divide(counts_by_class, factor)
+
     # drop anything with zero counts
     summary_mask = counts_by_class > 0
     terms_list = terms_list[summary_mask]
@@ -89,6 +99,7 @@ def summarise(counts, sums=None, terms=None, *, mask=None):
     for this_term, this_count, this_sum in zip(terms_list, counts_by_class, sums_by_class):
         if len(summary) > 0:
             summary += ', '
+        this_count = f"{this_count*100:.1f}%" if show_percentage else this_count
         summary += f"{this_term}: {this_count} = {this_sum}"
     if len(summary) == 0:
         # pretty weird, but maybe this will happen
