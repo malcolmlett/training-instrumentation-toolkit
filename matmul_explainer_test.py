@@ -17,6 +17,7 @@ def run_test_suite():
     _partial_filter_by_count_test()
     _fixargsort_test()
     filter_classifications_test()
+    _standardize_order_test()
     print("All matmul_explainer tests passed.")
 
 
