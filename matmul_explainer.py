@@ -14,7 +14,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 
-def summarise(counts, sums=None, terms=None):
+def summarise(counts, sums=None, terms=None, *, mask=None):
     """
     Generates a concise summary text from the result of calling matmul_classify() or any of its variants.
 
@@ -33,45 +33,60 @@ def summarise(counts, sums=None, terms=None):
     - 1 instance of near-zero x negative, summing to 0.0
 
     Args:
-        counts: the counts returned by matmul_classify() or one of its variants,
-          alternatively pass a tuple containing the counts and sums, and optionally
+        counts: the counts returned by matmul_classify() or one of its variants.
+          Shape: value_shape + (terms,)
+          Alternatively pass a tuple containing the counts and sums, and optionally
           the terms.
         sums: the sums returned by matmul_classify() or one of its variants.
+          Shape: value_shape + (terms,)
         terms: terms returned by filter_classifications(), same shape as counts and sums.
+          Shape: value_shape + (terms,)
           Must be included if filter_classifications() has been called.
+    Keyword args:
+        mask: bool with shape: value_shape.
     Returns:
         string description
     """
-    # parse args
+    # parse and validate args
     if isinstance(counts, tuple):
-      if len(counts) == 2:
-        counts, sums = counts
-      else:
-        counts, sums, terms = counts
+        if len(counts) == 2:
+            counts, sums = counts
+        else:
+            counts, sums, terms = counts
+    if mask is not None:
+        required_shape = np.shape(counts)[:-1]
+        if np.shape(mask) != required_shape:
+            raise ValueError(f"mask should have shape {required_shape}, but got: {np.shape(mask)}")
 
     # cleanup order for consistent order by terms
     if terms is not None:
         counts, sums, _ = _standardize_order(counts, sums, terms)
-    terms = classify_terms(counts)
+    terms_list = classify_terms(counts)
 
+    # apply mask
+    if mask is not None:
+        counts = counts * mask[..., np.newaxis]
+        sums = sums * mask[..., np.newaxis]
+
+    # calculate summaries across each class
     counts_by_class = np.sum(counts, axis=tuple(range(counts.ndim - 1)))
     sums_by_class = np.sum(sums, axis=tuple(range(counts.ndim - 1)))
 
-    # sort by largest counts
+    # sort summary values by largest counts
     sort_order = np.argsort(counts_by_class)[::-1]
-    terms = np.array(terms)[sort_order]
+    terms_list = np.array(terms_list)[sort_order]
     counts_by_class = counts_by_class[sort_order]
     sums_by_class = sums_by_class[sort_order]
 
     # drop anything with zero counts
-    mask = counts_by_class > 0
-    terms = terms[mask]
-    counts_by_class = counts_by_class[mask]
-    sums_by_class = sums_by_class[mask]
+    summary_mask = counts_by_class > 0
+    terms_list = terms_list[summary_mask]
+    counts_by_class = counts_by_class[summary_mask]
+    sums_by_class = sums_by_class[summary_mask]
 
-    # turn into a summary text
+    # format as one-line text description
     summary = ''
-    for this_term, this_count, this_sum in zip(terms, counts_by_class, sums_by_class):
+    for this_term, this_count, this_sum in zip(terms_list, counts_by_class, sums_by_class):
         if len(summary) > 0:
             summary += ', '
         summary += f"{this_term}: {this_count} = {this_sum}"
