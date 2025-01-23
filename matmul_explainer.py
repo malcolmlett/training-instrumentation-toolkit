@@ -716,3 +716,11 @@ def _standardize_order(counts, sums, terms):
     terms = np.take_along_axis(terms, sort_order, axis=-1)
 
     return counts, sums, terms
+
+
+def _safe_divide(x, y):
+  """
+  Element-wise divide x by y, or zero if y is zero.
+  Intended as a div-by-zero-safe version for computing means from a sums and counts.
+  """
+  return np.divide(x, y, out=np.zeros_like(x, dtype=float), where=(y != 0))

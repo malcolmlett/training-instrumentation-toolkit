@@ -1,5 +1,6 @@
 from matmul_explainer import *
 from matmul_explainer import _partial_filter_by_sum, _partial_filter_by_count, _fixargsort, _standardize_order
+from matmul_explainer import _safe_divide
 import tensorflow as tf
 import numpy as np
 
@@ -395,10 +396,16 @@ def _standardize_order_test():
     np.random.seed(36)
     a = np.random.uniform(-5, +5, (100, 100)).astype(int).astype(float)
     b = np.random.uniform(-5, +5, (100, 100)).astype(int).astype(float)
-    res = np.matmul(a, b)
-    mask = res == 0
     counts0, sums0 = matmul_classify(a,b)
     counts, sums, terms = filter_classifications(counts0, sums0, completeness=1.0)
     counts, sums, terms = _standardize_order(counts, sums, terms)
     assert np.allclose(counts, counts0), "Normalized counts aren't same as original"
     assert np.allclose(sums, sums0), "Normalized sums aren't same as original"
+
+
+def _safe_divide_test():
+    sums = np.array([3.0, 5.0, 6.0, 0.0])
+    counts = np.array([2.0, 3.0, 0.0, 0.0])
+    expected = np.array([3 / 2, 5 / 3, 0., 0.])
+    actual = _safe_divide(sums, counts)
+    assert np.all(actual == expected), f"Expected {expected}, got: {actual}"
