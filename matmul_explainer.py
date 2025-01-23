@@ -719,8 +719,45 @@ def _standardize_order(counts, sums, terms):
 
 
 def _safe_divide(x, y):
-  """
-  Element-wise divide x by y, or zero if y is zero.
-  Intended as a div-by-zero-safe version for computing means from a sums and counts.
-  """
-  return np.divide(x, y, out=np.zeros_like(x, dtype=float), where=(y != 0))
+    """
+    Element-wise divide x by y, or zero if y is zero.
+    Intended as a div-by-zero-safe version for computing means from a sums and counts.
+    """
+    return np.divide(x, y, out=np.zeros_like(x, dtype=float), where=(y != 0))
+
+
+def _format_decimal(value, significant_digits=4, scale=None, return_scale=False):
+    """
+    Variant of the standard number formatting that is optimised first for easier visual comparison
+    across multiple numbers potentially ranging wildly across different scales,
+    and for compactness second.
+    This is achieved by targeting the number of displayed significant digits, regardless
+    of scale, and by avoiding scientific notation except for the largest values.
+
+    Can be used to construct a shared scale across multiple numbers, eg:
+    > max_value = np.max(values)
+    > _, scale = _format_decimal(max_value, return_scale=True)
+    > formatted = [_format_decimal(value, scale=scale) for value in values]
+
+    Args:
+      value: the value to format
+      significant_digits: number of non-zero digits wanted for display
+      scale: use this scale instead of calculating from the given value.
+    """
+    if scale is None:
+        scale = int(np.floor(np.log10(abs(value))))
+
+    if scale < 0:
+        p = significant_digits - scale + 1  # more digits as the number gets smaller
+        res = f"{value:.{p}f}"
+    else:
+        p = max(0, significant_digits - scale - 1)  # less digits as the number gets larger
+        res = f"{value:.{p}f}"
+
+    # todo: maybe switch to scientific notation if length of standard display is some multiple of the length
+    # of scientific notation
+
+    if return_scale:
+        return res, scale
+    else:
+        return res
