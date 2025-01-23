@@ -19,6 +19,7 @@ def run_test_suite():
     _fixargsort_test()
     filter_classifications_test()
     _standardize_order_test()
+    _safe_divide_test
     print("All matmul_explainer tests passed.")
 
 
