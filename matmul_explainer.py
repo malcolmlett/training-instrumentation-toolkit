@@ -14,7 +14,8 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 
-def summarise(counts, sums=None, terms=None, *, mask=None, show_percentages=False, show_means=False):
+# TODO extend so that it can take a list of terms and do the right thing with them
+def summarise(counts, sums=None, terms=None, *, mask=None, show_percentages=False, show_means=False, show_ranges=False):
     """
     Generates a concise summary text from the result of calling matmul_classify() or any of its variants.
 
@@ -43,11 +44,15 @@ def summarise(counts, sums=None, terms=None, *, mask=None, show_percentages=Fals
           Shape: value_shape + (terms,)
           Must be included if filter_classifications() has been called.
         mask: bool with shape: value_shape.
-        show_percentages: False.
+        show_percentages: bool.
           Whether to show counts as a percentage of all counts being summarised
           (after masking), or as absolute values.
-        show_means: False.
+        show_means: bool.
           Whether to compute means from the counts and sums or show the raw sums.
+        show_ranges: bool.
+          Whether to show min/max range of counts and sums across the value axes,
+          or just the sums/means.
+          Cannot be combined with show_percentages or show_means.
     Returns:
         string description
     """
@@ -61,6 +66,8 @@ def summarise(counts, sums=None, terms=None, *, mask=None, show_percentages=Fals
         required_shape = np.shape(counts)[:-1]
         if np.shape(mask) != required_shape:
             raise ValueError(f"mask should have shape {required_shape}, but got: {np.shape(mask)}")
+    if show_ranges and (show_percentages or show_means):
+        raise ValueError("show_ranges cannot be combined with show_percentages or show_means")
 
     # cleanup order for consistent order by terms
     if terms is not None:
@@ -75,17 +82,27 @@ def summarise(counts, sums=None, terms=None, *, mask=None, show_percentages=Fals
     # calculate summaries across each class
     counts_by_class = np.sum(counts, axis=tuple(range(counts.ndim - 1)))
     sums_by_class = np.sum(sums, axis=tuple(range(counts.ndim - 1)))
+    min_counts_by_class = np.min(counts, axis=tuple(range(counts.ndim - 1)))
+    max_counts_by_class = np.max(counts, axis=tuple(range(counts.ndim - 1)))
+    min_sums_by_class = np.min(sums, axis=tuple(range(counts.ndim - 1)))
+    max_sums_by_class = np.max(sums, axis=tuple(range(counts.ndim - 1)))
 
     # sort summary values by largest counts
     sort_order = np.argsort(counts_by_class)[::-1]
-    terms_list = np.array(terms_list)[sort_order]
     counts_by_class = counts_by_class[sort_order]
     sums_by_class = sums_by_class[sort_order]
+    min_counts_by_class = min_counts_by_class[sort_order]
+    max_counts_by_class = max_counts_by_class[sort_order]
+    min_sums_by_class = min_sums_by_class[sort_order]
+    max_sums_by_class = max_sums_by_class[sort_order]
+    terms_list = np.array(terms_list)[sort_order]
 
     # optional: convert sums to means
     # (make sure to do this before converting counts to fractions)
     if show_means:
         sums_by_class = _safe_divide(sums_by_class, counts_by_class)
+        min_sums_by_class = _safe_divide(min_sums_by_class, counts_by_class)
+        max_sums_by_class = _safe_divide(max_sums_by_class, counts_by_class)
 
     # optional: convert counts to fractions
     if show_percentages:
@@ -93,23 +110,60 @@ def summarise(counts, sums=None, terms=None, *, mask=None, show_percentages=Fals
         if factor == 0:
             factor = 1.0  # avoid div-by-zero
         counts_by_class = np.divide(counts_by_class, factor)
+        min_counts_by_class = np.divide(min_counts_by_class, factor)
+        max_counts_by_class = np.divide(max_counts_by_class, factor)
 
     # drop anything with zero counts
     summary_mask = counts_by_class > 0
-    terms_list = terms_list[summary_mask]
     counts_by_class = counts_by_class[summary_mask]
     sums_by_class = sums_by_class[summary_mask]
+    min_counts_by_class = min_counts_by_class[summary_mask]
+    max_counts_by_class = max_counts_by_class[summary_mask]
+    min_sums_by_class = min_sums_by_class[summary_mask]
+    max_sums_by_class = max_sums_by_class[summary_mask]
+    terms_list = terms_list[summary_mask]
+
+    # prepare formatting
+    def _format_count(count, show_symbol=True):
+        if show_percentages and show_symbol:
+            return f"{count*100:.1f}%"
+        elif show_percentages:
+            return f"{count*100:.1f}"
+        else:
+            return f"{count}"
+    sum_symbol = 'x' if (show_means or show_ranges) else '= Σ'
+    if show_ranges:
+        displayed_sums = np.maximum(abs(min_sums_by_class), abs(max_sums_by_class))
+        _, scale = _format_decimal(np.max(displayed_sums), return_scale=True)
+    else:
+        _, scale = _format_decimal(np.max(abs(sums_by_class)), return_scale=True)
 
     # format as one-line text description
     summary = ''
-    _, scale = _format_decimal(np.max(abs(sums_by_class)), return_scale=True)
-    for this_term, this_count, this_sum in zip(terms_list, counts_by_class, sums_by_class):
-        if len(summary) > 0:
-            summary += ', '
-        this_count = f"{this_count*100:.1f}%" if show_percentages else this_count
-        this_sum = _format_decimal(this_sum, significant_digits=4, scale=scale)
-        sum_symbol = 'x' if show_means else '= Σ'
-        summary += f"{this_term}: {this_count} {sum_symbol} {this_sum}"
+    if show_ranges:
+        for min_count, max_count, min_sum, max_sum, this_term in zip(min_counts_by_class, max_counts_by_class,
+                                                                     min_sums_by_class, max_sums_by_class, terms_list):
+            if len(summary) > 0:
+                summary += ', '
+
+            # swap pairs of negatives for easier viewing
+            if min_sum < max_sum < 0:
+                tmp = min_sum
+                min_sum = max_sum
+                max_sum = tmp
+
+            min_count = _format_count(min_count, show_symbol=False)
+            max_count = _format_count(max_count)
+            min_sum = _format_decimal(min_sum, significant_digits=4, scale=scale)
+            max_sum = _format_decimal(max_sum, significant_digits=4, scale=scale)
+            summary += f"{this_term}: {min_count}..{max_count} {sum_symbol} {min_sum}..{max_sum}"
+    else:
+        for this_count, this_sum, this_term in zip(counts_by_class, sums_by_class, terms_list):
+            if len(summary) > 0:
+                summary += ', '
+            this_count = _format_count(this_count)
+            this_sum = _format_decimal(this_sum, significant_digits=4, scale=scale)
+            summary += f"{this_term}: {this_count} {sum_symbol} {this_sum}"
     if len(summary) == 0:
         # pretty weird, but maybe this will happen
         summary = '<empty>'
