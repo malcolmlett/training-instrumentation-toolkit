@@ -614,68 +614,6 @@ def classification_mask(x, confidence: float = 0.95, threshold: float = None):
     return pos_mask.numpy(), zero_mask.numpy(), neg_mask.numpy(), threshold.numpy()
 
 
-def filter_classifications(counts, sums, completeness=0.75):
-    """
-    Filters classification data in order to retain a certain
-    "completeness of explanatory coverage". This eliminates less important noise,
-    making it easier to understand any summaries produced from it.
-    It is also useful for grouping similar classification results that have
-    the same major structure, while ignoring less important noise.
-
-    The final returned counts, sums, and terms are sorted for descending
-    counts.
-
-    Everything is determined independently for each position
-    within the original value tensor, including for final sort. Thus the result
-    also includes a terms tensor, with the same shape as counts and sums,
-    in order to identify the final terms order for each position.
-
-    Args:
-        counts: the counts returned by matmul_classify() or one of its variants.
-        sums: the sums returned by matmul_classify() or one of its variants.
-        completeness: float in range 0.0 to 1.0.
-            Minimum required "completeness of explanatory coverage".
-            After filtering, the retained counts and sums will explain at least this much
-            of the final result, measured as a combined fraction of the total number of counts
-            and the maximum positive or negative extent of the sums.
-    Returns:
-        (counts, sums, terms) - sorted and filtered (less important counts and sums zerod-out)
-    """
-    # steps:
-    # - initialise a full tuple of (counts, sums, terms, masks) that will always be sorted
-    #   together simultaneously
-    # - do a sort and filter by sums first
-    #   - while the final output is primarily by count, sometimes there are a small number
-    #     of unusually large values and we want to see those too
-    # - then do a sort and filter by counts
-    # - combine final result masks
-    # - set all rejected values to zeros
-    # - final result is sorted according to counts, largest first
-    terms = classify_terms(counts, retain_shape=True)
-    masks = np.zeros_like(counts, dtype=bool)
-    counts, sums, terms, masks = _partial_filter_by_sum(counts, sums, terms, masks, completeness)
-    counts, sums, terms, masks = _partial_filter_by_count(counts, sums, terms, masks, completeness)
-
-    # apply masks - zero-out discarded counts and sums
-    # (Must retain terms. I had initially replaced masked terms with '--',
-    #  but that causes problems when later needing to standardize the order for
-    #  summarisation.)
-    counts = counts * masks
-    sums = sums * masks
-
-    # apply final sorting - by descending count after masking
-    # - although _partial_filter_by_count() will have returned things in the right sort order,
-    #   now that we've applied the mask, some of the counts have changed to zero and the order
-    #   isn't now quite accurate.
-    # - for example, if there's a low-count high-sum, it'll be at the end somewhere
-    #   and now needs to come further forward.
-    sort_order = np.argsort(-counts, axis=-1)  # negate for descending order
-    counts = np.take_along_axis(counts, sort_order, axis=-1)
-    sums = np.take_along_axis(sums, sort_order, axis=-1)
-    terms = np.take_along_axis(terms, sort_order, axis=-1)
-    return counts, sums, terms
-
-
 # It turns out that I shouldn't have bothered trying to sort the order of the final groups.
 # It would have been more consistent to apply the group ordering in filter_groups().
 # Furthermore, doing the group ordering AFTER grouping is a lot easier and probably more efficient.
@@ -768,6 +706,120 @@ def group_classifications(counts, sums, terms=None, mask=None):
         term_groups[grp_idx] = terms_list
 
     return count_groups, sum_groups, term_groups
+
+
+def filter_classifications(counts, sums, completeness=0.75):
+    """
+    Filters classification data in order to retain a certain
+    "completeness of explanatory coverage". This eliminates less important noise,
+    making it easier to understand any summaries produced from it.
+    It is also useful for grouping similar classification results that have
+    the same major structure, while ignoring less important noise.
+
+    The final returned counts, sums, and terms are sorted for descending
+    counts.
+
+    Everything is determined independently for each position
+    within the original value tensor, including for final sort. Thus the result
+    also includes a terms tensor, with the same shape as counts and sums,
+    in order to identify the final terms order for each position.
+
+    Args:
+        counts: the counts returned by matmul_classify() or one of its variants.
+        sums: the sums returned by matmul_classify() or one of its variants.
+        completeness: float in range 0.0 to 1.0.
+            Minimum required "completeness of explanatory coverage".
+            After filtering, the retained counts and sums will explain at least this much
+            of the final result, measured as a combined fraction of the total number of counts
+            and the maximum positive or negative extent of the sums.
+    Returns:
+        (counts, sums, terms) - sorted and filtered (less important counts and sums zerod-out)
+    """
+    # steps:
+    # - initialise a full tuple of (counts, sums, terms, masks) that will always be sorted
+    #   together simultaneously
+    # - do a sort and filter by sums first
+    #   - while the final output is primarily by count, sometimes there are a small number
+    #     of unusually large values and we want to see those too
+    # - then do a sort and filter by counts
+    # - combine final result masks
+    # - set all rejected values to zeros
+    # - final result is sorted according to counts, largest first
+    terms = classify_terms(counts, retain_shape=True)
+    masks = np.zeros_like(counts, dtype=bool)
+    counts, sums, terms, masks = _partial_filter_by_sum(counts, sums, terms, masks, completeness)
+    counts, sums, terms, masks = _partial_filter_by_count(counts, sums, terms, masks, completeness)
+
+    # apply masks - zero-out discarded counts and sums
+    # (Must retain terms. I had initially replaced masked terms with '--',
+    #  but that causes problems when later needing to standardize the order for
+    #  summarisation.)
+    counts = counts * masks
+    sums = sums * masks
+
+    # apply final sorting - by descending count after masking
+    # - although _partial_filter_by_count() will have returned things in the right sort order,
+    #   now that we've applied the mask, some of the counts have changed to zero and the order
+    #   isn't now quite accurate.
+    # - for example, if there's a low-count high-sum, it'll be at the end somewhere
+    #   and now needs to come further forward.
+    sort_order = np.argsort(-counts, axis=-1)  # negate for descending order
+    counts = np.take_along_axis(counts, sort_order, axis=-1)
+    sums = np.take_along_axis(sums, sort_order, axis=-1)
+    terms = np.take_along_axis(terms, sort_order, axis=-1)
+    return counts, sums, terms
+
+
+def filter_groups(count_groups, sum_groups, term_groups, completeness=0.75, max_groups=None, return_coverage=False):
+    """
+    Filters grouped counts and sums in order to retain a maximum "completeness of explanatory coverage" across the groups.
+    Assumes that the groups have already been sorted into descending order of significance,
+    as returned by group_classifications().
+
+    Args:
+        count_groups: list of grouped counts, each having shape (g,terms) for different group sizes g
+        sum_groups: list of grouped sums, each having shape (g,terms) for different group sizes g
+        term_groups: list of grouped term lists, each being a simple list of terms
+        completeness: the smallest groups are filtered and discarded in order to meet at most this target fraction of
+          explanatory coverage. Supply 1.0 or None to avoid filtering.
+        max_groups: if specified, the smallest groups are filtered and discarded in order to retain at most this many groups.
+        return_coverage: bool.
+          Whether to additional return the actual coverage after filtering.
+
+    Returns:
+        - count_groups - filtered count groups
+        - sum_groups - filtered sum groups
+        - term_groups - filtered term groups
+        - coverage - (optional) actual level of completeness achieved
+    """
+    # handle args
+    if completeness is None:
+        completeness = 1.0
+
+    # setup
+    group_sizes = np.array([counts.shape[0] for counts in count_groups])
+    total = np.sum(group_sizes)
+    threshold = total * (1 - completeness)
+
+    # apply threshold
+    accumed = np.cumsum(group_sizes[::-1])[::-1]  # cumsum in reverse direction
+    mask = accumed >= threshold
+    indices = np.nonzero(mask)[0]
+
+    # apply max_groups
+    if max_groups and len(indices) > max_groups:
+        indices = indices[:max_groups]
+
+    # apply filtering
+    coverage = np.sum(group_sizes[indices]) / total
+    count_groups = [count_groups[i] for i in indices]
+    sum_groups = [sum_groups[i] for i in indices]
+    term_groups = [term_groups[i] for i in indices]
+
+    if return_coverage:
+        return count_groups, sum_groups, term_groups, coverage
+    else:
+        return count_groups, sum_groups, term_groups
 
 
 def _partial_filter_by_sum(counts, sums, terms, masks, completeness):
