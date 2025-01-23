@@ -171,6 +171,57 @@ def summarise(counts, sums=None, terms=None, *, mask=None, show_percentages=Fals
     return summary
 
 
+# return structure setup for room to grow
+def describe_groups(count_groups, sum_groups, term_groups, show_percentages=False, show_means=False,
+                    show_ranges=False):
+    """
+    Constructs a breakdown of information about grouped counts and sums.
+
+    Similar to summarise() but for grouped classifications, and returns a dictionary with a breakdown
+    of the information instead of displaying.
+
+    Args:
+        count_groups: list of grouped counts, each having shape (g,terms) for different group sizes g
+        sum_groups: list of grouped sums, each having shape (g,terms) for different group sizes g
+        term_groups: list of grouped term lists, each being a simple list of terms
+        show_percentages: bool.
+          Whether to show counts as a percentage of all counts being summarised
+          (after masking), or as absolute values.
+        show_means: bool.
+          Whether to compute means from the counts and sums or show the raw sums.
+        show_ranges: bool.
+          Whether to show min/max range of counts and sums across the value axes,
+          or just the sums/means.
+          Cannot be combined with show_percentages or show_means.
+
+    Returns:
+      dict containing -
+        'summaries': textual description of each group
+    """
+
+    group_sizes = np.array([counts.shape[0] for counts in count_groups])
+
+    summaries = []
+    for counts, sums, terms in zip(count_groups, sum_groups, term_groups):
+        # devise original matrix of terms
+        value_shape = counts.shape[:-1]
+        term_count = len(classify_terms(counts))
+        terms_list = [terms[i] if i < len(terms) else '--' for i in range(term_count)]
+        terms = np.array(terms_list)
+        terms = np.reshape(terms, (1,) * len(value_shape) + (term_count,))
+        terms = np.tile(terms, reps=value_shape + (1,))
+
+        # construct summary
+        summary = summarise(counts, sums, terms, show_percentages=show_percentages, show_means=show_means,
+                            show_ranges=show_ranges)
+        summaries.append(summary)
+
+    return {
+        'sizes': group_sizes,
+        'summaries': summaries
+    }
+
+
 def classify_terms(example=None, retain_shape=False):
     """
     Identifies the appropriate terms list based on the example given, or otherwise
