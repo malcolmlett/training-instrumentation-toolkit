@@ -14,7 +14,7 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 
-def summarise(counts, sums=None, terms=None, *, mask=None, show_percentage=False):
+def summarise(counts, sums=None, terms=None, *, mask=None, show_percentages=False, show_means=False):
     """
     Generates a concise summary text from the result of calling matmul_classify() or any of its variants.
 
@@ -42,11 +42,12 @@ def summarise(counts, sums=None, terms=None, *, mask=None, show_percentage=False
         terms: terms returned by filter_classifications(), same shape as counts and sums.
           Shape: value_shape + (terms,)
           Must be included if filter_classifications() has been called.
-    Keyword args:
         mask: bool with shape: value_shape.
-        show_percentage: False.
-          Whether to show count values as a percentage of all counts being summarised
+        show_percentages: False.
+          Whether to show counts as a percentage of all counts being summarised
           (after masking), or as absolute values.
+        show_means: False.
+          Whether to compute means from the counts and sums or show the raw sums.
     Returns:
         string description
     """
@@ -81,8 +82,13 @@ def summarise(counts, sums=None, terms=None, *, mask=None, show_percentage=False
     counts_by_class = counts_by_class[sort_order]
     sums_by_class = sums_by_class[sort_order]
 
+    # optional: convert sums to means
+    # (make sure to do this before converting counts to fractions)
+    if show_means:
+        sums_by_class = _safe_divide(sums_by_class, counts_by_class)
+
     # optional: convert counts to fractions
-    if show_percentage:
+    if show_percentages:
         factor = np.sum(counts_by_class)
         if factor == 0:
             factor = 1.0  # avoid div-by-zero
@@ -96,11 +102,14 @@ def summarise(counts, sums=None, terms=None, *, mask=None, show_percentage=False
 
     # format as one-line text description
     summary = ''
+    _, scale = _format_decimal(np.max(sums_by_class), return_scale=True)
     for this_term, this_count, this_sum in zip(terms_list, counts_by_class, sums_by_class):
         if len(summary) > 0:
             summary += ', '
-        this_count = f"{this_count*100:.1f}%" if show_percentage else this_count
-        summary += f"{this_term}: {this_count} = {this_sum}"
+        this_count = f"{this_count*100:.1f}%" if show_percentages else this_count
+        this_sum = _format_decimal(this_sum, significant_digits=4, scale=scale)
+        sum_symbol = 'x' if show_means else '= Σ'
+        summary += f"{this_term}: {this_count} {sum_symbol} {this_sum}"
     if len(summary) == 0:
         # pretty weird, but maybe this will happen
         summary = '<empty>'
