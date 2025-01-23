@@ -102,7 +102,7 @@ def summarise(counts, sums=None, terms=None, *, mask=None, show_percentages=Fals
 
     # format as one-line text description
     summary = ''
-    _, scale = _format_decimal(np.max(sums_by_class), return_scale=True)
+    _, scale = _format_decimal(np.max(abs(sums_by_class)), return_scale=True)
     for this_term, this_count, this_sum in zip(terms_list, counts_by_class, sums_by_class):
         if len(summary) > 0:
             summary += ', '
@@ -744,7 +744,7 @@ def _format_decimal(value, significant_digits=4, scale=None, return_scale=False)
     of scale, and by avoiding scientific notation except for the largest values.
 
     Can be used to construct a shared scale across multiple numbers, eg:
-    > max_value = np.max(values)
+    > max_value = np.max(abs(values))
     > _, scale = _format_decimal(max_value, return_scale=True)
     > formatted = [_format_decimal(value, scale=scale) for value in values]
 
@@ -754,7 +754,7 @@ def _format_decimal(value, significant_digits=4, scale=None, return_scale=False)
       scale: use this scale instead of calculating from the given value.
     """
     if scale is None:
-        scale = int(np.floor(np.log10(abs(value))))
+        scale = 0 if value == 0 else int(np.floor(np.log10(abs(value))))
 
     if scale < 0:
         p = significant_digits - scale + 1  # more digits as the number gets smaller
