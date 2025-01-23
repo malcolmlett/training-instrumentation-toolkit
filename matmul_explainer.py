@@ -571,6 +571,9 @@ def filter_classifications(counts, sums, completeness=0.75):
     return counts, sums, terms
 
 
+# It turns out that I shouldn't have bothered trying to sort the order of the final groups.
+# It would have been more consistent to apply the group ordering in filter_groups().
+# Furthermore, doing the group ordering AFTER grouping is a lot easier and probably more efficient.
 def group_classifications(counts, sums, terms=None, mask=None):
     """
     Args:
