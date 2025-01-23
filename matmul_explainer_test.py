@@ -19,7 +19,8 @@ def run_test_suite():
     _fixargsort_test()
     filter_classifications_test()
     _standardize_order_test()
-    _safe_divide_test
+    _safe_divide_test()
+    group_classifications_test()
     print("All matmul_explainer tests passed.")
 
 
@@ -410,3 +411,76 @@ def _safe_divide_test():
     expected = np.array([3 / 2, 5 / 3, 0., 0.])
     actual = _safe_divide(sums, counts)
     assert np.all(actual == expected), f"Expected {expected}, got: {actual}"
+
+
+def group_classifications_test():
+    counts = np.array([
+        # group 1
+        [99, 87, 65, 30, 0, 0, 0, 0, 0],
+        [89, 77, 55, 20, 0, 0, 0, 0, 0],
+
+        # group 2: no difference in counts from group 1
+        [99, 87, 65, 30, 0, 0, 0, 0, 0],
+        [89, 77, 55, 20, 0, 0, 0, 0, 0],
+
+        # group 3
+        [77, 65, 80, 0, 0, 0, 0, 0, 0],
+    ])
+    sums = counts / 10
+    terms = np.array([
+        # group 1: differences after 4th term should be ignored
+        ['PP', 'PZ', 'NN', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ'],
+        ['PP', 'PZ', 'NN', 'PN', 'ZZ', 'ZN', 'NP', 'NZ', 'ZP'],
+
+        # group 2: first four terms are different to group 1
+        ['ZN', 'PP', 'PZ', 'NN', 'PN', 'ZP', 'ZZ', 'NP', 'NZ'],
+        ['ZN', 'PP', 'PZ', 'NN', 'PN', 'ZZ', 'NP', 'NZ', 'ZP'],
+
+        # group 3: same ordered terms as one of the lines above, but term length is different
+        ['PP', 'PZ', 'NN', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ'],
+    ])
+
+    count_groups, sum_groups, term_groups = group_classifications(counts, sums, terms)
+
+    expected_count_groups = [
+        np.array([
+            [99, 87, 65, 30, 0, 0, 0, 0, 0],
+            [89, 77, 55, 20, 0, 0, 0, 0, 0]
+        ]),
+        np.array([
+            [99, 87, 65, 30, 0, 0, 0, 0, 0],
+            [89, 77, 55, 20, 0, 0, 0, 0, 0]
+        ]),
+        np.array([
+            [77, 65, 80, 0, 0, 0, 0, 0, 0]
+        ])
+    ]
+    expected_sum_groups = [counts / 10 for counts in expected_count_groups]
+    expected_term_groups = [
+        ['PP', 'PZ', 'NN', 'PN'],
+        ['ZN', 'PP', 'PZ', 'NN'],
+        ['PP', 'PZ', 'NN']
+    ]
+    expected_group_count = len(expected_count_groups)
+    assert len(count_groups) == expected_group_count,\
+        f"Expected {expected_group_count} count groups, got {len(count_groups)}"
+    assert len(sum_groups) == expected_group_count,\
+        f"Expected {expected_group_count} sum groups, got {len(sum_groups)}"
+    assert len(term_groups) == expected_group_count,\
+        f"Expected {expected_group_count} term groups, got {len(term_groups)}"
+
+    for i, (actual_counts, actual_sums, actual_terms, expected_counts, expected_sums, expected_terms) in\
+            enumerate(zip(count_groups, sum_groups, term_groups, expected_count_groups, expected_sum_groups,
+                          expected_term_groups)):
+        assert np.all(actual_counts == expected_counts),\
+            f"Expected group {i} to have counts {expected_counts}, got {actual_counts}"
+        assert np.all(actual_sums == expected_sums),\
+            f"Expected group {i} to have sums {expected_sums}, got {actual_sums}"
+        assert np.all(actual_terms == expected_terms),\
+            f"Expected group {i} to have terms {expected_terms}, got {actual_terms}"
+        # still need to check shape because the above can miss issues due to broadcasting
+        assert actual_counts.shape == expected_counts.shape,\
+            f"Expected group {i} to have counts shape {expected_counts.shape}, got {actual_counts.shape}: " \
+            f"{actual_counts}"
+        assert actual_sums.shape == expected_sums.shape,\
+            f"Expected group {i} to have sums shape {expected_sums.shape}, got {actual_sums.shape}: {actual_sums}"

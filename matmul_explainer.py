@@ -571,6 +571,97 @@ def filter_classifications(counts, sums, completeness=0.75):
     return counts, sums, terms
 
 
+def group_classifications(counts, sums, terms=None, mask=None):
+    """
+    Args:
+        counts: classified counts, with shape: value_shape + (terms,)
+        sums: classified sums, with shape: value_shape + (terms,)
+        terms: ordered terms, with shape: value_shape + (terms,).
+            Must be supplied if counts and sums have been filtered and sorted via filter_classifications().
+        mask: boolean mask to select just certain counts and sums, with shape: value_shape.
+            Otherwise calculates groups across the entire set of data.
+
+    Returns:
+        - count_groups - list of grouped counts, each having shape (g,terms) for different group sizes g
+        - sum_groups - list of grouped sums, each having shape (g,terms) for different group sizes g
+        - term_groups - list of grouped term lists, each being a simple list of terms
+    """
+    # sanity checks
+    if not np.all(counts.shape == sums.shape):
+        raise ValueError(f"counts and sums have different shapes: {counts.shape} != {sums.shape}")
+    if terms is not None and not np.all(terms.shape == counts.shape):
+        raise ValueError(f"terms must be same shape as counts and sums. Expected {counts.shape}, got {terms.shape}")
+    if mask is not None and not np.all(mask.shape == counts.shape[:-1]):
+        raise ValueError(
+            f"mask must match value shape of counts and sums. Expected {counts.shape[:-1]}, got {mask.shape}")
+
+    # prepare data
+    # - default terms if not provided
+    # - apply mask if provided
+    # - flatten everything into shape (n,terms)
+    if terms is None:
+        terms = classify_terms(counts, retain_shape=True)
+    if mask is None:
+        num_terms = counts.shape[-1]
+        counts = counts.reshape(-1, num_terms)
+        sums = sums.reshape(-1, num_terms)
+        terms = terms.reshape(-1, num_terms)
+    else:
+        counts = counts[mask]
+        sums = sums[mask]
+        terms = terms[mask]
+
+    # compute grouping values
+    # - convert order of terms into a single number by treating the terms axis as a base-(9+1) number system,
+    #   largest digit at front, with zero meaning "no term" due to zero count.
+    # - any zero-count terms are also zerod out, and the final sum across terms is now a descriptor for that pattern
+    #   of terms.
+    terms_list = classify_terms(counts)
+    term_number_lookup = {term: i + 1 for i, term in enumerate(terms_list)}
+    term_numbers = np.vectorize(term_number_lookup.get)(terms)
+    term_numbers[counts == 0] = 0
+    term_scales = [pow(len(terms_list), len(terms_list) - i - 1) for i in range(len(terms_list))]
+    grouping_values = np.sum(np.multiply(term_numbers, term_scales), axis=-1)  # (n,) x group value
+
+    # sort into groups, largest groups first
+    # - compute frequency counts across unique grouping values
+    # - sort all values into those groups in that order
+    unique_grouping_values, grouping_value_counts = np.unique(grouping_values, return_counts=True)
+    sort_order = np.argsort(-grouping_value_counts, kind='stable')  # descending order, otherwise retaining order
+    unique_grouping_values = unique_grouping_values[sort_order]  # (g,) x group value
+    value_to_sorted_position = {value: idx for idx, value in enumerate(unique_grouping_values)}
+    sortable_ids = np.vectorize(value_to_sorted_position.get)(grouping_values)  # (n,) x index into (g,)
+    sort_order = np.argsort(sortable_ids, kind='stable')  # (n,) x index into (n,)
+    counts = counts[sort_order]
+    sums = sums[sort_order]
+    terms = terms[sort_order]
+    grouping_values = grouping_values[sort_order]
+
+    # split into groups
+    # - identify indices at start of each group
+    # - split everything according to that grouping
+    # - note: by this point there may be some variation in the total counts
+    #   but only because any initial filtering before values were supplied
+    #   to this function. So, on average, each position will have the same
+    #   total count, and thus the only measure of coverage for a given group
+    #   is the size of the group.
+    indices = np.where(np.diff(grouping_values) != 0)[0] + 1
+    count_groups = np.split(counts, indices)  # k x (
+    sum_groups = np.split(sums, indices)
+    term_groups = np.split(terms, indices)
+
+    # convert term np-arrays to lists
+    # - each group now has the same terms in the same order, but only in relation to the counts
+    #   that have been kept after filtering.
+    # - so resolve all that and turn each a simple list of terms for each group
+    for grp_idx, (counts, terms) in enumerate(zip(count_groups, term_groups)):
+        term_len = np.sum(np.max(counts != 0, axis=0))
+        terms_list = list(terms[0][0:term_len])
+        term_groups[grp_idx] = terms_list
+
+    return count_groups, sum_groups, term_groups
+
+
 def _partial_filter_by_sum(counts, sums, terms, masks, completeness):
     """
     Internal method for use by filter_classifications().
