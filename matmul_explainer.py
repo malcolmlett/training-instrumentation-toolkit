@@ -69,6 +69,14 @@ def summarise(counts, sums=None, terms=None, *, mask=None, show_percentages=Fals
     if show_ranges and (show_percentages or show_means):
         raise ValueError("show_ranges cannot be combined with show_percentages or show_means")
 
+    # standardize on type
+    counts = np.array(counts)
+    sums = np.array(sums)
+    if terms is not None:
+        terms = np.array(terms)
+    if mask is not None:
+        mask = np.array(mask)
+
     # cleanup order for consistent order by terms
     if terms is not None:
         counts, sums, _ = _standardize_order(counts, sums, terms)
