@@ -10,6 +10,30 @@
 # The functions here group the computations in such a way that makes it possibly to easily classify the results
 # of a given computation to explain its output.
 #
+# General pattern and interpretation of results:
+# Given:
+#      value = <matmul-like-operation>(A, B)
+# Then:
+#      counts, sums = <matmul-like-operation>_classify(A, B)
+#      terms = classify_terms(counts)
+# Where:
+#      counts, sums - both have shape: value_shape + (terms,)
+#      terms        - list of 9 terms: ['PP', 'PZ', 'PN', 'ZP', 'ZZ', 'ZN', 'NP', 'NZ', 'NN']
+# Such that:
+#      value == np.sum(sums, axis=-1)
+#
+# Counts, sums, and terms together classify how the positive, near-zero, and negative components of the inputs
+# contributed to each of the elements in 'value'. For example:
+# Let:
+#     value - have shape (32, 100)
+# Then:
+#     value[16,50] == np.sum(sums[16,50,:], axis=-1)     -- the original value can be derived from sums tensor
+# And:
+#     counts[16,50,0] / np.sum(counts[16,50,:])
+#        -- gives fraction of value[16,50] that resulted from both A and B having positive values
+#     sums[16,50,0]
+#        -- gives the partial computation of values[16,50] resulting from just where A and B where both positive
+
 # TODO I'm making a mistake by having filter_classifications() and group_classifications() doing sorting by default
 # because then subsequent calls have to undo the sort.
 # Need to change this around and only do the sorting at time of display.
