@@ -36,23 +36,41 @@ def _find_layer_by_node(model, node, return_type='layer'):
     return None
 
 
-def _split_by_largest(tensors):
+def _split_by_largest(tensors, labels=None):
     """
     Splits the given list of tensors into the single largest tensor, and the rest.
     Useful as a heuristic for identifying the main weights tensor in a layer and the rest, without assuming
     a particular order.
     If there are multiple largest tensors, the first one is returned.
+
+    Optionally also correspondingly splits tensor labels.
+
+    Args:
+      tensors: list of tensors to split
+      labels: optional, list of labels corresponding to the tensors, must be same size as tensors
+
     Returns:
-      largest_tensor, [rest]
+      largest_tensor, [rest]                                       -- if labels is None
+      largest_tensor, [rest], largest_tensor_label, [rest labels]  -- if labels is not None
     """
     biggest_t, biggest_idx = None, None
+
+    # identify split
     for t_idx, t in enumerate(tensors):
         if t is not None:
             if biggest_t is None or tf.size(t) > tf.size(biggest_t):
                 biggest_t = t
                 biggest_idx = t_idx
+
+    # split tensors
     rest = [t for t_idx, t in enumerate(tensors) if t_idx != biggest_idx]
-    return biggest_t, rest
+    if labels is None:
+        return biggest_t, rest
+
+    # split labels
+    biggest_t_label = labels[biggest_idx]
+    rest_labels = [labels[t_idx] for t_idx, t in enumerate(labels) if t_idx != biggest_idx]
+    return biggest_t, rest, biggest_t_label, rest_labels
 
 
 def explain_near_zero_gradients(layer_index: int,
