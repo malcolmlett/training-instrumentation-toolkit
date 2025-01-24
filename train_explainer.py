@@ -1,6 +1,8 @@
 import numpy as np
 import tensorflow as tf
+import tensorflow_probability as tfp
 import train_observability_toolkit as tot
+import matmul_explainer as me
 
 
 def _find_inbound_layers(model, layer, return_type='layer'):
@@ -188,3 +190,112 @@ def explain_near_zero_gradients(layer_index: int,
     #     For conv target layers, ....
 
 
+# TODO consider returning a list of best explanandums and using this list as a better description
+# than the grouping done by matmul_explainer
+def describe_top_near_zero_explanandum(counts, sums=None, terms=None, mask=None, confidence=0.95):
+    """
+    Tries to find the single simplest and top-most explanandum for why the computed values are near-zero.
+    Examines several common causes of near-zero values and picks the single
+    cause with the strongest effect as the top explanandum.
+    Prioritises simpler explanandums that require fewer components (eg: preferring "first input is zero" over
+    "either input is zero").
+
+    Generally you will supply a mask to pick the values being explained, otherwise it assumes
+    all output values were near-zero.
+
+    Terminology note:
+      Each of the common causes is a possible "explanandum" - a part of the
+      whole explanation for the entire output.
+
+    Args:
+      counts, sums, terms
+      mask
+      confidence:
+        Used to calculate thresholds for near-zero in the values.
+    Returns:
+      - description - terse textual description of top explanandum, or None if no explanandum found
+      - fraction - fraction of values that are at least partially explained by this explanandum, or None
+    """
+    # parse args
+    counts, sums, terms_list = me.standardize(counts, sums, terms, mask=mask)
+
+    # determine threshold
+    # - construct original output value
+    # - get percentile
+    value = np.sum(sums, axis=-1)
+    threshold = tfp.stats.percentile(tf.abs(value), 100 * (1 - confidence), interpolation='linear').numpy()
+
+    if len(terms_list) == 3:
+        return _describe_tensor_near_zero_explanandum(counts, sums, terms_list)
+    else:
+        return _describe_matmul_nero_zero_explanandum(counts, sums, terms_list, threshold)
+
+
+def _describe_tensor_near_zero_explanandum(counts, sums, terms_list):
+    """
+    Internal function for describe_top_near_zero_explanandum().
+    Currently only considers a single explanandum: that some of the values are near-zero.
+    """
+    term_index = terms_list.index('Z')
+    total_count = np.sum(counts)
+    count_zero = np.sum(counts[..., term_index])
+    fraction = count_zero / total_count
+    return f"{fraction * 100:.1f}% near-zero", fraction
+
+
+def _describe_matmul_nero_zero_explanandum(counts, sums, terms_list, threshold):
+    """
+    Internal function for describe_top_near_zero_explanandum()
+    Considers how different combinations of terms can contribute to the outcome.
+    More terms increases probability of them contributing to the outcome,
+    so we must normalise. It's something like:
+      For each explanandum, we're measuring:
+         P(outcome,explanandum)
+      So we normalize via:
+         P(outcome|explanandum) = P(outcome|explanandum) / P(explanandum)
+      And then we arg-max over the explanandums to find the one that leads to the highest P(outcome|explandum)
+    """
+    total_count = np.sum(counts)
+
+    def _term_indices(terms_list, wanted):
+        return [terms_list.index(term) for term in wanted]
+
+    def _zero_effect(selected_terms, description):
+        count = np.sum(counts[..., _term_indices(terms_list, selected_terms)])
+        fraction = count / total_count
+        strength = count / len(selected_terms)
+        return fraction, strength, description
+
+    def _pos_neg_effect(selected_terms, description):
+        # search for instances where the sum over the terms is near-zero then sum up the counts over just those
+        # matching instances. note: when computing strength, don't need to scale by number of hits because that's
+        # already achieved by masking against the source_count
+        pos_neg_value = np.sum(sums[..., _term_indices(terms_list, selected_terms)], axis=-1)
+        pos_neg_count = np.sum(counts[..., _term_indices(terms_list, selected_terms)], axis=-1)
+        mask = (np.abs(pos_neg_value) < threshold) | (pos_neg_value == 0)  # shape: value_shape x bool
+        source_count = np.sum(pos_neg_count * mask)
+
+        fraction = source_count / total_count
+        strength = source_count / len(selected_terms)
+        return fraction, strength, description
+
+    # measure effect of each individual explanandum
+    explanandums = [_zero_effect(['ZZ', 'ZP', 'ZN'], "near-zero values from first input"),
+                    _zero_effect(['ZZ', 'PZ', 'NZ'], "near-zero values from second input"),
+                    _zero_effect(['ZZ', 'ZP', 'PZ', 'ZN', 'NZ'], "near-zero values from either input"),
+                    _pos_neg_effect(['PP', 'PN'], "positive/negatives from second input cancelling out (PP ~= PN)"),
+                    _pos_neg_effect(['NP', 'NN'], "positive/negatives from second input cancelling out (NP ~= NN)"),
+                    _pos_neg_effect(['PP', 'NP'], "positive/negatives from first input cancelling out (PP ~= NP)"),
+                    _pos_neg_effect(['PN', 'NN'], "positive/negatives from first input cancelling out (PN ~= NN)"),
+                    _pos_neg_effect(['PP', 'NN', 'NP', 'PN'],
+                                    "sums of positive/negatives from both inputs cancelling out (PP+NN ~= NP+PN)")]
+
+    # pick strongest explanandum
+    # - pick highest strength first, and then maximum fraction for tie-breaker
+    index = np.argmax([strength + fraction for fraction, strength, description in explanandums])
+    fraction, strength, description = explanandums[index]
+
+    if fraction == 0.0:
+        return None, None
+    else:
+        return description, fraction
