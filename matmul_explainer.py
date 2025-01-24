@@ -9,6 +9,11 @@
 #
 # The functions here group the computations in such a way that makes it possibly to easily classify the results
 # of a given computation to explain its output.
+#
+# TODO I'm making a mistake by having filter_classifications() and group_classifications() doing sorting by default
+# because then subsequent calls have to undo the sort.
+# Need to change this around and only do the sorting at time of display.
+
 import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
@@ -56,36 +61,11 @@ def summarise(counts, sums=None, terms=None, *, mask=None, show_percentages=Fals
     Returns:
         string description
     """
-    # parse and validate args
-    if isinstance(counts, tuple):
-        if len(counts) == 2:
-            counts, sums = counts
-        else:
-            counts, sums, terms = counts
-    if mask is not None:
-        required_shape = np.shape(counts)[:-1]
-        if np.shape(mask) != required_shape:
-            raise ValueError(f"mask should have shape {required_shape}, but got: {np.shape(mask)}")
-    if show_ranges and (show_percentages or show_means):
-        raise ValueError("show_ranges cannot be combined with show_percentages or show_means")
-
-    # standardize on type
-    counts = np.array(counts)
-    sums = np.array(sums)
-    if terms is not None:
-        terms = np.array(terms)
-    if mask is not None:
-        mask = np.array(mask)
-
-    # cleanup order for consistent order by terms
-    if terms is not None:
-        counts, sums, _ = _standardize_order(counts, sums, terms)
-    terms_list = classify_terms(counts)
-
-    # apply mask
-    if mask is not None:
-        counts = counts * mask[..., np.newaxis]
-        sums = sums * mask[..., np.newaxis]
+    # prepare
+    # - split out counts-as-tensor
+    # - standardize term order
+    # - apply mask
+    counts, sums, terms_list = standardize(counts, sums, terms, mask=mask)
 
     # calculate summaries across each class
     counts_by_class = np.sum(counts, axis=tuple(range(counts.ndim - 1)))
@@ -353,7 +333,7 @@ def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, 
 
     Example usage:
     >>> a = np.tile(np.arange(0.0, 1.0, 0.1), (10,1))
-    >>> counts, sums = matmul_classify(a, a, confidence=0.75)
+    >>> counts, sums = matmul_classify(a, a, confidence=0.90)
     >>> for i, name in enumerate(classify_terms()):
     >>>   if np.sum(counts[:,:,i]) > 0:
     >>>     print(f"Counts({name}): {counts[:,:,i]}")
@@ -830,6 +810,78 @@ def filter_groups(count_groups, sum_groups, term_groups, completeness=0.75, max_
         return count_groups, sum_groups, term_groups
 
 
+# TODO maybe update so it can also accept a terms-list for re-ordering
+def standardize(counts, sums, terms=None, *, mask=None, return_terms_as_list=True):
+    """
+    Takes a set of counts, sums, and optional terms and standardizes their order
+    and container types for easier handling.
+
+    If masking is requested, the un-masked counts and sums are zerod out.
+    No masking is done to the terms.
+
+    Args:
+        counts: the counts returned by matmul_classify() or one of its variants.
+          Shape: value_shape + (terms,)
+          Alternatively pass a tuple containing the counts and sums, and optionally
+          the terms.
+        sums: the sums returned by matmul_classify() or one of its variants.
+          Shape: value_shape + (terms,)
+        terms: terms returned by filter_classifications(), same shape as counts and sums.
+          Shape: value_shape + (terms,)
+          Must be included if filter_classifications() has been called.
+        mask: bool with shape: value_shape.
+        return_terms_as_list: bool.
+            Whether to return the terms component as a list, otherwise returns
+            as a matrix of shape: value_shape + (terms,)
+
+    Returns:
+        - counts - counts array with standardized order, shape: value_shape + (terms,)
+        - sums - sums array with standardized order, shape: value_shape + (terms,)
+        - terms - simple terms list OR full terms array, shape: value_shape + (terms,)
+    """
+    # parse args
+    if isinstance(counts, tuple):
+        if len(counts) == 2:
+            counts, sums = counts
+        else:
+            counts, sums, terms = counts
+
+    # sanity checks
+    if not np.all(counts.shape == sums.shape):
+        raise ValueError(f"counts and sums have different shapes: {counts.shape} != {sums.shape}")
+    if terms is not None and not np.all(terms.shape == counts.shape):
+        raise ValueError(f"terms must be same shape as counts and sums. Expected {counts.shape}, got {terms.shape}")
+    if mask is not None and not np.all(mask.shape == counts.shape[:-1]):
+        raise ValueError(f"mask must match value shape of counts and sums. "
+                         f"Expected {counts.shape[:-1]}, got {mask.shape}")
+
+    # standardize on type
+    counts = np.array(counts)
+    sums = np.array(sums)
+    if terms is not None:
+        terms = np.array(terms)
+    if mask is not None:
+        mask = np.array(mask)
+
+    # cleanup order for consistent order by terms
+    if terms is not None:
+        counts, sums, terms = _standardize_order(counts, sums, terms)
+    elif not return_terms_as_list:
+        terms = classify_terms(counts, retain_shape=True)
+    terms_list = classify_terms(counts)
+
+    # apply mask
+    if mask is not None:
+        counts = counts * mask[..., np.newaxis]
+        sums = sums * mask[..., np.newaxis]
+
+    # construct final terms result
+    if return_terms_as_list:
+        return counts, sums, terms_list
+    else:
+        return counts, sums, terms
+
+
 def _partial_filter_by_sum(counts, sums, terms, masks, completeness):
     """
     Internal method for use by filter_classifications().
@@ -967,6 +1019,7 @@ def _fixargsort(a, reference, axis=-1):
     return indices
 
 
+
 def _standardize_order(counts, sums, terms):
     """
     Reverses the ordering effects of filter_classifications().
@@ -976,7 +1029,13 @@ def _standardize_order(counts, sums, terms):
         counts, sums, terms - reordered along terms axis so that all entries all in the same
             order as returned by classify_terms().
     """
-    # (TODO should do some sanity checks)
+    # sanity checks
+    if not np.all(counts.shape == sums.shape):
+        raise ValueError(f"counts and sums have different shapes: {counts.shape} != {sums.shape}")
+    if terms is not None and not np.all(terms.shape == counts.shape):
+        raise ValueError(f"terms must be same shape as counts and sums. Expected {counts.shape}, got {terms.shape}")
+
+    # re-order
     terms_list = classify_terms(counts)
     sort_order = _fixargsort(terms, terms_list, axis=-1)
     counts = np.take_along_axis(counts, sort_order, axis=-1)

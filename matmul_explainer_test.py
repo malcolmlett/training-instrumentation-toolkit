@@ -1,5 +1,5 @@
 from matmul_explainer import *
-from matmul_explainer import _partial_filter_by_sum, _partial_filter_by_count, _fixargsort, _standardize_order
+from matmul_explainer import _partial_filter_by_sum, _partial_filter_by_count, _fixargsort
 from matmul_explainer import _safe_divide
 import tensorflow as tf
 import numpy as np
