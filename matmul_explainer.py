@@ -65,7 +65,7 @@ def summarise(counts, sums=None, terms=None, *, mask=None, show_percentages=Fals
     # - split out counts-as-tensor
     # - standardize term order
     # - apply mask
-    counts, sums, terms_list = standardize(counts, sums, terms, mask=mask)
+    counts, sums, terms_list = standardize(counts, sums, terms, mask=mask, return_terms_as_list=True)
 
     # calculate summaries across each class
     counts_by_class = np.sum(counts, axis=tuple(range(counts.ndim - 1)))
