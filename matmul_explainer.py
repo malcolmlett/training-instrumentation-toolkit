@@ -304,7 +304,7 @@ def tensor_classify(x, confidence: float = 0.95, threshold: float = None,
 
     Returns:
         (counts, sums) containing the counts and sums of each component, respectively.
-        Each a tensor with shape `x_shape + (3,)`.
+        Each an np-array with shape: value_shape + (3,).
         OR
         (counts, sums, thresholds) with list of thresholds also returned
     """
@@ -323,9 +323,9 @@ def tensor_classify(x, confidence: float = 0.95, threshold: float = None,
     sums.append(tf.where(x_z, x, tf.zeros_like(x)))
     sums.append(tf.where(x_n, x, tf.zeros_like(x)))
 
-    # format into final output
-    counts = tf.stack(counts, axis=-1)
-    sums = tf.stack(sums, axis=-1)
+    # format into final output (numpy)
+    counts = np.stack(counts, axis=-1)
+    sums = np.stack(sums, axis=-1)
     if return_threshold:
         return counts, sums, threshold
     else:
@@ -493,9 +493,9 @@ def multiply_classify(x, y, confidence: float = 0.95, x_threshold: float = None,
     sums.append(tf.math.multiply(x_nv, y_zv))
     sums.append(tf.math.multiply(x_nv, y_nv))
 
-    # format into final output
-    counts = tf.stack(counts, axis=-1)
-    sums = tf.stack(sums, axis=-1)
+    # format into final output (numpy)
+    counts = np.stack(counts, axis=-1)
+    sums = np.stack(sums, axis=-1)
     if return_thresholds:
         return counts, sums, [x_threshold, y_threshold]
     else:
@@ -584,9 +584,9 @@ def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float 
     sums.append(tf.nn.convolution(input=inputs_nv, filters=kernel_zv, strides=strides, padding=padding))
     sums.append(tf.nn.convolution(input=inputs_nv, filters=kernel_nv, strides=strides, padding=padding))
 
-    # format into final output
-    counts = tf.stack(counts, axis=-1)
-    sums = tf.stack(sums, axis=-1)
+    # format into final output (numpy)
+    counts = np.stack(counts, axis=-1)
+    sums = np.stack(sums, axis=-1)
     if return_thresholds:
         return counts, sums, [inputs_threshold, kernel_threshold]
     else:
