@@ -811,7 +811,7 @@ def filter_groups(count_groups, sum_groups, term_groups, completeness=0.75, max_
 
 
 # TODO maybe update so it can also accept a terms-list for re-ordering
-def standardize(counts, sums, terms=None, *, mask=None, return_terms_as_list=True):
+def standardize(counts, sums=None, terms=None, *, mask=None, return_terms_as_list=True):
     """
     Takes a set of counts, sums, and optional terms and standardizes their order
     and container types for easier handling.
