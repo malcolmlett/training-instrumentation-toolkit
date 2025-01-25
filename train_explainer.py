@@ -493,7 +493,7 @@ def describe_tensor_near_zero_explanation(counts, sums=None, *, mask=None, thres
         value = np.sum(sums, axis=-1)
         neg_fraction = np.sum(value < 0) / np.size(value)
 
-    if verbose and threshold:
+    if verbose and threshold is not None:
         near_zero_description = f"{zero_fraction * 100:.1f}% near-zero ({_format_threshold(threshold)})"
     else:
         near_zero_description = f"{zero_fraction * 100:.1f}% near-zero"
