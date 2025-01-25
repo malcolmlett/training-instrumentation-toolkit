@@ -137,6 +137,7 @@ def explain_near_zero_gradients(layer_index: int,
     # get variables, activities, and gradients of interest
     # - identify the weights via heuristic: the largest variable
     # - note: if largest variable isn't trainable, then we won't get gradients for it
+    # TODO replace weight-selection with W_l = target_layer_handler.get_weights()
     _, _, target_var_idx, target_rest_var_indices = _split_by_largest(target_layer.variables,
                                                                       l_to_var_indices[layer_index])
     target_layer_weights = variables.variables[target_var_idx][iteration]
@@ -168,9 +169,7 @@ def explain_near_zero_gradients(layer_index: int,
     num_gradients = np.size(target_layer_gradients)
 
     # estimate forward pass - Z_l
-    # TODO move into a handler class and handle different layer types
-    # TODO may be able to sometimes hack the layer, strip off its activation function, and use it directly
-    # TODO don't be so naive to assume that the first of the rest is the bias.
+    # TODO replace with Z_l = target_layer_handler.calculate_Z(return_note=True)
     W_l = target_layer_weights
     Z_l = None
     if len(prev_layers_activations_list) == 0:
@@ -183,8 +182,8 @@ def explain_near_zero_gradients(layer_index: int,
         b_l = variables.variables[target_rest_var_indices[0]][iteration]
         Z_l = np.matmul(A_0, W_l) + b_l
 
-    # TODO if we're confident in our estimate of Z_l, we can more accurately calculate S_l without having to assume ReLU
     # estimate forward pass - activation function gradients (S_l)
+    # TODO replace with S_l, S_l_note = target_layer_handler.calculate_S(return_note=True)
     A_l = target_layer_activations
     S_l_note = None
     if Z_l is None:
@@ -306,13 +305,15 @@ def explain_near_zero_gradients(layer_index: int,
         print(f"Z_l = A_0 . W_l + b_l:")
         print(f"  Unable to infer")
     else:
+        # TODO replace with Z_l, Z_l_eqn = target_layer_handler.calculate_Z(return_equation=True)
+        # TODO replace with counts, sums = target_layer_handler.classify_Z_calculation(confidence=confidence)
         counts, sums = me.matmul_classify(A_0, W_l, confidence=confidence)
         _explain_combination("Z_l = A_0 . W_l + b_l", ['A_0', 'W_l'], Z_l, counts, sums)
         _explain_combination_near_zero("Z_l", ['A_0', 'W_l'], Z_l, counts, sums)
         _explain_tensor("Z_l - pre-activation output", Z_l, negatives_are_bad=True)
     _explain_tensor("S_l - activation function", S_l)
     if S_l_note and verbose:
-      print(f"  note:              {S_l_note}")
+        print(f"  note:              {S_l_note}")
     _explain_tensor("A_l - activation output from target layer", A_l)
 
     # explain backprop pass
@@ -322,13 +323,17 @@ def explain_near_zero_gradients(layer_index: int,
     print()
     print(f"Backward pass...")
     for dJdA_l in next_layers_backprop_gradients_list:
+        # TODO replace with dJdZ_l, dJdZ_l_eqn = target_layer_handler.calculate_dJdZ(dJdA_l, return_equation=True)
+        # TODO replace with counts, sums = target_layer_handler.classify_dJdZ_calculation(dJdA_l, confidence=confidence)
         dJdZ_l = np.multiply(dJdA_l, S_l)
         counts, sums = me.multiply_classify(dJdA_l, S_l, confidence=confidence)
         _explain_combination("dJ/dZ_l = dJ/dA_l x S_l (element-wise)", ['dJ/dA_l', 'S_l'], dJdZ_l, counts, sums)
         print(f"  note:              using estimated dJ/dA_l value")
         _explain_combination_near_zero("dJdZ_l", ['dJ/dA_l', 'S_l'], dJdZ_l, counts, sums)
         _explain_tensor("dJ/dZ_l", dJdZ_l)
+    # TODO if multiple next_layers, then average over them, and show the final averaged result as a tensor explanation
     for dJdA_l in next_layers_backprop_gradients_list:
+        # TODO replace
         A_0t = tf.transpose(A_0)
         dJdZ_l = np.multiply(dJdA_l, S_l)  # redoing from above
         dJdW_l = np.matmul(A_0t, dJdZ_l)
@@ -624,6 +629,8 @@ def _estimate_backprop_from_layer(model, layer_index, iteration,
     #       => dJ/dZ_1 = (A_0+)^T . dJ/dW_1                   <-- (b x f_1) = (b x f_0) . (f_0 x f_1)
     #    #2:
     #       dJ/dA_0 = dJ/dZ_1 . dZ_1/dA_0 = dJ/dZ_1 . W_1^T   <-- (b x f_0) = (b x f_1) . (f_1 x f_0)
+    # TODO replace with dJdA_0 = next_layer_handler.calculate_backprop()
+
     # TODO do trickery for tensors with spatial dims
     W_1 = target_layer_weights
     dJdW_1 = target_layer_weights_gradients
@@ -706,3 +713,351 @@ class UnsupportedNetworkError(Exception):
     Generally this results in the explainer falling back to more generic observations.
     """
     pass
+
+
+class LayerHandler:
+    """
+    Gracefully degrades wherever possible, making as much information accessible as can be determined.
+
+    Notation: 'A_l' and the like are used throughout to refer to "this" layer, while 'A_0' and the like
+    are used to refer to the immediate inputs to this layer. This is not mathematically sound, but
+    it's simpler than trying to find a code-friendly notation for 'A_{l-1}'.
+    """
+
+    # variables = variables.variables[v_idx][iteration] for v_idx in l_to_var_indices[layer_idx]
+    def __init__(self, model, variables, gradients, inputs, output, layer_subscript=None):
+        """
+        Args:
+            variables: list of tensor.
+                The state of the variables for this layer only at the time of interest.
+            gradients: list of tensor.
+                The gradients for the variables at the time of interest, or None if unknown.
+            inputs: list of tensor.
+                The actual input values to this layer at the time of interest, or None if unknown.
+            output: tensor
+                The actual post-activation output from this layer at the time of interest, or None if unknown.
+            layer_subscript: string
+                Used in warnings and error messages to identify the layer via a subscript, eg: 'l' gets used as 'A_l', 'Z_l', etc.
+        """
+        self.variables = variables
+        self.gradients = gradients
+        self.inputs = inputs
+        self.output = output
+        if layer_subscript:
+            self.subscript = f"_{layer_subscript}"
+        else:
+            self.subscript = ""
+
+    def get_weights(self):
+        """
+        Identifies which of the layer's variables is the main weights tensor, or kernel in the case of convolutional layers.
+        The default implementation just picks the largest variable.
+        Returns:
+            The weights, or none if this layer is understood but has no variables.
+        Raises:
+            UnsupportedNetworkError if cannot handle this for the given layer type
+        """
+        if self.variables is None:
+            raise UnsupportedNetworkError("Variables unknown")
+        if len(self.variables) > 0:
+            largest, _ = _split_by_largest(self.variables)
+            return largest
+        else:
+            return None
+
+    def get_biases(self):
+        """
+        Identifies which of the layer's variables is the main bias tensor.
+        The default implementation just picks the second largest variable, if one is present.
+        Returns:
+            The biases, or none if this layer is understood but has less than two variables.
+        Raises:
+            UnsupportedNetworkError if cannot handle this for the given layer type
+        """
+        if self.variables is None:
+            raise UnsupportedNetworkError("Variables unknown")
+        if len(self.variables) >= 2:
+            _, rest = _split_by_largest(self.variables)
+            return rest[0]
+        else:
+            return None
+
+    def get_weight_gradients(self):
+        """
+        Identifies which of the layer's gradients are the gradients for the main weights, or for the kernel in the case of
+        convolutional layers.
+        The default implementation just picks the largest gradients.
+        Returns:
+            The gradients, or none if this layer is understood but has no gradients.
+        Raises:
+            UnsupportedNetworkError if cannot handle this for the given layer type
+        """
+        if self.gradients is None:
+            raise UnsupportedNetworkError("Gradients unknown")
+        if len(self.gradients) > 0:
+            largest, _ = _split_by_largest(self.gradients)
+            return largest
+        else:
+            return None
+
+    def get_A(self):
+        """
+        Gets the post-activation output from this layer, if known.
+        """
+        return self.output
+
+    def calculate_Z(self, return_equation=False, return_note=False):
+        """
+        Calculates or estimates the pre-activation output of the layer, known as Z, if possible.
+        Args:
+            return_equation: bool.
+                Whether to additionally return text describing the equation.
+            return_note: bool.
+                Whether to additionally return any warning note.
+        Raises:
+            UnsupportedNetworkError if cannot handle this for the given layer type
+        Returns:
+            - computed value
+            - equation (optional output)
+            - warning note or none if no warnings (optional output)
+        """
+        raise UnsupportedNetworkError(f"Calculation of Z{self.subscript} not implemented for this layer type")
+
+    def classify_Z_calculation(self, confidence):
+        """
+        Provides a classification breakdown of the main weights multiplication for the calculation of Z,
+        ignoring any effect from biases.
+        Args:
+            confidence: passed to matmul_explainer
+        Raises:
+            UnsupportedNetworkError if cannot handle this for the given layer type
+        Returns:
+            counts, sums
+        """
+        raise UnsupportedNetworkError(f"Calculation of Z{self.subscript} not implemented for this layer type")
+
+    def calculate_S(self, return_equation=False, return_note=False):
+        """
+        Calculates or estimates the S matrix, which emulates the behaviour of the activation function in the form
+        of an element-wise multiplier against Z.
+        In general this is independent of the type of layer, and more dependent on the activation function in use.
+        However some layers don't have an activation function (eg: normalisation, dropout).
+        The default implementation assumes an activation function is present, and
+        accurately computes S if Z is computable, or estimates S from A otherwise.
+        Args:
+            return_equation: bool.
+                Whether to additionally return text describing the equation.
+            return_note: bool.
+                Whether to additionally return any warning note.
+        Raises:
+            UnsupportedNetworkError if cannot handle this for the given layer type
+        Returns:
+            - computed value
+            - equation (optional output)
+            - warning note or none if no warnings (optional output)
+        """
+        A_l = self.get_A()
+        try:
+            Z_l = self.calculate_Z()
+        except UnsupportedNetworkError:
+            Z_l = None
+
+        note = None
+        if Z_l is None:
+            # estimate S_l from A_l, assuming ReLU
+            # - original S_l = {1 if Z_l[ij] >= 0 else 0}
+            # - even assuming ReLU, we cannot identify Z_l[ij] < 0 vs Z_l[ij] = 0
+            # - so we assume A_l[ij] == 0 => Z_[ij] < 0, thus:
+            # - estimated S_l = {1 if A_l[ij] > 0 else 0}
+            S_l = tf.cast(A_l > 0, tf.float32)
+            equation = f"A{self.subscript} > 0"
+            note = f"estimated S{self.subscript} value from A{self.subscript}, assuming ReLU"
+        else:
+            # calculate accurate S_l from Z_l
+            #   A_l = Z_l (.) S_l   -- element-wise
+            # so:
+            #   S_l = A_l / Z_l or assume 0.0 if A_l is zero (eg: compatible with sigmoid)
+            equation = f"A{self.subscript} > 0"
+            S_l = np.divide(A_l, Z_l, out=np.zeros_like(A_l), where=(Z_l > 0))
+
+        res = (S_l,)
+        if return_equation:
+            res += (equation,)
+        if return_note:
+            res += (note,)
+        return res
+
+    def calculate_dJdZ(self, dJdA_l, return_equation=False, return_note=False):
+        """
+        Calculates or estimates the first step of backprop through this layer, dJdZ_l.
+        The default implementation works so long as it can compute S_l.
+        Note: where a layer was fed as input into multiple next layers, this method can be used
+        against each of their backprops. The final result is usually just the mean.
+        Args:
+            dJdA_l: the backprop received by this layer
+            return_equation: bool.
+                Whether to additionally return text describing the equation.
+            return_note: bool.
+                Whether to additionally return any warning note.
+        Raises:
+            UnsupportedNetworkError if cannot handle this for the given layer type
+        Returns:
+            - computed value
+            - equation (optional output)
+            - warning note or none if no warnings (optional output)
+        """
+        S_l = self.calculate_S()
+        dJdZ_l = np.multiply(dJdA_l, S_l)
+        equation = f"dJdA{self.subscript} (.) S{self.subscript}"
+
+        res = (dJdZ_l,)
+        if return_equation:
+            res += (equation,)
+        if return_note:
+            res += (None,)
+        return res
+
+    def classify_dJdZ_calculation(self, dJdA_l, confidence):
+        """
+        Provides a classification breakdown of the main weights multiplication for the calculation of Z,
+        ignoring any effect from biases.
+        The default implementation works so long as it can compute S_l.
+        Args:
+            dJdA_l: the backprop received by this layer
+            confidence: passed to matmul_explainer
+        Raises:
+            UnsupportedNetworkError if cannot handle this for the given layer type
+        Returns:
+            counts, sums
+        """
+        S_l = self.calculate_S()
+        return me.multiply_classify(dJdA_l, S_l)
+
+    def calculate_dJdW(self, dJdZ_l, return_equation=False, return_note=False):
+        """
+        Calculates or estimates the weight gradients, dJdW_l, for this layer.
+        Args:
+            dJdZ_l: the result of the first step of backgroup through this layer, averaged over all output layers if there are multiple.
+            return_equation: bool.
+                Whether to additionally return text describing the equation.
+            return_note: bool.
+                Whether to additionally return any warning note.
+        Raises:
+            UnsupportedNetworkError if cannot handle this for the given layer type
+        Returns:
+            - computed value
+            - equation (optional output)
+            - warning note or none if no warnings (optional output)
+        """
+        raise UnsupportedNetworkError(f"Not implemented for this layer type")
+
+    def classify_dJdW_calculation(self, dJdZ_l, confidence):
+        """
+        Provides a classification breakdown of the main weights multiplication for the calculation of Z,
+        ignoring any effect from biases.
+        Args:
+            dJdZ_l: the result of the first step of backgroup through this layer, averaged over all output layers if there are multiple.
+            confidence: passed to matmul_explainer
+        Raises:
+            UnsupportedNetworkError if cannot handle this for the given layer type
+        Returns:
+            counts, sums
+        """
+        raise UnsupportedNetworkError(f"Not implemented for this layer type")
+
+    def calculate_backprop(self, return_note=False):
+        """
+        Calculates or estimates the backprop gradients, dJdA_0, that would have been passed from
+        this layer to the previous layer(s).
+        Args:
+            return_note: bool.
+                Whether to additionally return any warning note.
+        Raises:
+            UnsupportedNetworkError if cannot handle this for the given layer type
+        Returns:
+            - computed value
+            - warning note or none if no warnings (optional output)
+        """
+        raise UnsupportedNetworkError(f"Not implemented for this layer type")
+
+
+class DenseLayerHandler(LayerHandler):
+    def __init__(self, model, variables, gradients, inputs, output, layer_subscript=None):
+        super(LayerHandler, self).__init__(model, variables, gradients, inputs, output, layer_subscript)
+
+    def calculate_Z(self, return_equation=False, return_note=False):
+        A_0 = self.get_input()
+        W_l = self.get_weights()
+        b_l = self.get_biases()  # may be None
+        Z_l = np.matmul(A_0, W_l)
+        equation = f"A_0 . W{self.subscript}"
+        if b_l is not None:
+            Z_l = Z_l + b_l
+            equation = f"A_0 . W{self.subscript} + b{self.subscript}"
+
+        res = (Z_l,)
+        if return_equation:
+            res += (equation,)
+        if return_note:
+            res += (None,)
+        return res
+
+    def classify_Z_calculation(self, confidence):
+        A_0 = self.get_input()
+        W_l = self.get_weights()
+        return me.matmul_classify(A_0, W_l, confidence=confidence)
+
+    def calculate_dJdW(self, dJdZ_l, return_equation=False, return_note=False):
+        A_0 = self.get_input()
+        A_0t = tf.transpose(A_0)
+        dJdW_l = np.matmul(A_0t, dJdZ_l)
+        equation = f"A_0^T . dJ/dZ{self.subscript}"
+
+        res = (dJdW_l,)
+        if return_equation:
+            res += (equation,)
+        if return_note:
+            res += (None,)
+        return res
+
+    def classify_dJdW_calculation(self, dJdZ_l, confidence):
+        A_0 = self.get_input()
+        A_0t = tf.transpose(A_0)
+        return me.matmul_classify(A_0t, dJdZ_l, confidence=confidence)
+
+    def calculate_backprop(self, return_note=False):
+        # We need the backprop gradients that are produced by this layer and which feed into the gradient update step of
+        # the prev layer. However we don't have that, and instead have the gradients of the weights at this layer.
+        # That's one step in the wrong direction, so we have to backtrace the calculations first.
+
+        # steps to estimate backprop (dJ/dA_0) from this layer
+        # given:
+        #    dJ/dW_l = weight gradients at this layer
+        #    dZ_l/dW_l = A_0^T = transposed activations from previous layer
+        #    dZ_l/dA_0 = W_1^T = transposed weights from this layer
+        # want:
+        #    dJ/dA_0 = backprop gradients to previous layer
+        # #1:
+        #    dJ/dW_l = dZ_l/dW_l . dJ/dZ_l = A_0^T . dJ/dZ_l   <-- (f_0 x f_l) = (f_0 x b) . (b x f_l)
+        #    => dJ/dZ_l = (A_0+)^T . dJ/dW_l                   <-- (b x f_l) = (b x f_0) . (f_0 x f_l)
+        # #2:
+        #    dJ/dA_0 = dJ/dZ_l . dZ_l/dA_0 = dJ/dZ_l . W_l^T   <-- (b x f_0) = (b x f_l) . (f_l x f_0)
+        # TODO do trickery for tensors with spatial dims -- need to be treated like batch dims
+        W_l = self.get_weights()
+        dJdW_l = self.get_weight_gradients()
+        A_0 = self.get_input()
+        A_0_inv = tf.linalg.pinv(A_0)
+        dJdZ_l = tf.linalg.matmul(A_0_inv, dJdW_l, transpose_a=True)
+        dJdA_0 = tf.linalg.matmul(dJdZ_l, W_l, transpose_b=True)
+
+        res = (dJdA_0,)
+        if return_note:
+            res += (None,)
+        return res
+
+    def get_input(self):
+        if self.inputs is None or len(self.inputs) == 0:
+            raise UnsupportedNetworkError("Inputs to layer unknown")
+        if len(self.inputs) > 1:
+            raise UnsupportedNetworkError(f"Multiple activations from previous layer: {[a.shape for a in self.inputs]}")
+        return self.inputs[0]
