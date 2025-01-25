@@ -5,7 +5,7 @@ import train_observability_toolkit as tot
 import matmul_explainer as me
 
 
-def explain_near_zero_gradients(layer_index: int,
+def explain_near_zero_gradients_skeleton(layer_index: int,
                                 gradients: tot.GradientHistoryCallback,
                                 activity: tot.ActivityHistoryCallback,
                                 variables: tot.VariableHistoryCallback,
@@ -104,40 +104,218 @@ def explain_near_zero_gradients(layer_index: int,
           f"and {np.sum(target_variable_threshold_masks)} near-zero gradients total...")
 
     # Do lengthy processing
-    # TODO show progress bar if having to iterate over everything
+    # TODO ...
 
-    # Source: activations
-    # - theory:
-    #     For dense targets layers, all input activations contribute as inputs to each individual unit
-    #     on the target layer.
-    #     For conv target layers, this is more complex because it's only true for a narrow spatial subset of
-    #     the input activations, typically with size (K x K x input_channels)
-    # - approach:
-    #     Identify a threshold by magnitude-percentile across all input activations.
-    #     For dense target layers, just get all mag <= threshold activations. This works globally for all target
-    #     units.
-    #     For conv target layers, use the shape of the weights to figure out the kernel size
-    #     and select the correct subset for each target unit in question.
-    input_activation_threshold = ... # TOOD identify percentile level across all flattened values across all input activaitons
 
-    # Source: neor-zero weights
-    # - theory:
-    #     The variables of the target layer don't directly influence its gradient. Rather, they indirectly
-    #     influence it by causing zero or negative z-outputs which push the ReLU activation into the zero-gradient zone.
-    #     So we want to identify the causes of zero or negative z-outputs.
-    #     Note: negative weights alone shouldn't lead to negative z-outputs, as they may counteract
-    #     negative inputs. But, because the input layer most likely also used ReLU, it'll never produce
-    #     negative values. Thus under most circumstances it is safe to assume that a negative weight will tend the
-    #     target layer's output towards zero.
-    #     For both dense and conv layers, it's sufficient to just look at the fraction of weights that are zero
-    #     or negative, for each selected output unit.
-    # - approach:
+def explain_near_zero_gradients(layer_index: int,
+                                gradients: tot.GradientHistoryCallback,
+                                activity: tot.ActivityHistoryCallback,
+                                variables: tot.VariableHistoryCallback,
+                                epoch=None, step=None,
+                                confidence: float = 0.99,
+                                threshold: float = None,
+                                verbose=True):
+    # get model and identify inbound and outbound layers
+    iteration = step if epoch is None else epoch
+    model = gradients.model
+    target_layer = model.layers[layer_index]
+    inbound_layer_indices = _find_inbound_layers(model, target_layer, return_type='index')
+    outbound_layer_indices = _find_outbound_layers(model, target_layer, return_type='index')
+    if not inbound_layer_indices:
+        raise ValueError(f"Layer #{layer_index} has no inbound layers")
+    if not outbound_layer_indices:
+        raise ValueError(f"Layer #{layer_index} has no outbound layers")
+    print(f"layer: #{layer_index} = {target_layer} at iteration {iteration}")
+    print(f"inbound_layer_indices: {inbound_layer_indices}")
+    print(f"outbound_layer_indices: {outbound_layer_indices}")
 
-    # Source: zero or negative z-outputs
-    # - theory:
-    #     For dense target layers, the pre-activation z values can be calculated simply via
-    #     np.matmul(weights, input_activations) + biases.
-    #     For conv target layers, ....
+    # pre-compute lookups
+    l_to_var_indices = tot.variable_indices_by_layer(model, include_trainable_only=False)
+    l_train_to_var_indices = tot.variable_indices_by_layer(model, include_trainable_only=True)
+    print(f"l_to_var_indices: {l_to_var_indices}")
+
+    # get variables, activities, and gradients of interest
+    # - identify the weights via heuristic: the largest variable
+    # - note: if largest variable isn't trainable, then we won't get gradients for it
+    _, _, target_var_idx, target_rest_var_indices = _split_by_largest(target_layer.variables,
+                                                                      l_to_var_indices[layer_index])
+    target_layer_weights = variables.variables[target_var_idx][iteration]
+    target_layer_activations = activity.layer_outputs[layer_index][iteration]
+    target_layer_gradients = gradients.gradients[target_var_idx][iteration]
+    print(f"target_layer_weights: {target_layer_weights.shape}, target_rest_var_indices: {target_rest_var_indices}")
+    print(f"target_layer_activations: {target_layer_activations.shape}")
+    print(f"target_layer_gradients: {target_layer_gradients.shape}")
+
+    # get data of interest from the inbound prev layers
+    prev_layers_activations_list = [activity.layer_outputs[l_idx][iteration] for l_idx in inbound_layer_indices]
+    print(f"prev_layers_activations_list: {[a.shape for a in prev_layers_activations_list]}")
+
+    # get data of interest from the outbound next layers
+    next_layer_weights, _ = _split_by_largest(variables.variables[v_idx][iteration] for v_idx in
+                                              l_to_var_indices[outbound_layer_indices[0]])  # just a dodgy hack for now
+    next_layers_gradients_lists = [[gradients.gradients[v_idx][iteration] for v_idx in l_to_var_indices[l_idx]] for
+                                   l_idx in outbound_layer_indices]  # nested list of list of gradients
+    next_layers_weights_grad_list = [_split_by_largest(gradients_list)[0] for gradients_list in
+                                     next_layers_gradients_lists]  # gradients of just the main weights
+    print(f"next_layer_weights: {next_layer_weights.shape}")
+    print(f"next_layers_gradients_list: {[[w.shape for w in lst] for lst in next_layers_gradients_lists]}")
+    print(f"next_layers_weights_grad_list: {[w.shape for w in next_layers_weights_grad_list]}")
+
+    # identify near-zero points of interest
+    near_zero_gradients_mask, near_zero_gradients_threshold = _mask_near_zero(target_layer_gradients, confidence,
+                                                                              threshold, return_threshold=True)
+    num_near_zero_gradients = np.sum(near_zero_gradients_mask)
+    num_gradients = np.size(target_layer_gradients)
+
+    # estimate forward pass - Z_l
+    # TODO move into a handler class and handle different layer types
+    # TODO may be able to sometimes hack the layer, strip off its activation function, and use it directly
+    # TODO don't be so naive to assume that the first of the rest is the bias.
+    W_l = target_layer_weights
+    Z_l = None
+    if len(prev_layers_activations_list) == 0:
+        print(f"WARN: Unable to infer pre-activation outputs: no activations from previous layer")
+    elif len(prev_layers_activations_list) > 1:
+        print(
+            f"WARN: Unable to infer pre-activation outputs: multiple activations from previous layer: {[a.shape for a in prev_layers_activations_list]}")
+    else:
+        A_0 = prev_layers_activations_list[0]
+        b_l = variables.variables[target_rest_var_indices[0]][iteration]
+        Z_l = np.matmul(A_0, W_l) + b_l
+
+    # TODO if we're confident in our estimate of Z_l, we can more accurately calculate S_l without having to assume ReLU
+    # estimate forward pass - activation function gradients (S_l)
+    # - original S_l = {1 if Z_l[ij] >= 0 else 0}
+    # - even assuming ReLU, we cannot identify Z_l[ij] < 0 vs Z_l[ij] = 0
+    # - so we assume A_l[ij] == 0 => Z_[ij] < 0, thus:
+    # - estimated S_l = {1 if A_l[ij] > 0 else 0}
+    A_l = target_layer_activations
+    S_l = tf.cast(A_l > 0, tf.float32)
+
+    # estimate backprop pass - backprop from next layer (dJ/dA_l)
+    next_layers_backprop_gradients_list = []
+    for l_idx in outbound_layer_indices:
+        backprop = None
+        try:
+            backprop = _estimate_backprop_from_layer(model, l_idx, iteration, gradients, activity, variables)
+        except UnsupportedNetworkError as e:
+            print(f"WARN: Unable to infer backprop from next layer #{l_idx}: {e.message}")
+        next_layers_backprop_gradients_list.append(backprop)
+    print(f"next_layers_backprop_gradients_list: {[bp.shape for bp in next_layers_backprop_gradients_list]}")
+
+    def _explain_tensor(name, tensor, mask_name=None, mask=None, negatives_are_bad=False):
+        quantiles = [0, 25, 50, 75, 100]
+        counts, sums, threshold = me.tensor_classify(tensor, confidence=confidence, return_threshold=True)
+        print(f"{name}:")
+        print(f"  shape:             {np.shape(tensor)} -> total values: {np.size(tensor)}")
+        print(f"  summary:           {_describe_tensor_explanandum(counts, sums, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)}")
+        print(f"  value percentiles: {quantiles} -> {tfp.stats.percentile(tensor, quantiles).numpy()}")
+        print(f"  PZN counts/means:  {me.summarise(counts, sums, show_percentages=True, show_means=True)}")
+        if mask_name:
+            print(f"  {(mask_name + ':'):19} {_describe_tensor_explanandum(counts, sums, mask=mask, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)}")
+            print(f"  {(mask_name + ':'):19} {me.summarise(counts, sums, mask=mask, show_percentages=True, show_means=True)}")
+
+    def _explain_combination(name, inputs, result, counts, sums, fixed_threshold=None):
+        # note: has noteworthy level of zeros if exceed 1.1x the percent we'd expect from the confidence level alone.
+        # That gives a little leeway for rounding errors.
+        print(f"compute {name}:")
+        print(f"  inputs examined:   {inputs}")
+        mask, threshold = _mask_near_zero(result, confidence=confidence, fixed_threshold=fixed_threshold,
+                                          return_threshold=True)
+        orig_total = np.size(counts[..., 0])
+        mask_total = np.sum(mask)
+        fraction = mask_total / orig_total
+        noteworthy = fraction > (1.1 * (1 - confidence))
+        description = f"{fraction * 100:.1f}% near-zero ({_format_threshold(threshold)})" if verbose else f"{fraction * 100:.1f}% near-zero"
+        if noteworthy:
+            top_description, top_fraction = te.describe_top_near_zero_explanandum(counts, sums, mask=mask)
+            print(
+                f"  summary:           {description}, of which {top_fraction * 100:.1f}% are affected by {top_description}")
+        else:
+            print(f"  summary:           {description}")
+        if verbose:
+            print(f"  PZN combinations:  {me.summarise(counts, sums, show_percentages=True, show_means=True)}")
+
+    def _explain_combination_near_zero(name, result, counts, sums, fixed_threshold=None):
+        mask, threshold = _mask_near_zero(result, confidence=confidence, fixed_threshold=fixed_threshold,
+                                          return_threshold=True)
+        orig_total = np.size(counts[..., 0])
+        mask_total = np.sum(mask)
+        top_description, top_fraction = te.describe_top_near_zero_explanandum(counts, sums, mask=mask)
+        print(f"{name} {mask_total / orig_total * 100:.1f}% near zero ({_format_threshold(threshold)}):")
+
+        print(f"  Top explanation:   {top_fraction * 100:.1f}% affected by {top_description}")
+        print(f"  PZN combinations:  {me.summarise(counts, sums, mask=mask, show_percentages=True, show_means=True)}")
+
+        # TODO consider removing this, or replacing with the top-5 results from describe_top_near_zero_explanandum()
+        counts, sums, terms = me.filter_classifications(counts, sums)
+        count_groups, sum_groups, term_groups = me.group_classifications(counts, sums, terms, mask=mask)
+        count_groups, sum_groups, term_groups, coverage = me.filter_groups(count_groups, sum_groups, term_groups,
+                                                                           completeness=0.75, max_groups=10,
+                                                                           return_coverage=True)
+        desc = me.describe_groups(count_groups, sum_groups, term_groups, show_ranges=True)
+        for size, summary in zip(desc['sizes'], desc['summaries']):
+            print(f"  {size / mask_total * 100:.1f}% explained as (counts/sums): {summary}")
+        print(f"  (explains top most {coverage * 100:.1f}% of near-zero)")
+
+    # explain context
+    print()
+    print(f"Summary...")
+    print(f"  near-zero gradients: {num_near_zero_gradients} ({num_near_zero_gradients / num_gradients * 100:0.1f}%) {_format_threshold(near_zero_gradients_threshold)}")
+
+    print()
+    print("Let:")
+    print("  A_0 <- input activation to target layer")
+    print("  W_l <- weights of target layer")
+    print("  Z_l <- pre-activation output of target layer")
+    print("  S_l <- effect of activation function as element-wise multiplier")
+    print("  A_l <- output activation of target layer")
+    print("  PZN <- breakdown of values into (P)ositive, near-(Z)ero, or (N)egative")
+
+    # explain forward pass
+    # - let A_0 be input activation to this layer (not necessarily the first layer input)
+    print()
+    print(f"Forward pass...")
+    for idx, activations in enumerate(prev_layers_activations_list):
+        name = "A_0" if len(prev_layers_activations_list) == 1 else f"A_0#{idx}"
+        A_0 = activations
+        _explain_tensor(name + ' - input value', A_0)
+    _explain_tensor("W_l - weights of target layer", W_l, "corresponding to near-zero gradients",
+                    near_zero_gradients_mask)
+    if Z_l is None:
+        print(f"Z_l = A_0 . W_l + b_l:")
+        print(f"  Unable to infer")
+    else:
+        counts, sums = me.matmul_classify(A_0, W_l, confidence=confidence)
+        _explain_combination("Z_l = A_0 . W_l + b_l", "A_0, W_l", Z_l, counts, sums)
+        _explain_combination_near_zero("Z_l", Z_l, counts, sums)
+        _explain_tensor("Z_l - pre-activation output", Z_l, negatives_are_bad=True)
+    _explain_tensor("S_l - activation function (assuming ReLU)", S_l)
+    _explain_tensor("A_l - activation output from target layer", A_l)
+
+    # explain backprop pass
+    # - starts with dJdA_l
+    # - compute dJ/dZ_l = dJ/dA_l x S_l (element-wise)
+    # - compute dJ/dW_l = A_0^T . dJ/dZ_l    <-- note: experimentally this produces very accurate results.
+    print()
+    print(f"Backward pass...")
+    for dJdA_l in next_layers_backprop_gradients_list:
+        dJdZ_l = np.multiply(dJdA_l, S_l)
+        counts, sums = me.multiply_classify(dJdA_l, S_l, confidence=confidence)
+        _explain_combination("dJ/dZ_l = dJ/dA_l x S_l (element-wise)", "dJ/dA_l, S_l", dJdZ_l, counts, sums)
+        print(f"  note:              using estimated dJ/dA_l value")
+        _explain_combination_near_zero("dJdZ_l", dJdZ_l, counts, sums)
+        _explain_tensor("dJ/dZ_l", dJdZ_l)
+    for dJdA_l in next_layers_backprop_gradients_list:
+        A_0t = tf.transpose(A_0)
+        dJdZ_l = np.multiply(dJdA_l, S_l)  # redoing from above
+        dJdW_l = np.matmul(A_0t, dJdZ_l)
+        counts, sums = me.matmul_classify(A_0t, dJdZ_l, confidence=confidence)
+        _explain_combination("dJ/dW_l = A_0^T . dJ/dZ_l", "A_0^T, dJ/dZ_l", target_layer_gradients, counts, sums,
+                             threshold)
+        _explain_combination_near_zero("dJdW_l", target_layer_gradients, counts, sums, threshold)
+        # _explain_tensor("computed dJdW_l", dJdW_l)  # tends to be very close to those of actual so no need to show
+    _explain_tensor("actual dJdW_l", target_layer_gradients)
 
 
 # TODO consider returning a list of best explanandums and using this list as a better description
@@ -212,6 +390,110 @@ def _find_layer_by_node(model, node, return_type='layer'):
     return None
 
 
+# TODO needs to be extended out to cope with different layer types
+def _estimate_backprop_from_layer(model, layer_index, iteration,
+                                  gradients: tot.GradientHistoryCallback,
+                                  activity: tot.ActivityHistoryCallback,
+                                  variables: tot.VariableHistoryCallback):
+    print(f"[BEGIN] _estimate_backprop_from_layer(layer_index={layer_index})")
+
+    # get model and identify inbound and outbound layers
+    model = gradients.model
+    target_layer = model.layers[layer_index]
+    inbound_layer_indices = _find_inbound_layers(model, target_layer, return_type='index')
+    if not inbound_layer_indices:
+        raise UnsupportedNetworkError(f"Layer has no inbound layers")
+    if len(inbound_layer_indices) > 1:
+        raise UnsupportedNetworkError(f"Layer has multiple inbound layers")
+    # print(f"layer: #{layer_index} = {target_layer} at iteration {iteration}")
+    # print(f"inbound_layer_indices: {inbound_layer_indices}")
+
+    # pre-compute lookups
+    l_to_var_indices = tot.variable_indices_by_layer(model, include_trainable_only=False)
+    # print(f"l_to_var_indices: {l_to_var_indices}")
+
+    # get variables, activities, and gradients of interest
+    _, _, target_var_idx, target_rest_var_indices = _split_by_largest(target_layer.variables, l_to_var_indices[layer_index])
+    if variables.variables[target_var_idx] is None:
+        raise UnsupportedNetworkError(
+            f"Weights (selected by heuristic) not collected (not trainable?), model.variables index: {target_var_idx}")
+    if gradients.gradients[target_var_idx] is None:
+        raise UnsupportedNetworkError(
+            f"Gradients of weights (selected by heuristic) not collected (not trainable?), model.variables index: {target_var_idx}")
+    target_layer_weights = variables.variables[target_var_idx][iteration]
+    target_layer_weights_gradients = gradients.gradients[target_var_idx][iteration]
+    # print(f"target_layer_weights: {target_layer_weights.shape}")
+    # print(f"target_layer_weights_gradients: {target_layer_weights_gradients.shape}")
+
+    # get data of interest from the inbound prev layers
+    prev_layers_activations_list = [activity.layer_outputs[l_idx][iteration] for l_idx in inbound_layer_indices]
+    # print(f"prev_layers_activations_list: {[a.shape for a in prev_layers_activations_list]}")
+    if not prev_layers_activations_list:
+        # should never occur
+        raise UnsupportedNetworkError(f"No activations from previous layer")
+    if len(prev_layers_activations_list) > 1:
+        # should never occur
+        raise UnsupportedNetworkError(
+            f"Multiple activations from previous layer: {[a.shape for a in prev_layers_activations_list]}")
+
+    # estimate backprop from this layer (dJ/dA_0)
+    # - let:
+    # - we need the backprop gradients that are produced by this layer and which feed into the gradient update step of
+    #   the prev layer.
+    # - we don't have that, but instead we have the gradients of the weights at this layer, which is one step in
+    #   the wrong direction.
+    # - we can estimate the backprop gradients as follows:
+    #    given:
+    #       0 = prev layer, 1 = this layer
+    #       dJ/dW_1 = weight gradients at this layer
+    #       dZ_1/dW_1 = A_0^T = transposed activations from previous layer
+    #       dZ_1/dA_0 = W_1^T = transposed weights from this layer
+    #    want:
+    #       dJ/dA_0 = backprop gradients to previous layer
+    #    #1:
+    #       dJ/dW_1 = dZ_1/dW_1 . dJ/dZ_1 = A_0^T . dJ/dZ_1   <-- (f_0 x f_1) = (f_0 x b) . (b x f_1)
+    #       => dJ/dZ_1 = (A_0+)^T . dJ/dW_1                   <-- (b x f_1) = (b x f_0) . (f_0 x f_1)
+    #    #2:
+    #       dJ/dA_0 = dJ/dZ_1 . dZ_1/dA_0 = dJ/dZ_1 . W_1^T   <-- (b x f_0) = (b x f_1) . (f_1 x f_0)
+    # TODO do trickery for tensors with spatial dims
+    W_1 = target_layer_weights
+    dJdW_1 = target_layer_weights_gradients
+    A_0 = prev_layers_activations_list[0]
+    A_0_inv = tf.linalg.pinv(A_0)
+    print(f"dJdW_1: {dJdW_1.shape}, A_0: {A_0.shape}, A_0_inv: {A_0_inv.shape}")
+    dJdZ_1 = tf.linalg.matmul(A_0_inv, dJdW_1, transpose_a=True)
+    print(f"dJdZ_1: {dJdZ_1.shape}")
+    dJdA_0 = tf.linalg.matmul(dJdZ_1, W_1, transpose_b=True)
+    print(f"dJdA_0: {dJdA_0.shape}")
+
+    print(f"[END] _estimate_backprop_from_layer()")
+    return dJdA_0
+
+
+def _mask_near_zero(tensor, confidence, fixed_threshold=None, return_threshold=False):
+    if fixed_threshold is None:
+        threshold = tfp.stats.percentile(tf.abs(tensor), q=100 * (1 - confidence), interpolation='midpoint').numpy()
+    else:
+        threshold = fixed_threshold
+
+    if threshold == 0:
+        mask = tensor == 0
+    else:
+        mask = tf.abs(tensor) < threshold
+
+    if return_threshold:
+        return mask, threshold
+    else:
+        return mask
+
+
+def _format_threshold(threshold):
+    if threshold == 0:
+        return "= 0"
+    else:
+        return f"< {threshold}"
+
+
 def _split_by_largest(tensors, labels=None):
     """
     Splits the given list of tensors into the single largest tensor, and the rest.
@@ -247,6 +529,26 @@ def _split_by_largest(tensors, labels=None):
     biggest_t_label = labels[biggest_idx]
     rest_labels = [labels[t_idx] for t_idx, t in enumerate(labels) if t_idx != biggest_idx]
     return biggest_t, rest, biggest_t_label, rest_labels
+
+
+# TODO merge or replace this over _describe_tensor_near_zero_explanandum
+def _describe_tensor_explanandum(counts, sums, *, threshold, mask=None, negatives_are_bad=False, verbose=True):
+    """
+    Internal function for explain_near_zero_gradients()
+    """
+    counts, sums, _ = me.standardize(counts, sums, mask=mask)
+    zero_fraction = np.sum(counts[..., 1]) / np.sum(counts)
+    neg_fraction = 0.0
+    if negatives_are_bad:
+        # strictly include all negatives, even those close to zero
+        value = np.sum(sums, axis=-1)
+        neg_fraction = np.sum(value < 0) / np.size(value)
+    neg_description = f"{zero_fraction * 100:.1f}% near-zero ({_format_threshold(threshold)})" \
+        if verbose else f"{zero_fraction * 100:.1f}% near-zero"
+    if zero_fraction > neg_fraction:
+        return neg_description
+    else:
+        return f"{neg_fraction * 100:.1f}% negative, {neg_description}" if verbose else f"{neg_fraction * 100:.1f}% negative"
 
 
 def _describe_tensor_near_zero_explanandum(counts, sums, terms_list):
@@ -317,3 +619,11 @@ def _describe_matmul_nero_zero_explanandum(counts, sums, terms_list, threshold):
         return None, None
     else:
         return description, fraction
+
+
+class UnsupportedNetworkError(Exception):
+    """
+    Represents that some aspect of the network is not supported by the explainer.
+    Generally this results in the explainer falling back to more generic observations.
+    """
+    pass
