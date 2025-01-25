@@ -337,7 +337,7 @@ def describe_top_near_zero_explanandum(counts, sums=None, terms=None, *, mask=No
         return None, None
 
 
-def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, confidence=0.95):
+def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, input_names=None, confidence=0.95):
     """
     Tries to explain the cause for near-zero values after a matmul-like operation.
     The explanation is given in the form of a collection of "explanandums" - individual partial explanations
@@ -361,7 +361,10 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
         sums: counts from matmul-like classification, with shape: value_shape + (terms,)
         terms: terms from matmul-like classification, with shape: value_shape + (terms,)
         mask: boolean mask against, with shape: value_shape
-        confidence: used to calculate thresholds for near-zero values in the resultant value tensor
+        input_names: names of left and right inputs, to be used in descriptions.
+            Defaults to "left input" and "right input" are used.
+        confidence: used to calculate thresholds for near-zero values in the resultant value tensor.
+            For best results, supply the same confidence that was used when masking.
     Returns:
         - descriptions - list of terse textual descriptions, one for each explanandum
         - fractions - fraction of values that are at least partially explained by each description.
@@ -371,6 +374,10 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
     counts, sums, terms_list = me.standardize(counts, sums, terms, mask=mask)
     if len(terms_list) != 9:
         raise ValueError("Not a matmul-like classification")
+    if input_names and len(input_names) != 2:
+        raise ValueError(f"Must be exactly two input_names, got {len(input_names)}")
+    if input_names is None:
+        input_names = ["left input", "right input"]
 
     # determine threshold
     # - construct original output value
@@ -410,13 +417,17 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
         return fraction, strength, description
 
     # measure effect of each individual explanandum
-    explanandums = [_zero_effect(['ZZ', 'ZP', 'ZN'], "near-zero values from first input"),
-                    _zero_effect(['ZZ', 'PZ', 'NZ'], "near-zero values from second input"),
+    explanandums = [_zero_effect(['ZZ', 'ZP', 'ZN'], f"near-zero values from {input_names[0]}"),
+                    _zero_effect(['ZZ', 'PZ', 'NZ'], f"near-zero values from {input_names[1]}"),
                     _zero_effect(['ZZ', 'ZP', 'PZ', 'ZN', 'NZ'], "near-zero values from either input"),
-                    _pos_neg_effect(['PP', 'PN'], "positive/negatives from second input cancelling out (PP ~= PN)"),
-                    _pos_neg_effect(['NP', 'NN'], "positive/negatives from second input cancelling out (NP ~= NN)"),
-                    _pos_neg_effect(['PP', 'NP'], "positive/negatives from first input cancelling out (PP ~= NP)"),
-                    _pos_neg_effect(['PN', 'NN'], "positive/negatives from first input cancelling out (PN ~= NN)"),
+                    _pos_neg_effect(['PP', 'NP'],
+                                    f"positive/negatives from {input_names[0]} cancelling out (PP ~= NP)"),
+                    _pos_neg_effect(['PN', 'NN'],
+                                    f"positive/negatives from {input_names[0]} cancelling out (PN ~= NN)"),
+                    _pos_neg_effect(['PP', 'PN'],
+                                    f"positive/negatives from {input_names[1]} cancelling out (PP ~= PN)"),
+                    _pos_neg_effect(['NP', 'NN'],
+                                    f"positive/negatives from {input_names[1]} cancelling out (NP ~= NN)"),
                     _pos_neg_effect(['PP', 'NN', 'NP', 'PN'],
                                     "sums of positive/negatives from both inputs cancelling out (PP+NN ~= NP+PN)")]
 
