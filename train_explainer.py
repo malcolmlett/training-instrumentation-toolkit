@@ -129,88 +129,22 @@ def explain_near_zero_gradients(layer_index: int,
     print(f"inbound_layer_indices: {inbound_layer_indices}")
     print(f"outbound_layer_indices: {outbound_layer_indices}")
 
-    # pre-compute lookups
-    l_to_var_indices = tot.variable_indices_by_layer(model, include_trainable_only=False)
-    l_train_to_var_indices = tot.variable_indices_by_layer(model, include_trainable_only=True)
-    print(f"l_to_var_indices: {l_to_var_indices}")
-
     # get variables, activities, and gradients of interest
-    # - identify the weights via heuristic: the largest variable
-    # - note: if largest variable isn't trainable, then we won't get gradients for it
-    # TODO replace weight-selection with W_l = target_layer_handler.get_weights()
-    _, _, target_var_idx, target_rest_var_indices = _split_by_largest(target_layer.variables,
-                                                                      l_to_var_indices[layer_index])
-    target_layer_weights = variables.variables[target_var_idx][iteration]
-    target_layer_activations = activity.layer_outputs[layer_index][iteration]
-    target_layer_gradients = gradients.gradients[target_var_idx][iteration]
-    print(f"target_layer_weights: {target_layer_weights.shape}, target_rest_var_indices: {target_rest_var_indices}")
-    print(f"target_layer_activations: {target_layer_activations.shape}")
-    print(f"target_layer_gradients: {target_layer_gradients.shape}")
-
-    # get data of interest from the inbound prev layers
-    prev_layers_activations_list = [activity.layer_outputs[l_idx][iteration] for l_idx in inbound_layer_indices]
-    print(f"prev_layers_activations_list: {[a.shape for a in prev_layers_activations_list]}")
-
-    # get data of interest from the outbound next layers
-    next_layer_weights, _ = _split_by_largest(variables.variables[v_idx][iteration] for v_idx in
-                                              l_to_var_indices[outbound_layer_indices[0]])  # just a dodgy hack for now
-    next_layers_gradients_lists = [[gradients.gradients[v_idx][iteration] for v_idx in l_to_var_indices[l_idx]] for
-                                   l_idx in outbound_layer_indices]  # nested list of list of gradients
-    next_layers_weights_grad_list = [_split_by_largest(gradients_list)[0] for gradients_list in
-                                     next_layers_gradients_lists]  # gradients of just the main weights
-    print(f"next_layer_weights: {next_layer_weights.shape}")
-    print(f"next_layers_gradients_list: {[[w.shape for w in lst] for lst in next_layers_gradients_lists]}")
-    print(f"next_layers_weights_grad_list: {[w.shape for w in next_layers_weights_grad_list]}")
-
-    # identify near-zero points of interest
-    near_zero_gradients_mask, near_zero_gradients_threshold = _mask_near_zero(target_layer_gradients, confidence,
-                                                                              threshold, return_threshold=True)
-    num_near_zero_gradients = np.sum(near_zero_gradients_mask)
-    num_gradients = np.size(target_layer_gradients)
-
-    # estimate forward pass - Z_l
-    # TODO replace with Z_l = target_layer_handler.calculate_Z(return_note=True)
-    W_l = target_layer_weights
-    Z_l = None
-    if len(prev_layers_activations_list) == 0:
-        print(f"WARN: Unable to infer pre-activation outputs: no activations from previous layer")
-    elif len(prev_layers_activations_list) > 1:
-        print(
-            f"WARN: Unable to infer pre-activation outputs: multiple activations from previous layer: {[a.shape for a in prev_layers_activations_list]}")
-    else:
-        A_0 = prev_layers_activations_list[0]
-        b_l = variables.variables[target_rest_var_indices[0]][iteration]
-        Z_l = np.matmul(A_0, W_l) + b_l
-
-    # estimate forward pass - activation function gradients (S_l)
-    # TODO replace with S_l, S_l_note = target_layer_handler.calculate_S(return_note=True)
-    A_l = target_layer_activations
-    S_l_note = None
-    if Z_l is None:
-        # estimate S_l from A_l, assuming ReLU
-        # - original S_l = {1 if Z_l[ij] >= 0 else 0}
-        # - even assuming ReLU, we cannot identify Z_l[ij] < 0 vs Z_l[ij] = 0
-        # - so we assume A_l[ij] == 0 => Z_[ij] < 0, thus:
-        # - estimated S_l = {1 if A_l[ij] > 0 else 0}
-        S_l = tf.cast(A_l > 0, tf.float32)
-        S_l_note = "estimated S_l value from A_l, assuming ReLU"
-    else:
-        # calculate accurate S_l from Z_l
-        #   A_l = Z_l (.) S_l   -- element-wise
-        # so:
-        #   S_l = A_l / Z_l or assume 0.0 if A_l is zero (eg: compatible with sigmoid)
-        S_l = np.divide(A_l, Z_l, out=np.zeros_like(A_l), where=(Z_l > 0))
-
-    # estimate backprop pass - backprop from next layer (dJ/dA_l)
-    next_layers_backprop_gradients_list = []
-    for l_idx in outbound_layer_indices:
-        backprop = None
-        try:
-            backprop = _estimate_backprop_from_layer(model, l_idx, iteration, gradients, activity, variables)
-        except UnsupportedNetworkError as e:
-            print(f"WARN: Unable to infer backprop from next layer #{l_idx}: {e.message}")
-        next_layers_backprop_gradients_list.append(backprop)
-    print(f"next_layers_backprop_gradients_list: {[bp.shape for bp in next_layers_backprop_gradients_list]}")
+    l_to_var_indices = tot.variable_indices_by_layer(model, include_trainable_only=False)
+    target_layer_handler, target_layer_handler_note = get_layer_handler_for(
+        layer=target_layer, layer_index=layer_index, layer_subscript='l', return_note=True,
+        variables=[target_layer.variables[var_idx][iteration] for var_idx in l_to_var_indices[layer_index]],
+        gradients=[target_layer.gradients[var_idx][iteration] for var_idx in l_to_var_indices[layer_index]],
+        inputs=[activity.layer_outputs[l_idx][iteration] for l_idx in inbound_layer_indices],
+        output=activity.layer_outputs[layer_index][iteration])
+    next_layer_handlers_and_notes = [get_layer_handler_for(
+        layer=target_layer, layer_index=l_idx, layer_subscript='2', return_note=True,
+        inputs=None, output=None,
+        variables=[target_layer.variables[var_idx][iteration] for var_idx in l_to_var_indices[l_idx]],
+        gradients=[target_layer.gradients[var_idx][iteration] for var_idx in l_to_var_indices[l_idx]])
+        for l_idx in outbound_layer_indices]
+    next_layer_handlers = [handler for handler, note in next_layer_handlers_and_notes]
+    next_layer_handler_notes = [note for handler, note in next_layer_handlers_and_notes]
 
     def _explain_tensor(name, tensor, mask_name=None, mask=None, negatives_are_bad=False):
         quantiles = [0, 25, 50, 75, 100]
@@ -276,10 +210,18 @@ def explain_near_zero_gradients(layer_index: int,
                 print(f"  {size / mask_total * 100:.1f}% explained as (counts/sums): {summary}")
             print(f"  (explains top most {coverage * 100:.1f}% of near-zero)")
 
+    # identify points of interest
+    dJdW_l = target_layer_handler.get_weight_gradients()
+    near_zero_gradients_mask, near_zero_gradients_threshold = _mask_near_zero(
+        dJdW_l, confidence, threshold, return_threshold=True)
+    num_near_zero_gradients = np.sum(near_zero_gradients_mask)
+    num_gradients = np.size(dJdW_l)
+
     # explain context
     print()
     print(f"Summary...")
-    print(f"  near-zero gradients: {num_near_zero_gradients} ({num_near_zero_gradients / num_gradients * 100:0.1f}%) {_format_threshold(near_zero_gradients_threshold)}")
+    print(f"  near-zero gradients: {num_near_zero_gradients} ({num_near_zero_gradients / num_gradients * 100:0.1f}%) "
+          f"{_format_threshold(near_zero_gradients_threshold)}")
 
     print()
     print("Let:")
@@ -295,26 +237,52 @@ def explain_near_zero_gradients(layer_index: int,
     # - let A_0 be input activation to this layer (not necessarily the first layer input)
     print()
     print(f"Forward pass...")
-    for idx, activations in enumerate(prev_layers_activations_list):
-        name = "A_0" if len(prev_layers_activations_list) == 1 else f"A_0#{idx}"
-        A_0 = activations
+    for idx, A_0 in enumerate(target_layer_handler.inputs):
+        name = "A_0" if len(target_layer_handler.inputs) == 1 else f"A_0#{idx}"
         _explain_tensor(name + ' - input value', A_0)
-    _explain_tensor("W_l - weights of target layer", W_l, "corresponding to near-zero gradients",
-                    near_zero_gradients_mask)
-    if Z_l is None:
-        print(f"Z_l = A_0 . W_l + b_l:")
-        print(f"  Unable to infer")
-    else:
-        # TODO replace with Z_l, Z_l_eqn = target_layer_handler.calculate_Z(return_equation=True)
-        # TODO replace with counts, sums = target_layer_handler.classify_Z_calculation(confidence=confidence)
-        counts, sums = me.matmul_classify(A_0, W_l, confidence=confidence)
-        _explain_combination("Z_l = A_0 . W_l + b_l", ['A_0', 'W_l'], Z_l, counts, sums)
+
+    W_l = target_layer_handler.get_weights()
+    _explain_tensor("W_l - weights of target layer", W_l,
+                    "corresponding to near-zero gradients", near_zero_gradients_mask)
+
+    try:
+        # typically: Z_l = A_0 . W_l + b_l
+        Z_l, Z_l_eqn, Z_l_note = target_layer_handler.calculate_Z(return_equation=True, return_note=True)
+        counts, sums = target_layer_handler.classify_Z_calculation(confidence=confidence)
+        _explain_combination(f"Z_l = {Z_l_eqn}", ['A_0', 'W_l'], Z_l, counts, sums)
         _explain_combination_near_zero("Z_l", ['A_0', 'W_l'], Z_l, counts, sums)
         _explain_tensor("Z_l - pre-activation output", Z_l, negatives_are_bad=True)
-    _explain_tensor("S_l - activation function", S_l)
-    if S_l_note and verbose:
-        print(f"  note:              {S_l_note}")
+        if Z_l_note and verbose:
+            print(f"  note:              {Z_l_note}")
+    except UnsupportedNetworkError as e:
+        print(f"Z_l - pre-activation output:")
+        print(f"  note:              Unable to infer due to {e}")
+
+    A_l = target_layer_handler.get_A()
+    try:
+        S_l, S_l_note = target_layer_handler.calculate_S(return_note=True)
+        _explain_tensor("S_l - activation function", S_l)
+        if S_l_note and verbose:
+            print(f"  note:              {S_l_note}")
+    except UnsupportedNetworkError as e:
+        print(f"S_l - activation function:")
+        print(f"  note:              Unable to infer due to {e}")
+
     _explain_tensor("A_l - activation output from target layer", A_l)
+
+    # estimate backprop pass - backprop from next layer (dJ/dA_l)
+    next_layers_backprop_list = []
+    next_layers_backprop_notes_list = []
+    for next_layer_handler in next_layer_handlers:
+        try:
+            backprop, note = next_layer_handler.calculate_backprop(return_note=True)
+        except UnsupportedNetworkError as e:
+            # TODO add display_name to layer handler
+            backprop = None
+            note = f"Unable to infer backprop from next layer {next_layer_handler.display_name}: {e}"
+        next_layers_backprop_list.append(backprop)
+        next_layers_backprop_notes_list.append(note)
+    print(f"next_layers_backprop_list: {[bp.shape for bp in next_layers_backprop_list]}")
 
     # explain backprop pass
     # - starts with dJdA_l
@@ -322,26 +290,77 @@ def explain_near_zero_gradients(layer_index: int,
     # - compute dJ/dW_l = A_0^T . dJ/dZ_l    <-- note: experimentally this produces very accurate results.
     print()
     print(f"Backward pass...")
-    for dJdA_l in next_layers_backprop_gradients_list:
-        # TODO replace with dJdZ_l, dJdZ_l_eqn = target_layer_handler.calculate_dJdZ(dJdA_l, return_equation=True)
-        # TODO replace with counts, sums = target_layer_handler.classify_dJdZ_calculation(dJdA_l, confidence=confidence)
-        dJdZ_l = np.multiply(dJdA_l, S_l)
-        counts, sums = me.multiply_classify(dJdA_l, S_l, confidence=confidence)
-        _explain_combination("dJ/dZ_l = dJ/dA_l x S_l (element-wise)", ['dJ/dA_l', 'S_l'], dJdZ_l, counts, sums)
-        print(f"  note:              using estimated dJ/dA_l value")
-        _explain_combination_near_zero("dJdZ_l", ['dJ/dA_l', 'S_l'], dJdZ_l, counts, sums)
-        _explain_tensor("dJ/dZ_l", dJdZ_l)
-    # TODO if multiple next_layers, then average over them, and show the final averaged result as a tensor explanation
-    for dJdA_l in next_layers_backprop_gradients_list:
-        # TODO replace
-        A_0t = tf.transpose(A_0)
-        dJdZ_l = np.multiply(dJdA_l, S_l)  # redoing from above
-        dJdW_l = np.matmul(A_0t, dJdZ_l)
-        counts, sums = me.matmul_classify(A_0t, dJdZ_l, confidence=confidence)
-        _explain_combination("dJ/dW_l = A_0^T . dJ/dZ_l", ['A_0^T', 'dJ/dZ_l'], target_layer_gradients, counts, sums,
-                             threshold)
-        _explain_combination_near_zero("dJdW_l", ['A_0^T', 'dJ/dZ_l'], target_layer_gradients, counts, sums, threshold)
-    _explain_tensor("actual dJdW_l", target_layer_gradients)
+    for idx, dJdA_l in enumerate(next_layers_backprop_list):
+        suffix = "" if len(target_layer_handler.inputs) == 1 else f"#{idx}"
+        _explain_tensor(f"dJ/dA_l{suffix} - backprop from next layer", dJdA_l)
+        print(f"  note:              estimated via weights and gradients in next layer")
+
+    # if multiple next layers, backprop to this layer is mean across their individual backprops
+    if len(next_layers_backprop_list) > 0:
+        dJdA_l = np.mean(np.stack(next_layers_backprop_list, axis=-1), axis=-1)
+    else:
+        dJdA_l = None
+    if len(next_layers_backprop_list) > 1:
+        _explain_tensor(f"dJ/dA_l - final backprop into this layer", dJdA_l)
+
+    if dJdA_l is None:
+        print(f"compute dJ/dZ_l:")
+        print(f"  note:              Unable to infer")
+        dJdZ_l = None
+    else:
+        # typically: dJ/dZ_l = dJ/dA_l (.) S_l   -- element-wise multiply
+        try:
+            dJdZ_l, dJdZ_l_eqn, dJdZ_l_note = target_layer_handler.calculate_dJdZ(
+                dJdA_l, return_equation=True, return_note=True)
+            counts, sums = target_layer_handler.classify_dJdZ_calculation(dJdA_l, confidence=confidence)
+            _explain_combination(f"dJ/dZ_l = {dJdZ_l_eqn}", [f"dJ/dA_l", 'S_l'], dJdZ_l, counts, sums)
+            _explain_combination_near_zero("dJ/dZ_l", ['dJ/dA_l', 'S_l'], dJdZ_l, counts, sums)
+            _explain_tensor("dJ/dZ_l", dJdZ_l)
+            if dJdZ_l_note and verbose:
+                print(f"  note:              {dJdZ_l_note}")
+        except UnsupportedNetworkError as e:
+            print(f"compute dJ/dZ_l:")
+            print(f"  note:              Unable to infer due to {e}")
+            dJdZ_l = None
+
+    if dJdZ_l is None:
+        print(f"compute dJ/dW_l:")
+        print(f"  note:              Unable to infer without dJ/dZ_l")
+    else:
+        # typically: dJ/dW_l = A_0^T . dJ/dZ_l
+        dJdW_l = target_layer_handler.get_weight_gradients
+        try:
+            _, dJdW_l_eqn, dJdW_l_note = target_layer_handler.calculate_dJdW(
+                dJdZ_l, return_equation=True, return_note=True)
+            counts, sums = target_layer_handler(dJdZ_l, confidence=confidence)
+            _explain_combination(f"dJ/dW_l = {dJdW_l_eqn}", ['A_0^T', 'dJ/dZ_l'], dJdW_l, counts, sums, threshold)
+            _explain_combination_near_zero("dJ/dW_l", ['A_0^T', 'dJ/dZ_l'], dJdW_l, counts, sums, threshold)
+        except UnsupportedNetworkError as e:
+            print(f"compute dJ/dW_l:")
+            print(f"  note:              Unable to infer due to {e}")
+
+    dJdW_l = target_layer_handler.get_weight_gradients
+    _explain_tensor("dJ/dW_l", dJdW_l)
+
+
+def _join_notes(*args):
+    """
+    Takes a list that might have None entries, filters on non-None values, then joins into a single
+    comma separated string.
+    Args:
+        *args: Variable number of arguments (strings or lists of strings).
+    Returns:
+        single text
+    """
+    flat = []
+    for arg in args:
+        if isinstance(arg, list):
+            for item in arg:
+                if item is not None:
+                    flat.append(item)
+        elif arg is not None:
+            flat.append(arg)
+    return ', '.join(flat)
 
 
 def describe_top_near_zero_explanandum(counts, sums=None, terms=None, *, mask=None, input_names=None, confidence=0.95,
@@ -533,6 +552,36 @@ def describe_tensor_near_zero_explanation(counts, sums=None, *, mask=None, thres
             return f"{neg_fraction * 100:.1f}% negative"
 
 
+def get_layer_handler_for(layer, layer_index, variables, gradients, inputs, output, layer_subscript=None, return_note=False):
+    """
+    Factory for layer handlers. Identifies and instantiates the best layer handler for the given layer.
+    Returns:
+        - handler - a LayerHandler instance
+        - note - a warning note, or none if no warnings (optional output)
+    """
+    display_name = f"{layer.name} (#{layer_index})"
+    note = None
+    if isinstance(layer, tf.keras.layers.Dense):
+        handler = DenseLayerHandler(
+            display_name=display_name, variables=variables, gradients=gradients, inputs=inputs, output=output,
+            layer_subscript=layer_subscript)
+    elif 'dense' in layer.name:
+        handler = DenseLayerHandler(
+            display_name=display_name, variables=variables, gradients=gradients, inputs=inputs, output=output,
+            layer_subscript=layer_subscript)
+        note = "Treating as standard Dense layer due to name, results may not be accurate"
+    else:
+        # fallback to generic handler
+        handler = LayerHandler(
+            display_name=display_name, variables=variables, gradients=gradients, inputs=inputs, output=output,
+            layer_subscript=layer_subscript)
+
+    if return_note:
+        return handler, note
+    else:
+        return handler
+
+
 def _find_inbound_layers(model, layer, return_type='layer'):
     """
     :return_type: one of 'layer', 'index'
@@ -564,6 +613,7 @@ def _find_layer_by_node(model, node, return_type='layer'):
     return None
 
 
+# TODO take key error messages and merge with new code
 # TODO needs to be extended out to cope with different layer types
 def _estimate_backprop_from_layer(model, layer_index, iteration,
                                   gradients: tot.GradientHistoryCallback,
@@ -724,8 +774,7 @@ class LayerHandler:
     it's simpler than trying to find a code-friendly notation for 'A_{l-1}'.
     """
 
-    # variables = variables.variables[v_idx][iteration] for v_idx in l_to_var_indices[layer_idx]
-    def __init__(self, model, variables, gradients, inputs, output, layer_subscript=None):
+    def __init__(self, display_name, variables, gradients, inputs, output, layer_subscript=None):
         """
         Args:
             variables: list of tensor.
@@ -739,14 +788,35 @@ class LayerHandler:
             layer_subscript: string
                 Used in warnings and error messages to identify the layer via a subscript, eg: 'l' gets used as 'A_l', 'Z_l', etc.
         """
-        self.variables = variables
-        self.gradients = gradients
-        self.inputs = inputs
-        self.output = output
+        self._display_name = display_name
+        self._variables = variables
+        self._gradients = gradients
+        self._inputs = inputs
+        self._output = output
         if layer_subscript:
             self.subscript = f"_{layer_subscript}"
         else:
             self.subscript = ""
+
+    @property
+    def display_name(self):
+        return self._display_name
+
+    @property
+    def variables(self):
+        return self._variables
+
+    @property
+    def gradients(self):
+        return self._gradients
+
+    @property
+    def inputs(self):
+        return self._inputs
+
+    @property
+    def output(self):
+        return self._output
 
     def get_weights(self):
         """
@@ -880,12 +950,12 @@ class LayerHandler:
             equation = f"A{self.subscript} > 0"
             S_l = np.divide(A_l, Z_l, out=np.zeros_like(A_l), where=(Z_l > 0))
 
-        res = (S_l,)
+        res = [S_l]
         if return_equation:
-            res += (equation,)
+            res.append(equation)
         if return_note:
-            res += (note,)
-        return res
+            res.append(note)
+        return tuple(res) if len(res) > 1 else res[0]
 
     def calculate_dJdZ(self, dJdA_l, return_equation=False, return_note=False):
         """
@@ -910,12 +980,12 @@ class LayerHandler:
         dJdZ_l = np.multiply(dJdA_l, S_l)
         equation = f"dJdA{self.subscript} (.) S{self.subscript}"
 
-        res = (dJdZ_l,)
+        res = [dJdZ_l]
         if return_equation:
-            res += (equation,)
+            res.append(equation)
         if return_note:
-            res += (None,)
-        return res
+            res.append(None)
+        return tuple(res) if len(res) > 1 else res[0]
 
     def classify_dJdZ_calculation(self, dJdA_l, confidence):
         """
@@ -982,8 +1052,8 @@ class LayerHandler:
 
 
 class DenseLayerHandler(LayerHandler):
-    def __init__(self, model, variables, gradients, inputs, output, layer_subscript=None):
-        super(LayerHandler, self).__init__(model, variables, gradients, inputs, output, layer_subscript)
+    def __init__(self, display_name, variables, gradients, inputs, output, layer_subscript=None):
+        super(LayerHandler, self).__init__(display_name, variables, gradients, inputs, output, layer_subscript)
 
     def calculate_Z(self, return_equation=False, return_note=False):
         A_0 = self.get_input()
@@ -995,12 +1065,12 @@ class DenseLayerHandler(LayerHandler):
             Z_l = Z_l + b_l
             equation = f"A_0 . W{self.subscript} + b{self.subscript}"
 
-        res = (Z_l,)
+        res = [Z_l]
         if return_equation:
-            res += (equation,)
+            res.append(equation)
         if return_note:
-            res += (None,)
-        return res
+            res.append(None)
+        return tuple(res) if len(res) > 1 else res[0]
 
     def classify_Z_calculation(self, confidence):
         A_0 = self.get_input()
@@ -1013,12 +1083,12 @@ class DenseLayerHandler(LayerHandler):
         dJdW_l = np.matmul(A_0t, dJdZ_l)
         equation = f"A_0^T . dJ/dZ{self.subscript}"
 
-        res = (dJdW_l,)
+        res = [dJdW_l]
         if return_equation:
-            res += (equation,)
+            res.append(equation)
         if return_note:
-            res += (None,)
-        return res
+            res.append(None)
+        return tuple(res) if len(res) > 1 else res[0]
 
     def classify_dJdW_calculation(self, dJdZ_l, confidence):
         A_0 = self.get_input()
@@ -1050,10 +1120,10 @@ class DenseLayerHandler(LayerHandler):
         dJdZ_l = tf.linalg.matmul(A_0_inv, dJdW_l, transpose_a=True)
         dJdA_0 = tf.linalg.matmul(dJdZ_l, W_l, transpose_b=True)
 
-        res = (dJdA_0,)
+        res = [dJdA_0]
         if return_note:
-            res += (None,)
-        return res
+            res.append(None)
+        return tuple(res) if len(res) > 1 else res[0]
 
     def get_input(self):
         if self.inputs is None or len(self.inputs) == 0:
