@@ -362,7 +362,7 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
         terms: terms from matmul-like classification, with shape: value_shape + (terms,)
         mask: boolean mask against, with shape: value_shape
         input_names: names of left and right inputs, to be used in descriptions.
-            Defaults to "left input" and "right input" are used.
+            Defaults to using 'first input' and 'second input'.
         confidence: used to calculate thresholds for near-zero values in the resultant value tensor.
             For best results, supply the same confidence that was used when masking.
     Returns:
@@ -377,7 +377,7 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
     if input_names and len(input_names) != 2:
         raise ValueError(f"Must be exactly two input_names, got {len(input_names)}")
     if input_names is None:
-        input_names = ["left input", "right input"]
+        input_names = ['left input', 'right input']
 
     # determine threshold
     # - construct original output value
