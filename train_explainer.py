@@ -318,19 +318,25 @@ def explain_near_zero_gradients(layer_index: int,
     _explain_tensor("actual dJdW_l", target_layer_gradients)
 
 
-def describe_top_near_zero_explanandum(counts, sums=None, terms=None, *, mask=None, confidence=0.95):
+def describe_top_near_zero_explanandum(counts, sums=None, terms=None, *, mask=None, input_names=None, confidence=0.95):
     """
     Gets the single top explanandum from describe_near_zero_explanation(), if any.
     Args:
-      counts, sums, terms
-      mask
-      confidence:
-        Used to calculate thresholds for near-zero in the values.
+        counts: counts from matmul-like classification, with shape: value_shape + (terms,),
+            or supply tensor with (counts, sums, terms)
+        sums: counts from matmul-like classification, with shape: value_shape + (terms,)
+        terms: terms from matmul-like classification, with shape: value_shape + (terms,)
+        mask: boolean mask against, with shape: value_shape
+        input_names: names of left and right inputs, to be used in descriptions.
+            Defaults to using 'first input' and 'second input'.
+        confidence: used to calculate thresholds for near-zero values in the resultant value tensor.
+            For best results, supply the same confidence that was used when masking.
     Returns:
       - description - terse textual description of top explanandum, or None if no explanandum found
       - fraction - fraction of values that are at least partially explained by this explanandum, or None
     """
-    descriptions, fractions = describe_near_zero_explanation(counts, sums, terms, mask=mask, confidence=confidence)
+    descriptions, fractions = describe_near_zero_explanation(counts, sums, terms, mask=mask, input_names=input_names,
+                                                             confidence=confidence)
     if descriptions:
         return descriptions[0], fractions[0]
     else:
@@ -357,7 +363,8 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
       whole explanation for the entire output.
 
     Args:
-        counts: counts from matmul-like classification, with shape: value_shape + (terms,)
+        counts: counts from matmul-like classification, with shape: value_shape + (terms,),
+            or supply tensor with (counts, sums, terms)
         sums: counts from matmul-like classification, with shape: value_shape + (terms,)
         terms: terms from matmul-like classification, with shape: value_shape + (terms,)
         mask: boolean mask against, with shape: value_shape
@@ -446,14 +453,15 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
     return descriptions, fractions
 
 
-def describe_tensor_near_zero_explanation(counts, sums, *, mask=None, threshold=None, negatives_are_bad=False,
+def describe_tensor_near_zero_explanation(counts, sums=None, *, mask=None, threshold=None, negatives_are_bad=False,
                                           verbose=True):
     """
     Gets a terse description of the tensor in relation to near-zero values, and optionally also in relation
     to negative values.
     Similar in spirit to describe_near_zero_explanation() though the behaviour is somewhat different.
     Args:
-        counts: counts from tensor_classify(), with shape: value_shape + (terms,)
+        counts: counts from tensor_classify(), with shape: value_shape + (terms,),
+            or supply tensor with (counts, sums)
         sums: counts from tensor_classify(), with shape: value_shape + (terms,)
         mask: boolean mask against, with shape: value_shape
         threshold: indication of the threshold that was used for masking, used for display purposes only
