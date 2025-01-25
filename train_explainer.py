@@ -114,7 +114,7 @@ def explain_near_zero_gradients(layer_index: int,
                                 epoch=None, step=None,
                                 confidence: float = 0.99,
                                 threshold: float = None,
-                                verbose=True):
+                                verbose=False):
     # get model and identify inbound and outbound layers
     iteration = step if epoch is None else epoch
     model = gradients.model
@@ -185,12 +185,22 @@ def explain_near_zero_gradients(layer_index: int,
 
     # TODO if we're confident in our estimate of Z_l, we can more accurately calculate S_l without having to assume ReLU
     # estimate forward pass - activation function gradients (S_l)
-    # - original S_l = {1 if Z_l[ij] >= 0 else 0}
-    # - even assuming ReLU, we cannot identify Z_l[ij] < 0 vs Z_l[ij] = 0
-    # - so we assume A_l[ij] == 0 => Z_[ij] < 0, thus:
-    # - estimated S_l = {1 if A_l[ij] > 0 else 0}
     A_l = target_layer_activations
-    S_l = tf.cast(A_l > 0, tf.float32)
+    S_l_note = None
+    if Z_l is None:
+        # estimate S_l from A_l, assuming ReLU
+        # - original S_l = {1 if Z_l[ij] >= 0 else 0}
+        # - even assuming ReLU, we cannot identify Z_l[ij] < 0 vs Z_l[ij] = 0
+        # - so we assume A_l[ij] == 0 => Z_[ij] < 0, thus:
+        # - estimated S_l = {1 if A_l[ij] > 0 else 0}
+        S_l = tf.cast(A_l > 0, tf.float32)
+        S_l_note = "estimated S_l value from A_l, assuming ReLU"
+    else:
+        # calculate accurate S_l from Z_l
+        #   A_l = Z_l (.) S_l   -- element-wise
+        # so:
+        #   S_l = A_l / Z_l or assume 0.0 if A_l is zero (eg: compatible with sigmoid)
+        S_l = np.divide(A_l, Z_l, out=np.zeros_like(A_l), where=(Z_l > 0))
 
     # estimate backprop pass - backprop from next layer (dJ/dA_l)
     next_layers_backprop_gradients_list = []
@@ -209,54 +219,63 @@ def explain_near_zero_gradients(layer_index: int,
         print(f"{name}:")
         print(f"  shape:             {np.shape(tensor)} -> total values: {np.size(tensor)}")
         print(f"  summary:           {describe_tensor_near_zero_explanation(counts, sums, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)}")
-        print(f"  value percentiles: {quantiles} -> {tfp.stats.percentile(tensor, quantiles).numpy()}")
-        print(f"  PZN counts/means:  {me.summarise(counts, sums, show_percentages=True, show_means=True)}")
+        if verbose:
+            print(f"  value percentiles: {quantiles} -> {tfp.stats.percentile(tensor, quantiles).numpy()}")
+            print(f"  PZN counts/sums:   {me.summarise(counts, sums, show_percentages=False, show_means=False)}")
+            print(f"  PZN counts/means:  {me.summarise(counts, sums, show_percentages=True, show_means=True)}")
         if mask_name:
             print(f"  {(mask_name + ':'):19} {describe_tensor_near_zero_explanation(counts, sums, mask=mask, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)}")
+        if mask_name and verbose:
             print(f"  {(mask_name + ':'):19} {me.summarise(counts, sums, mask=mask, show_percentages=True, show_means=True)}")
 
     def _explain_combination(name, inputs, result, counts, sums, fixed_threshold=None):
         # note: has noteworthy level of zeros if exceed 1.1x the percent we'd expect from the confidence level alone.
         # That gives a little leeway for rounding errors.
         print(f"compute {name}:")
-        print(f"  inputs examined:   {inputs}")
+        print(f"  inputs examined:   {', '.join(inputs)}")
         mask, threshold = _mask_near_zero(result, confidence=confidence, fixed_threshold=fixed_threshold,
                                           return_threshold=True)
         orig_total = np.size(counts[..., 0])
         mask_total = np.sum(mask)
         fraction = mask_total / orig_total
         noteworthy = fraction > (1.1 * (1 - confidence))
-        description = f"{fraction * 100:.1f}% near-zero ({_format_threshold(threshold)})" if verbose else f"{fraction * 100:.1f}% near-zero"
         if noteworthy:
-            top_description, top_fraction = describe_top_near_zero_explanandum(counts, sums, mask=mask)
-            print(
-                f"  summary:           {description}, of which {top_fraction * 100:.1f}% are affected by {top_description}")
+            top_description, top_fraction = describe_top_near_zero_explanandum(counts, sums, input_names=inputs, mask=mask, threshold=threshold)
+            print(f"  summary:           {fraction * 100:.1f}% near-zero, of which {top_fraction * 100:.1f}% are affected by {top_description}")
         else:
-            print(f"  summary:           {description}")
+            print(f"  summary:           {fraction * 100:.1f}% near-zero")
         if verbose:
+            print(f"  PZN combinations:  {me.summarise(counts, sums, show_percentages=False, show_means=False)}")
             print(f"  PZN combinations:  {me.summarise(counts, sums, show_percentages=True, show_means=True)}")
 
-    def _explain_combination_near_zero(name, result, counts, sums, fixed_threshold=None):
+    def _explain_combination_near_zero(name, inputs, result, counts, sums, fixed_threshold=None):
+        if not verbose:
+            return  # skip whole section if not in verbose mode
         mask, threshold = _mask_near_zero(result, confidence=confidence, fixed_threshold=fixed_threshold,
                                           return_threshold=True)
         orig_total = np.size(counts[..., 0])
         mask_total = np.sum(mask)
-        top_description, top_fraction = describe_top_near_zero_explanandum(counts, sums, mask=mask)
         print(f"{name} {mask_total / orig_total * 100:.1f}% near zero ({_format_threshold(threshold)}):")
-
-        print(f"  Top explanation:   {top_fraction * 100:.1f}% affected by {top_description}")
+        print(f"  PZN combinations:  {me.summarise(counts, sums, mask=mask, show_percentages=False, show_means=False)}")
         print(f"  PZN combinations:  {me.summarise(counts, sums, mask=mask, show_percentages=True, show_means=True)}")
 
-        # TODO consider removing this, or replacing with the top-5 results from describe_top_near_zero_explanandum()
-        counts, sums, terms = me.filter_classifications(counts, sums)
-        count_groups, sum_groups, term_groups = me.group_classifications(counts, sums, terms, mask=mask)
-        count_groups, sum_groups, term_groups, coverage = me.filter_groups(count_groups, sum_groups, term_groups,
-                                                                           completeness=0.75, max_groups=10,
-                                                                           return_coverage=True)
-        desc = me.describe_groups(count_groups, sum_groups, term_groups, show_ranges=True)
-        for size, summary in zip(desc['sizes'], desc['summaries']):
-            print(f"  {size / mask_total * 100:.1f}% explained as (counts/sums): {summary}")
-        print(f"  (explains top most {coverage * 100:.1f}% of near-zero)")
+        # preferred detail - list of causal explanandums
+        descriptions, fractions = describe_near_zero_explanation(counts, sums, input_names=inputs, mask=mask, threshold=threshold)
+        if descriptions:
+            for description, fraction in zip(descriptions, fractions):
+                print(f"  {fraction*100:.1f}% affected by {description}")
+
+        # fall-back detailed description - filtered and grouped classifications
+        # (less visually pleasing, so only using as fallback)
+        if not descriptions:
+            counts, sums, terms = me.filter_classifications(counts, sums)
+            count_groups, sum_groups, term_groups = me.group_classifications(counts, sums, terms, mask=mask)
+            count_groups, sum_groups, term_groups, coverage = me.filter_groups(
+                count_groups, sum_groups, term_groups, completeness=0.75, max_groups=10, return_coverage=True)
+            desc = me.describe_groups(count_groups, sum_groups, term_groups, show_ranges=True)
+            for size, summary in zip(desc['sizes'], desc['summaries']):
+                print(f"  {size / mask_total * 100:.1f}% explained as (counts/sums): {summary}")
+            print(f"  (explains top most {coverage * 100:.1f}% of near-zero)")
 
     # explain context
     print()
@@ -270,7 +289,8 @@ def explain_near_zero_gradients(layer_index: int,
     print("  Z_l <- pre-activation output of target layer")
     print("  S_l <- effect of activation function as element-wise multiplier")
     print("  A_l <- output activation of target layer")
-    print("  PZN <- breakdown of values into (P)ositive, near-(Z)ero, or (N)egative")
+    if verbose:
+        print("  PZN <- breakdown of values into (P)ositive, near-(Z)ero, or (N)egative")
 
     # explain forward pass
     # - let A_0 be input activation to this layer (not necessarily the first layer input)
@@ -287,10 +307,12 @@ def explain_near_zero_gradients(layer_index: int,
         print(f"  Unable to infer")
     else:
         counts, sums = me.matmul_classify(A_0, W_l, confidence=confidence)
-        _explain_combination("Z_l = A_0 . W_l + b_l", "A_0, W_l", Z_l, counts, sums)
-        _explain_combination_near_zero("Z_l", Z_l, counts, sums)
+        _explain_combination("Z_l = A_0 . W_l + b_l", ['A_0', 'W_l'], Z_l, counts, sums)
+        _explain_combination_near_zero("Z_l", ['A_0', 'W_l'], Z_l, counts, sums)
         _explain_tensor("Z_l - pre-activation output", Z_l, negatives_are_bad=True)
-    _explain_tensor("S_l - activation function (assuming ReLU)", S_l)
+    _explain_tensor("S_l - activation function", S_l)
+    if S_l_note and verbose:
+      print(f"  note:              {S_l_note}")
     _explain_tensor("A_l - activation output from target layer", A_l)
 
     # explain backprop pass
@@ -302,19 +324,18 @@ def explain_near_zero_gradients(layer_index: int,
     for dJdA_l in next_layers_backprop_gradients_list:
         dJdZ_l = np.multiply(dJdA_l, S_l)
         counts, sums = me.multiply_classify(dJdA_l, S_l, confidence=confidence)
-        _explain_combination("dJ/dZ_l = dJ/dA_l x S_l (element-wise)", "dJ/dA_l, S_l", dJdZ_l, counts, sums)
+        _explain_combination("dJ/dZ_l = dJ/dA_l x S_l (element-wise)", ['dJ/dA_l', 'S_l'], dJdZ_l, counts, sums)
         print(f"  note:              using estimated dJ/dA_l value")
-        _explain_combination_near_zero("dJdZ_l", dJdZ_l, counts, sums)
+        _explain_combination_near_zero("dJdZ_l", ['dJ/dA_l', 'S_l'], dJdZ_l, counts, sums)
         _explain_tensor("dJ/dZ_l", dJdZ_l)
     for dJdA_l in next_layers_backprop_gradients_list:
         A_0t = tf.transpose(A_0)
         dJdZ_l = np.multiply(dJdA_l, S_l)  # redoing from above
         dJdW_l = np.matmul(A_0t, dJdZ_l)
         counts, sums = me.matmul_classify(A_0t, dJdZ_l, confidence=confidence)
-        _explain_combination("dJ/dW_l = A_0^T . dJ/dZ_l", "A_0^T, dJ/dZ_l", target_layer_gradients, counts, sums,
+        _explain_combination("dJ/dW_l = A_0^T . dJ/dZ_l", ['A_0^T', 'dJ/dZ_l'], target_layer_gradients, counts, sums,
                              threshold)
-        _explain_combination_near_zero("dJdW_l", target_layer_gradients, counts, sums, threshold)
-        # _explain_tensor("computed dJdW_l", dJdW_l)  # tends to be very close to those of actual so no need to show
+        _explain_combination_near_zero("dJdW_l", ['A_0^T', 'dJ/dZ_l'], target_layer_gradients, counts, sums, threshold)
     _explain_tensor("actual dJdW_l", target_layer_gradients)
 
 
