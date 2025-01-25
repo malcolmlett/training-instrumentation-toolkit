@@ -318,7 +318,8 @@ def explain_near_zero_gradients(layer_index: int,
     _explain_tensor("actual dJdW_l", target_layer_gradients)
 
 
-def describe_top_near_zero_explanandum(counts, sums=None, terms=None, *, mask=None, input_names=None, confidence=0.95):
+def describe_top_near_zero_explanandum(counts, sums=None, terms=None, *, mask=None, input_names=None, confidence=0.95,
+                                       threshold=None):
     """
     Gets the single top explanandum from describe_near_zero_explanation(), if any.
     Args:
@@ -331,19 +332,22 @@ def describe_top_near_zero_explanandum(counts, sums=None, terms=None, *, mask=No
             Defaults to using 'first input' and 'second input'.
         confidence: used to calculate thresholds for near-zero values in the resultant value tensor.
             For best results, supply the same confidence that was used when masking.
+            Alternatively, supply threshold.
+        threshold: fixed threshold to use for determining near-zero values in the resultant value tensor.
     Returns:
       - description - terse textual description of top explanandum, or None if no explanandum found
       - fraction - fraction of values that are at least partially explained by this explanandum, or None
     """
     descriptions, fractions = describe_near_zero_explanation(counts, sums, terms, mask=mask, input_names=input_names,
-                                                             confidence=confidence)
+                                                             confidence=confidence, threshold=threshold)
     if descriptions:
         return descriptions[0], fractions[0]
     else:
         return None, None
 
 
-def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, input_names=None, confidence=0.95):
+def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, input_names=None, confidence=0.95,
+                                   threshold=None):
     """
     Tries to explain the cause for near-zero values after a matmul-like operation.
     The explanation is given in the form of a collection of "explanandums" - individual partial explanations
@@ -356,7 +360,8 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
     Results are not mutually exclusive.
 
     Generally you will supply a mask to pick the values being explained, otherwise it assumes
-    all output values were near-zero.
+    all output values were near-zero. Note that the confidence/threshold args only used for some
+    internal logic, not for automatic masking.
 
     Terminology note:
       Each of the common causes is a possible "explanandum" - a part of the
@@ -372,12 +377,15 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
             Defaults to using 'first input' and 'second input'.
         confidence: used to calculate thresholds for near-zero values in the resultant value tensor.
             For best results, supply the same confidence that was used when masking.
+            Alternatively, supply threshold.
+        threshold: fixed threshold to use for determining near-zero values in the resultant value tensor.
     Returns:
         - descriptions - list of terse textual descriptions, one for each explanandum
         - fractions - fraction of values that are at least partially explained by each description.
             Same length as descriptions.
     """
     # parse args
+    orig_counts, orig_sums, orig_terms = counts, sums, terms
     counts, sums, terms_list = me.standardize(counts, sums, terms, mask=mask)
     if len(terms_list) != 9:
         raise ValueError("Not a matmul-like classification")
@@ -385,13 +393,15 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
         raise ValueError(f"Must be exactly two input_names, got {len(input_names)}")
     if input_names is None:
         input_names = ['first input', 'second input']
+    total_count = np.sum(counts)
 
     # determine threshold
-    # - construct original output value
+    # - construct original output value before masking
     # - get percentile
-    value = np.sum(sums, axis=-1)
-    threshold = tfp.stats.percentile(tf.abs(value), 100 * (1 - confidence), interpolation='linear').numpy()
-    total_count = np.sum(counts)
+    if threshold is None:
+        orig_counts, orig_sums, orig_terms = me.standardize(orig_counts, orig_sums, orig_terms)
+        value = np.sum(orig_sums, axis=-1)
+        threshold = tfp.stats.percentile(tf.abs(value), 100 * (1 - confidence), interpolation='linear').numpy()
 
     # Logic:
     # Considers how different combinations of terms can contribute to the outcome.
