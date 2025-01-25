@@ -208,11 +208,11 @@ def explain_near_zero_gradients(layer_index: int,
         counts, sums, threshold = me.tensor_classify(tensor, confidence=confidence, return_threshold=True)
         print(f"{name}:")
         print(f"  shape:             {np.shape(tensor)} -> total values: {np.size(tensor)}")
-        print(f"  summary:           {_describe_tensor_explanandum(counts, sums, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)}")
+        print(f"  summary:           {describe_tensor_near_zero_explanation(counts, sums, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)}")
         print(f"  value percentiles: {quantiles} -> {tfp.stats.percentile(tensor, quantiles).numpy()}")
         print(f"  PZN counts/means:  {me.summarise(counts, sums, show_percentages=True, show_means=True)}")
         if mask_name:
-            print(f"  {(mask_name + ':'):19} {_describe_tensor_explanandum(counts, sums, mask=mask, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)}")
+            print(f"  {(mask_name + ':'):19} {describe_tensor_near_zero_explanation(counts, sums, mask=mask, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)}")
             print(f"  {(mask_name + ':'):19} {me.summarise(counts, sums, mask=mask, show_percentages=True, show_means=True)}")
 
     def _explain_combination(name, inputs, result, counts, sums, fixed_threshold=None):
@@ -331,7 +331,7 @@ def describe_top_near_zero_explanandum(counts, sums=None, terms=None, *, mask=No
       - fraction - fraction of values that are at least partially explained by this explanandum, or None
     """
     descriptions, fractions = describe_near_zero_explanation(counts, sums, terms, mask=mask, confidence=confidence)
-    if descriptions is not None:
+    if descriptions:
         return descriptions[0], fractions[0]
     else:
         return None, None
@@ -357,10 +357,11 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
       whole explanation for the entire output.
 
     Args:
-      counts, sums, terms
-      mask
-      confidence:
-        Used to calculate thresholds for near-zero in the values.
+        counts: counts from matmul-like classification, with shape: value_shape + (terms,)
+        sums: counts from matmul-like classification, with shape: value_shape + (terms,)
+        terms: terms from matmul-like classification, with shape: value_shape + (terms,)
+        mask: boolean mask against, with shape: value_shape
+        confidence: used to calculate thresholds for near-zero values in the resultant value tensor
     Returns:
         - descriptions - list of terse textual descriptions, one for each explanandum
         - fractions - fraction of values that are at least partially explained by each description.
@@ -368,6 +369,8 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
     """
     # parse args
     counts, sums, terms_list = me.standardize(counts, sums, terms, mask=mask)
+    if len(terms_list) != 9:
+        raise ValueError("Not a matmul-like classification")
 
     # determine threshold
     # - construct original output value
@@ -384,12 +387,10 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
     #      P(outcome,explanandum)
     #   So we normalize via:
     #      P(outcome|explanandum) = P(outcome|explanandum) / P(explanandum)
-    #   And then we arg-max over the explanandums to find the one that leads to the highest P(outcome|explandum)
-    def _term_indices(terms_list, wanted):
-        return [terms_list.index(term) for term in wanted]
-
+    #   And then we arg-max over the explanandums to find the one that leads to the highest P(outcome|explanandum)
     def _zero_effect(selected_terms, description):
-        count = np.sum(counts[..., _term_indices(terms_list, selected_terms)])
+        term_indices = [terms_list.index(term) for term in selected_terms]
+        count = np.sum(counts[..., term_indices])
         fraction = count / total_count
         strength = count / len(selected_terms)
         return fraction, strength, description
@@ -398,13 +399,14 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
         # search for instances where the sum over the terms is near-zero then sum up the counts over just those
         # matching instances. note: when computing strength, don't need to scale by number of hits because that's
         # already achieved by masking against the source_count
-        pos_neg_value = np.sum(sums[..., _term_indices(terms_list, selected_terms)], axis=-1)
-        pos_neg_count = np.sum(counts[..., _term_indices(terms_list, selected_terms)], axis=-1)
-        mask = (np.abs(pos_neg_value) < threshold) | (pos_neg_value == 0)  # shape: value_shape x bool
-        source_count = np.sum(pos_neg_count * mask)
+        term_indices = [terms_list.index(term) for term in selected_terms]
+        pos_neg_value = np.sum(sums[..., term_indices], axis=-1)
+        pos_neg_count = np.sum(counts[..., term_indices], axis=-1)
+        res_mask = (np.abs(pos_neg_value) < threshold) | (pos_neg_value == 0)  # shape: value_shape x bool
+        count = np.sum(pos_neg_count * res_mask)
 
-        fraction = source_count / total_count
-        strength = source_count / len(selected_terms)
+        fraction = count / total_count
+        strength = count / len(selected_terms)
         return fraction, strength, description
 
     # measure effect of each individual explanandum
@@ -431,6 +433,49 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
     descriptions = [description for fraction, strength, description in explanandums]
     fractions = [fraction for fraction, strength, description in explanandums]
     return descriptions, fractions
+
+
+def describe_tensor_near_zero_explanation(counts, sums, *, mask=None, threshold=None, negatives_are_bad=False,
+                                          verbose=True):
+    """
+    Gets a terse description of the tensor in relation to near-zero values, and optionally also in relation
+    to negative values.
+    Similar in spirit to describe_near_zero_explanation() though the behaviour is somewhat different.
+    Args:
+        counts: counts from tensor_classify(), with shape: value_shape + (terms,)
+        sums: counts from tensor_classify(), with shape: value_shape + (terms,)
+        mask: boolean mask against, with shape: value_shape
+        threshold: indication of the threshold that was used for masking, used for display purposes only
+        negatives_are_bad: whether negative values are equivalent to zeros
+        verbose: whether to include extra working details in the description
+    Returns:
+        textual description
+    """
+    # parse args
+    counts, sums, _ = me.standardize(counts, sums, mask=mask)
+    if counts.shape[-1] != 3:
+        raise ValueError("Not a tensor classification")
+
+    # compute details for zeros and negatives
+    zero_fraction = np.sum(counts[..., 1]) / np.sum(counts)
+    neg_fraction = 0.0
+    if negatives_are_bad:
+        # strictly include all negatives, even those close to zero
+        value = np.sum(sums, axis=-1)
+        neg_fraction = np.sum(value < 0) / np.size(value)
+
+    if verbose and threshold:
+        near_zero_description = f"{zero_fraction * 100:.1f}% near-zero ({_format_threshold(threshold)})"
+    else:
+        near_zero_description = f"{zero_fraction * 100:.1f}% near-zero"
+
+    if zero_fraction > neg_fraction:
+        return near_zero_description
+    else:
+        if verbose:
+            return f"{neg_fraction * 100:.1f}% negative, {near_zero_description}"
+        else:
+            return f"{neg_fraction * 100:.1f}% negative"
 
 
 def _find_inbound_layers(model, layer, return_type='layer'):
@@ -603,38 +648,6 @@ def _split_by_largest(tensors, labels=None):
     biggest_t_label = labels[biggest_idx]
     rest_labels = [labels[t_idx] for t_idx, t in enumerate(labels) if t_idx != biggest_idx]
     return biggest_t, rest, biggest_t_label, rest_labels
-
-
-# TODO merge or replace this over _describe_tensor_near_zero_explanandum
-def _describe_tensor_explanandum(counts, sums, *, threshold, mask=None, negatives_are_bad=False, verbose=True):
-    """
-    Internal function for explain_near_zero_gradients()
-    """
-    counts, sums, _ = me.standardize(counts, sums, mask=mask)
-    zero_fraction = np.sum(counts[..., 1]) / np.sum(counts)
-    neg_fraction = 0.0
-    if negatives_are_bad:
-        # strictly include all negatives, even those close to zero
-        value = np.sum(sums, axis=-1)
-        neg_fraction = np.sum(value < 0) / np.size(value)
-    neg_description = f"{zero_fraction * 100:.1f}% near-zero ({_format_threshold(threshold)})" \
-        if verbose else f"{zero_fraction * 100:.1f}% near-zero"
-    if zero_fraction > neg_fraction:
-        return neg_description
-    else:
-        return f"{neg_fraction * 100:.1f}% negative, {neg_description}" if verbose else f"{neg_fraction * 100:.1f}% negative"
-
-
-def _describe_tensor_near_zero_explanandum(counts, sums, terms_list):
-    """
-    Internal function for describe_top_near_zero_explanandum().
-    Currently only considers a single explanandum: that some of the values are near-zero.
-    """
-    term_index = terms_list.index('Z')
-    total_count = np.sum(counts)
-    count_zero = np.sum(counts[..., term_index])
-    fraction = count_zero / total_count
-    return f"{fraction * 100:.1f}% near-zero", fraction
 
 
 class UnsupportedNetworkError(Exception):
