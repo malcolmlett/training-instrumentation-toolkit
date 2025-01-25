@@ -5,74 +5,6 @@ import train_observability_toolkit as tot
 import matmul_explainer as me
 
 
-def _find_inbound_layers(model, layer, return_type='layer'):
-    """
-    :return_type: one of 'layer', 'index'
-    """
-    if return_type not in ['layer', 'index']:
-        raise ValueError(f"return_type must be one of 'layer', 'index', got: {return_type}")
-    layers = [_find_layer_by_node(model, node, return_type) for inbound in layer._inbound_nodes for node in
-              inbound.parent_nodes]
-    return [node for node in layers if node is not None]
-
-
-def _find_outbound_layers(model, layer, return_type='layer'):
-    """
-    :return_type: one of 'layer', 'index'
-    """
-    if return_type not in ['layer', 'index']:
-        raise ValueError(f"return_type must be one of 'layer', 'index', got: {return_type}")
-    layers = [_find_layer_by_node(model, node, return_type) for node in layer._outbound_nodes]
-    return [node for node in layers if node is not None]
-
-
-def _find_layer_by_node(model, node, return_type='layer'):
-    """
-    :return_type: one of 'layer', 'index'
-    """
-    for l_idx, layer in enumerate(model.layers):
-        if node in layer._inbound_nodes:
-            return layer if return_type == 'layer' else l_idx
-    return None
-
-
-def _split_by_largest(tensors, labels=None):
-    """
-    Splits the given list of tensors into the single largest tensor, and the rest.
-    Useful as a heuristic for identifying the main weights tensor in a layer and the rest, without assuming
-    a particular order.
-    If there are multiple largest tensors, the first one is returned.
-
-    Optionally also correspondingly splits tensor labels.
-
-    Args:
-      tensors: list of tensors to split
-      labels: optional, list of labels corresponding to the tensors, must be same size as tensors
-
-    Returns:
-      largest_tensor, [rest]                                       -- if labels is None
-      largest_tensor, [rest], largest_tensor_label, [rest labels]  -- if labels is not None
-    """
-    biggest_t, biggest_idx = None, None
-
-    # identify split
-    for t_idx, t in enumerate(tensors):
-        if t is not None:
-            if biggest_t is None or tf.size(t) > tf.size(biggest_t):
-                biggest_t = t
-                biggest_idx = t_idx
-
-    # split tensors
-    rest = [t for t_idx, t in enumerate(tensors) if t_idx != biggest_idx]
-    if labels is None:
-        return biggest_t, rest
-
-    # split labels
-    biggest_t_label = labels[biggest_idx]
-    rest_labels = [labels[t_idx] for t_idx, t in enumerate(labels) if t_idx != biggest_idx]
-    return biggest_t, rest, biggest_t_label, rest_labels
-
-
 def explain_near_zero_gradients(layer_index: int,
                                 gradients: tot.GradientHistoryCallback,
                                 activity: tot.ActivityHistoryCallback,
@@ -247,6 +179,74 @@ def describe_top_near_zero_explanandum(counts, sums=None, terms=None, mask=None,
         return _describe_tensor_near_zero_explanandum(counts, sums, terms_list)
     else:
         return _describe_matmul_nero_zero_explanandum(counts, sums, terms_list, threshold)
+
+
+def _find_inbound_layers(model, layer, return_type='layer'):
+    """
+    :return_type: one of 'layer', 'index'
+    """
+    if return_type not in ['layer', 'index']:
+        raise ValueError(f"return_type must be one of 'layer', 'index', got: {return_type}")
+    layers = [_find_layer_by_node(model, node, return_type) for inbound in layer._inbound_nodes for node in
+              inbound.parent_nodes]
+    return [node for node in layers if node is not None]
+
+
+def _find_outbound_layers(model, layer, return_type='layer'):
+    """
+    :return_type: one of 'layer', 'index'
+    """
+    if return_type not in ['layer', 'index']:
+        raise ValueError(f"return_type must be one of 'layer', 'index', got: {return_type}")
+    layers = [_find_layer_by_node(model, node, return_type) for node in layer._outbound_nodes]
+    return [node for node in layers if node is not None]
+
+
+def _find_layer_by_node(model, node, return_type='layer'):
+    """
+    :return_type: one of 'layer', 'index'
+    """
+    for l_idx, layer in enumerate(model.layers):
+        if node in layer._inbound_nodes:
+            return layer if return_type == 'layer' else l_idx
+    return None
+
+
+def _split_by_largest(tensors, labels=None):
+    """
+    Splits the given list of tensors into the single largest tensor, and the rest.
+    Useful as a heuristic for identifying the main weights tensor in a layer and the rest, without assuming
+    a particular order.
+    If there are multiple largest tensors, the first one is returned.
+
+    Optionally also correspondingly splits tensor labels.
+
+    Args:
+      tensors: list of tensors to split
+      labels: optional, list of labels corresponding to the tensors, must be same size as tensors
+
+    Returns:
+      largest_tensor, [rest]                                       -- if labels is None
+      largest_tensor, [rest], largest_tensor_label, [rest labels]  -- if labels is not None
+    """
+    biggest_t, biggest_idx = None, None
+
+    # identify split
+    for t_idx, t in enumerate(tensors):
+        if t is not None:
+            if biggest_t is None or tf.size(t) > tf.size(biggest_t):
+                biggest_t = t
+                biggest_idx = t_idx
+
+    # split tensors
+    rest = [t for t_idx, t in enumerate(tensors) if t_idx != biggest_idx]
+    if labels is None:
+        return biggest_t, rest
+
+    # split labels
+    biggest_t_label = labels[biggest_idx]
+    rest_labels = [labels[t_idx] for t_idx, t in enumerate(labels) if t_idx != biggest_idx]
+    return biggest_t, rest, biggest_t_label, rest_labels
 
 
 def _describe_tensor_near_zero_explanandum(counts, sums, terms_list):
