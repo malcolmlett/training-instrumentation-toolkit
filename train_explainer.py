@@ -343,26 +343,6 @@ def explain_near_zero_gradients(layer_index: int,
     _explain_tensor("dJ/dW_l", dJdW_l)
 
 
-def _join_notes(*args):
-    """
-    Takes a list that might have None entries, filters on non-None values, then joins into a single
-    comma separated string.
-    Args:
-        *args: Variable number of arguments (strings or lists of strings).
-    Returns:
-        single text
-    """
-    flat = []
-    for arg in args:
-        if isinstance(arg, list):
-            for item in arg:
-                if item is not None:
-                    flat.append(item)
-        elif arg is not None:
-            flat.append(arg)
-    return ', '.join(flat)
-
-
 def describe_top_near_zero_explanandum(counts, sums=None, terms=None, *, mask=None, input_names=None, confidence=0.95,
                                        threshold=None):
     """
