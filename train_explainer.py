@@ -377,7 +377,7 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
     if input_names and len(input_names) != 2:
         raise ValueError(f"Must be exactly two input_names, got {len(input_names)}")
     if input_names is None:
-        input_names = ['left input', 'right input']
+        input_names = ['first input', 'second input']
 
     # determine threshold
     # - construct original output value
