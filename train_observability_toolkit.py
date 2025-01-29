@@ -21,7 +21,7 @@ class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
     """
 
     def __init__(self, display_interval=None, display_total=10):
-        super(LessVerboseProgressLogger, self).__init__()
+        super().__init__()
         self.display_interval = display_interval
         self.display_total = display_total
         self.epoch_count = None
@@ -355,10 +355,10 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             trainable_only: bool. Whether to only include stats for trainable variables, or all variables otherwise.
 
             collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
-              If omitted, this callback collects nothing (in the future it may collect stats).
+              If omitted, this callback collects only stats.
               See _normalize_collection_sets_for_variables() for format details.
         """
-        super(VariableHistoryCallback, self).__init__(**kwargs)
+        super().__init__(**kwargs)
         self.per_step = per_step
         self.before_updates = before_updates
         self.magnitudes = magnitudes
@@ -528,6 +528,7 @@ class GradientHistoryCallback(BaseGradientCallback):
     """
     Custom tot.fit() gradient callback that captures statistics across the gradients during training.
     Optionally also captures selected raw gradients.
+    Only works for normal gradients of trainable variables.
 
     Other properties:
         epochs: list of int. Epoch numbers correlated to captured gradients/gradient-stats
@@ -551,10 +552,10 @@ class GradientHistoryCallback(BaseGradientCallback):
             magnitudes: whether to collect stats on gradient magnitudes, or on their raw values (default).
 
             collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
-              If omitted, this callback collects nothing (in the future it may collect stats).
+              If omitted, this callback collects only stats.
               See _normalize_collection_sets_for_variables() for format details.
         """
-        super(GradientHistoryCallback, self).__init__()
+        super().__init__()
         self.per_step = per_step
         self.magnitudes = magnitudes
         self.collection_sets = collection_sets
@@ -750,6 +751,205 @@ class GradientHistoryCallback(BaseGradientCallback):
         plot_gradient_history(self)
 
 
+class LayerOutputGradientHistoryCallback(BaseGradientCallback):
+    """
+    Custom tot.fit() gradient callback that captures statistics across the layer output gradients
+    during training.
+    Optionally also captures selected raw gradients.
+
+    This is a mirror of `GradientHistoryCallback` but for layer outputs.
+
+    Other properties:
+        epochs: list of int. Epoch numbers correlated to captured gradients/gradient-stats
+            (only populated if verbose == 0)
+        steps: list of int. Step numbers correlated to captured gradients/gradient-stats
+            (only populated if verbose > 0)
+        model_stats: dict of np-arrays. Keys list out different stats, eg: mean, min, max, std
+        gradient_stats: list of dict of np-arrays. One list item for each gradient.
+    """
+
+    def __init__(self, per_step=False, magnitudes=False, collection_sets=None, **kwargs):
+        """
+        Args:
+            per_step: bool. Whether to collect per-step stats and raw values, or per-epoch otherwise.
+                By default, data is accumulated per-epoch, and an 'epochs' list is available
+                that tracks the display indices of each sample.
+                If per-step is set, then a `steps` list is available instead, and activity
+                is collected on each update step.
+                The same applies to layer output capture if enabled.
+
+            magnitudes: whether to collect stats on gradient magnitudes, or on their raw values (default).
+
+            collection_sets: list of dicts. Fine-grained control over how data is collected across the output gradients.
+              If omitted, this callback collects only stats.
+              See _normalize_collection_sets_for_layers() for format details.
+        """
+        super().__init__()
+        self.per_step = per_step
+        self.magnitudes = magnitudes
+        self.collection_sets = collection_sets
+
+        # results variable creation
+        if per_step:
+            self.steps = []
+        else:
+            self.epochs = []
+        self.model_stats = None
+        self.gradient_stats = []  # initially list (by variable) of list (by iteration) of tensors
+        self._gradient_values = None
+
+        # internal tracking
+        self._epoch = 0
+        self._filtered_value_layer_indices = None
+        self._gradient_stats_quantiles = [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
+
+    @property
+    def needs_output_gradients(self):
+        return True
+
+    @property
+    def collected_gradient_stats(self):
+        """
+        Gets stats against each gradient, omitting any gradient that have no collected stats.
+        Use collected_gradient_stats_indices() to identify which gradients are included.
+        """
+        return [stats for stats in self.gradient_stats if stats is not None]
+
+    @property
+    def collected_gradient_stats_indices(self):
+        """
+        Indices of gradients for which stats are returned by collected_gradient_stats.
+        Indices are as per the layer's position in model.layers.
+        """
+        return [idx for idx, stats in enumerate(self.gradient_stats) if stats is not None]
+
+    @property
+    def gradients(self):
+        """
+        Gets a list corresponding to all layers, with lists of collected
+        values for those being collected and Nones for the rest.
+        The order and size of the returned list corresponds exactly to that returned
+        by model.layers.
+
+        Returns:
+            list (by model.layers) of list (by step/epoch) of gradient tensors.
+            None if variable capturing not enabled.
+        """
+        return self._gradient_values
+
+    @property
+    def collected_gradients(self):
+        """
+        Gets the list of collected gradients, containing only those that are collected.
+        The indices of the returned gradients relative to the original model can only be
+        determined via collected_gradient_indices().
+
+        Returns:
+            list (by captured gradient) of list (by step/epoch) of gradient tensors.
+            None if variable capturing not enabled.
+        """
+        if self._gradient_values is not None:
+            return [var_list for var_list in self._gradient_values if var_list is not None]
+        else:
+            return None
+
+    @property
+    def collected_gradient_indices(self):
+        """
+        Gets the indices of layers returned by collected_gradients() as they
+        were on the original model and returned by model.layers.
+        """
+        if self._filtered_value_layer_indices is not None:
+            return self._filtered_value_layer_indices
+        else:
+            return None
+
+    def on_train_begin(self):
+        """
+        Initialises tracking, now that we know the model and number of epochs and steps per epoch.
+        """
+        # init stats
+        filtered_stats_variable_indices = [_index_by_identity(self.model.variables, var)
+                                           for var in self.model.trainable_variables]
+        self.gradient_stats = [[] if var_idx in filtered_stats_variable_indices
+                               else None for var_idx in range(len(self.model.variables))]
+
+        # expand collection_sets and initialise gradient storages
+        # (TODO also prepare slicing rules)
+        if self.collection_sets:
+            self.collection_sets = _normalize_collection_sets_for_layers(self.model, self.collection_sets)
+            self._filtered_value_layer_indices = [index for collection_set in self.collection_sets
+                                                  for index in collection_set['layer_indices']]
+            self._gradient_values = [[] if l_idx in self._filtered_value_layer_indices else None
+                                     for l_idx in range(len(self.model.layers))]
+
+    def on_train_end(self):
+        """
+        Cleans up tracking, and converts some things to numpy arrays for easier consumption.
+        High-level indices and stats are all converted to numpy.
+        Raw values are retained as TF values.
+        """
+        if self.per_step:
+            self.steps = np.array(self.steps)
+        else:
+            self.epochs = np.array(self.epochs)
+
+        # convert per-variable stats
+        # - from: list (by var) of list (by iteration) of tensor
+        # - to:   list (by var) of pd-dataframe: iterations x quartiles
+        for var_idx in range(len(self.gradient_stats)):
+            if self.gradient_stats[var_idx] is not None:
+                table = [stats.numpy() for stats in self.gradient_stats[var_idx]]
+                df = pd.DataFrame(table, columns=self._gradient_stats_quantiles)
+                self.gradient_stats[var_idx] = df
+
+        # calculate global model stats
+        self.model_stats = compute_scale_distribution_across_stats_list(self.gradient_stats, scale_quantile=75)
+
+    def on_epoch_begin(self, epoch, logs=None):
+        """
+        Just tracks the current epoch number
+        """
+        self._epoch = epoch
+
+    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations=None, output_gradients=None):
+        """
+        Collects gradient stats and raw gradients after each epoch, if configured.
+        """
+        if not self.per_step:
+            self.epochs.append(epoch)
+            self._collect_stats(output_gradients)
+            self._collect_raw_values(output_gradients)
+
+    def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations=None, output_gradients=None):
+        """
+        Collects gradient stats and raw gradients after each update step, if configured.
+        """
+        # collect stats at each training step
+        if self.per_step:
+            step = self.params['steps'] * self._epoch + batch
+            self.steps.append(step)
+            self._collect_stats(output_gradients)
+            self._collect_raw_values(output_gradients)
+
+    def _collect_stats(self, gradients):
+        # compute stats for each individual layer
+        for l_idx, stat_list in enumerate(self.gradient_stats):
+            if stat_list is not None:
+                stats_tensor = _compute_percentile_stats(
+                    gradients[l_idx],
+                    quartiles=self._gradient_stats_quantiles,
+                    magnitudes=self.magnitudes)
+                stat_list.append(stats_tensor)
+
+    def _collect_raw_values(self, gradients):
+        # TODO do slicing
+        if self._gradient_values:
+            for l_idx, val_list in enumerate(self._gradient_values):
+                if val_list is not None:
+                    val_list.append(gradients[l_idx])
+
+
 class ActivityHistoryCallback(BaseGradientCallback):
     """
     Custom tot.fit() gradient callback function that collects unit activation rates during training.
@@ -803,10 +1003,10 @@ class ActivityHistoryCallback(BaseGradientCallback):
             magnitudes: whether to collect stats on gradient magnitudes (default), or on their raw values.
 
             collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
-              If omitted, this callback collects nothing (in the future it may collect stats).
+              If omitted, this callback collects only stats.
               See _normalize_collection_sets_for_variables() for format details.
         """
-        super(ActivityHistoryCallback, self).__init__()
+        super().__init__()
         self.per_step = per_step
         self.magnitudes = magnitudes
         self.collection_sets = collection_sets
@@ -1104,7 +1304,7 @@ class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
             batch_size: int
                 Must be supplied in order to apply to dataset if not already batched.
         """
-        super(ActivityRateMeasuringCallback, self).__init__(**kwargs)
+        super().__init__(**kwargs)
         self.x = x
         self.interval = interval
         self.batch_size = batch_size
@@ -1539,8 +1739,8 @@ def compute_scale_distribution_across_stats_list(stats_dataframes, scale_quantil
     Args:
         stats_dataframes: list of pandas dataframes of shape (iterations, quantiles)
         scale_quantile: the quantile used as a proxy for the "scale" of the typical values.
-            Must be present within the columns of the dataframe.
-            Its opposite (100-scale-quantile) must also be present.
+            Both this quantile and its opposite (100 - scale_quantile) must be present within the columns of
+            the dataframe.
         quantiles: set of quantiles to return in final result.
     Returns:
         pandas dataframe with shape (iterations, quantiles)
