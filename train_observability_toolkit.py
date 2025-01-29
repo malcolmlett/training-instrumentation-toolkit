@@ -99,9 +99,7 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
         gradient_callback.set_params({'epochs': epochs, 'steps': len(dataset)})
         gradient_callback.set_model(model)
 
-    needs_output_gradients = True
-    #for gradient_callback in gradient_callbacks:
-    #    needs_output_gradients = needs_output_gradients and gradient_callback.needs_output_gradients()
+    needs_output_gradients = any(cb.needs_output_gradients for cb in gradient_callbacks)
 
     # prepare model for layer output collection
     # (original model output(s) will be first entry of new outputs array, it will have single tensor or list
@@ -150,13 +148,20 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
                     loss=loss,
                     gradients=trainable_gradients,
                     trainable_variables=model.trainable_variables,
-                    activations=activations)
+                    activations=activations,
+                    output_gradients=output_gradients if gradient_callback.needs_output_gradients else None)
 
         # end of epoch
         dur = (tf.timestamp() - start).numpy()
         callbacks.on_epoch_end(epoch, logs)  # should be passing loss and mse
         for gradient_callback in gradient_callbacks:
-            gradient_callback.on_epoch_end(epoch, loss, trainable_gradients, model.trainable_variables, activations)
+            gradient_callback.on_epoch_end(
+                epoch=epoch,
+                loss=loss,
+                gradients=trainable_gradients,
+                trainable_variables=model.trainable_variables,
+                activations=activations,
+                output_gradients=output_gradients if gradient_callback.needs_output_gradients else None)
         metric_str = ''
         for k in logs.keys():
             metric_str += f" - {k}: {logs[k]:.3f}"
