@@ -99,6 +99,10 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
         gradient_callback.set_params({'epochs': epochs, 'steps': len(dataset)})
         gradient_callback.set_model(model)
 
+    needs_output_gradients = True
+    #for gradient_callback in gradient_callbacks:
+    #    needs_output_gradients = needs_output_gradients and gradient_callback.needs_output_gradients()
+
     # prepare model for layer output collection
     # (original model output(s) will be first entry of new outputs array, it will have single tensor or list
     # accordingly)
@@ -115,7 +119,8 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
     # train
     logs = {}  # holds latest value at any given moment in time
     loss = None
-    gradients = None
+    trainable_gradients = None
+    output_gradients = None
     activations = None
     callbacks.on_train_begin()
     for gradient_callback in gradient_callbacks:
@@ -133,19 +138,25 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
             for gradient_callback in gradient_callbacks:
                 gradient_callback.on_train_batch_begin(step)
 
-            loss, metrics, gradients, activations = train_step_fn(model, monitoring_model, x, y, sample_weight)
+            loss, metrics, trainable_gradients, output_gradients, activations = train_step_fn(
+                model, monitoring_model, x, y, sample_weight, needs_output_gradients)
 
             logs = metrics
             logs['loss'] = loss.numpy()
             callbacks.on_train_batch_end(step, logs)
             for gradient_callback in gradient_callbacks:
-                gradient_callback.on_train_batch_end(step, loss, gradients, model.trainable_variables, activations)
+                gradient_callback.on_train_batch_end(
+                    batch=step,
+                    loss=loss,
+                    gradients=trainable_gradients,
+                    trainable_variables=model.trainable_variables,
+                    activations=activations)
 
         # end of epoch
         dur = (tf.timestamp() - start).numpy()
         callbacks.on_epoch_end(epoch, logs)  # should be passing loss and mse
         for gradient_callback in gradient_callbacks:
-            gradient_callback.on_epoch_end(epoch, loss, gradients, model.trainable_variables, activations)
+            gradient_callback.on_epoch_end(epoch, loss, trainable_gradients, model.trainable_variables, activations)
         metric_str = ''
         for k in logs.keys():
             metric_str += f" - {k}: {logs[k]:.3f}"
@@ -158,14 +169,18 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
 
 # Tries to replicate keras.backend.tensorflow.TensorFlowTrainer.train_step() (trainer.py, keras 3.5.0)
 # as much as possible.
-def _gradient_returning_train_step(model, monitoring_model, x, y, sample_weight):
+def _gradient_returning_train_step(model, monitoring_model, x, y, sample_weight, compute_output_gradients):
     """
     This method is programmatically converted via auto-graph.
 
     Returns:
-        loss: float. Loss returned by loss function (before optimizer scaling).
-        metrics: dict. Metrics returned by model (note: also includes a 'loss' value but it's always zero)
-        gradients: list. Gradients tensor for each trainable variable
+        - loss - float. Loss returned by loss function (before optimizer scaling).
+        - metrics - dict. Metrics returned by model (note: also includes a 'loss' value but it's always zero)
+        - trainable_variable_gradients - list. Gradients tensor for each trainable variable.
+        - output_gradients - list. Gradients tensor for each layer output, or None if not requested.
+            Note that some layers will have None as the gradients tensor. eg: the last layer and layers
+            that aren't involved in the final output.
+        - layer_outputs - list. Raw outputs from each layer.
     """
 
     # Forward pass
@@ -179,17 +194,19 @@ def _gradient_returning_train_step(model, monitoring_model, x, y, sample_weight)
         loss = model.optimizer.scale_loss(loss)
 
     # Backward pass
-    if model.trainable_weights:
-        gradients = tape.gradient(loss, model.trainable_variables)
-
-        model.optimizer.apply_gradients(zip(gradients, model.trainable_variables))
+    if compute_output_gradients:
+        gradients = tape.gradient(loss, model.trainable_weights + layer_outputs)
+        trainable_grads = gradients[:len(model.trainable_variables)]
+        output_grads = gradients[len(model.trainable_variables):]
     else:
-        raise ValueError('No trainable weights to update.')
+        trainable_grads = tape.gradient(loss, model.trainable_variables)
+        output_grads = None
+    model.optimizer.apply_gradients(zip(trainable_grads, model.trainable_variables))
 
     # Metrics
     metrics = model.compute_metrics(x=x, y=y, y_pred=y_pred, sample_weight=sample_weight)
 
-    return reported_loss, metrics, gradients, layer_outputs
+    return reported_loss, metrics, trainable_grads, output_grads, layer_outputs
 
 
 class BaseGradientCallback:
@@ -213,6 +230,16 @@ class BaseGradientCallback:
     def model(self):
         return self._model
 
+    @property
+    def needs_output_gradients(self):
+        """
+        Indicates whether this callback wants to receive "layer output gradients" in its callbacks.
+        These require extra computation, so they are only supplied to callbacks that request them.
+
+        Default: False.
+        """
+        return False
+
     def on_train_begin(self):
         """Called at the beginning of training.
 
@@ -234,7 +261,7 @@ class BaseGradientCallback:
             epoch: Integer, index of epoch.
         """
 
-    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations=None):
+    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations=None, output_gradients=None):
         """Called at the end of an epoch during training.
         Subclasses should override for any actions to run.
 
@@ -245,9 +272,11 @@ class BaseGradientCallback:
         Args:
             epoch: Integer, index of epoch.
             loss: float. The loss value of the batch.
-            gradients: the list of gradients for each trainable variable.
-            trainable_variables: the list of trainable variables.
+            gradients: list of gradients for each trainable variable.
+            trainable_variables: list of trainable variables.
             activations: activation outputs from each layer.
+            output_gradients: list of gradients w.r.t. to the outputs of each layer,
+                or None if not requested
         """
 
     def on_train_batch_begin(self, batch):
@@ -263,7 +292,7 @@ class BaseGradientCallback:
             batch: Integer, index of batch within the current epoch.
         """
 
-    def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations=None):
+    def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations=None, output_gradients=None):
         """Called at the end of a training batch in `fit` methods.
 
         Subclasses should override for any actions to run.
@@ -275,9 +304,11 @@ class BaseGradientCallback:
         Args:
             batch: Integer, index of batch within the current epoch.
             loss: float. The loss value of the batch.
-            gradients: the list of gradients for each trainable variable.
-            trainable_variables: the list of trainable variables.
+            gradients: list of gradients for each trainable variable.
+            trainable_variables: list of trainable variables.
             activations: activation outputs from each layer.
+            output_gradients: list of gradients w.r.t. to the outputs of each layer,
+                or None if not requested
         """
 
 
