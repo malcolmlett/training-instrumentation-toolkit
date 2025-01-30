@@ -887,6 +887,8 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
         - _layer_shapes
         """
         # init stats
+        # - assume initially that we can get gradients for every layer
+        # - this will be later revised
         self.gradient_stats = [[] for _ in range(len(self.model.layers))]
 
         # expand collection_sets and initialise gradient storages
@@ -980,7 +982,11 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
         if self._gradient_values:
             for l_idx, val_list in enumerate(self._gradient_values):
                 if val_list is not None:
-                    val_list.append(gradients[l_idx])
+                    if gradients[l_idx] is None:
+                        # turns out that gradients aren't calculated for this layer
+                        self._gradient_values[l_idx] = None
+                    else:
+                        val_list.append(gradients[l_idx])
 
 
 class ActivityHistoryCallback(BaseGradientCallback):
@@ -1735,6 +1741,11 @@ def _append_dict_list(dic, addendum_dict):
         dic[key].append(addendum_dict[key])
 
 
+# TODO consider alternatively estimating the original mean as something like
+#    sum([percentile * quantile for percentile,quantile in zip(percentiles, stats)])
+#  more accurately:
+#    sum([(percentile-prev_percentile) * (quantile+prev_quantile)/2 for ...
+#         in zip(offset(percentiles), offset(stats), percentiles, stats])
 def get_scales_across_stats_list(stats_dataframes, scale_quantile=75):
     """
     Extracts a set of "scale" heuristics from a set of quantile stats.
