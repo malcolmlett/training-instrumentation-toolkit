@@ -502,7 +502,9 @@ def describe_tensor_near_zero_explanation(counts, sums=None, *, mask=None, thres
         negatives_are_bad: whether negative values are equivalent to zeros
         verbose: whether to include extra working details in the description
     Returns:
-        list of textual descriptions, approximately with highest-degree summary first
+        - descriptions - list of textual descriptions, most significant first
+        - fractions - fraction of values that each description applies to.
+
     """
     # parse args
     counts, sums, _ = me.standardize(counts, sums, mask=mask)
@@ -517,22 +519,22 @@ def describe_tensor_near_zero_explanation(counts, sums=None, *, mask=None, thres
         value = np.sum(sums, axis=-1)
         neg_fraction = np.sum(value < 0) / np.size(value)
 
+    # generate descriptions
+    summaries = []
     if verbose and threshold is not None:
-        near_zero_description = f"{zero_fraction * 100:.1f}% near-zero ({_format_threshold(threshold)})"
+        summaries.append((f"{zero_fraction * 100:.1f}% near-zero ({_format_threshold(threshold)})", zero_fraction))
     else:
-        near_zero_description = f"{zero_fraction * 100:.1f}% near-zero"
+        summaries.append((f"{zero_fraction * 100:.1f}% near-zero", zero_fraction))
+    if neg_fraction > 0:
+        summaries.append((f"{neg_fraction * 100:.1f}% negative", neg_fraction))
 
     # order summaries, highest importance first
-    summaries = []
-    if neg_fraction > zero_fraction:
-        summaries.append(f"{neg_fraction * 100:.1f}% negative")
-        summaries.append(near_zero_description)
-    else:
-        summaries.append(near_zero_description)
-        if neg_fraction > 0:
-            summaries.append(f"{neg_fraction * 100:.1f}% negative")
+    summaries = sorted(summaries, key=lambda x: x[1], reverse=True)
 
-    return summaries
+    # return results
+    descriptions = [description for description, fraction in summaries]
+    fractions = [fraction for description, fraction in summaries]
+    return descriptions, fractions
 
 
 def describe_tensor_units_near_zero_explanation(counts, sums=None, *, mask=None, threshold=None,
@@ -573,7 +575,11 @@ def describe_tensor_units_near_zero_explanation(counts, sums=None, *, mask=None,
     condition_txt = "near-zero or negative" if negatives_are_bad else "near-zero"
     dims_txt = "batch" if counts.ndim <= 3 else "batch and spatial"
 
-    return [f"{dead_fraction * 100:.1f}% of units always {condition_txt} across all {dims_txt} dims"]
+    # return summaries
+    # - currently only one, but if we had more we'd need to sort them
+    descriptions = [f"{dead_fraction * 100:.1f}% of units always {condition_txt} across all {dims_txt} dims"]
+    fractions = [dead_fraction]
+    return descriptions, fractions
 
 
 def get_layer_handler_for(layer, layer_index, variables, gradients, inputs, output, output_gradients,
