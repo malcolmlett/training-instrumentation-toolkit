@@ -883,9 +883,11 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
     def on_train_begin(self):
         """
         Initialises tracking, now that we know the model and number of epochs and steps per epoch.
+        Leaves some fields unset for final initialisation once we have real data:
+        - _layer_shapes
         """
         # init stats
-        self.gradient_stats = [[] for l_idx in range(len(self.model.layers))]
+        self.gradient_stats = [[] for _ in range(len(self.model.layers))]
 
         # expand collection_sets and initialise gradient storages
         # (TODO also prepare slicing rules)
@@ -931,6 +933,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
         """
         if not self.per_step:
             self.epochs.append(epoch)
+            self._init_on_first_update(activations)
             self._collect_stats(output_gradients)
             self._collect_raw_values(output_gradients)
 
@@ -942,8 +945,18 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
         if self.per_step:
             step = self.params['steps'] * self._epoch + batch
             self.steps.append(step)
+            self._init_on_first_update(activations)
             self._collect_stats(output_gradients)
             self._collect_raw_values(output_gradients)
+
+    def _init_on_first_update(self, activations):
+        """
+        Final initialisation of tracking that has to be deferred until we have our first activation data.
+        There seems to be some dynamism in determining the output shape of a Layer object, and we need that
+        accurate for this final initialisation.
+        """
+        if self._layer_shapes is None:
+            self._layer_shapes = [activation.shape for activation in activations]
 
     def _collect_stats(self, gradients):
         # compute stats for each individual layer
@@ -2467,6 +2480,7 @@ def plot_output_gradient_history(gradient_callback: LayerOutputGradientHistoryCa
         if c == 0:
             plt.ylabel('log-magnitude' if magnitudes else 'value')
         plt.title(layer_names[s_idx])
+        plt.title(f"layer {layer_ids[s_idx]}:\n{layer_names[s_idx]}")
 
         # text overlay
         plot_min = np.min(data.to_numpy())
