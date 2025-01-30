@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import tqdm
+import copy
 
 # tip: to get output shape of a layer:
 #  model.layers[l].compute_output_shape(model.layers[l].input.shape)
@@ -1808,6 +1809,14 @@ def _normalize_collection_sets_for_layers(model: tf.keras.Model, collection_sets
     per-layer-output data.
     Fully resolves all collection sets to: 'layer_indices' and 'slices'.
 
+    Returns a copy of the provided collection_sets because the inputs may be re-used between
+    multiple callbacks. As in this example:
+    > collection_sets=[{layer_indices: [5]}]
+    > variables = VariableHistoryCallback(collection_sets=collection_sets)
+    > activity = ActivityHistoryCallback(collection_sets=collection_sets)
+    > gradients = GradientHistoryCallback(collection_sets=collection_sets)
+    > fit(model, train_data, callbacks=[variables, activity, gradients])
+
     Args:
         model: the model being examined
         collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
@@ -1831,7 +1840,7 @@ def _normalize_collection_sets_for_layers(model: tf.keras.Model, collection_sets
           variable that hasn't otherwise been specified in any other collection sets.
 
     Returns:
-        updated collection_sets (modified in place)
+        new collection_sets after modification
     """
     def _assert_at_most_one_property_of(obj, allowed: list):
         present = [key for key in allowed if key in obj]
@@ -1848,6 +1857,7 @@ def _normalize_collection_sets_for_layers(model: tf.keras.Model, collection_sets
 
     # validate and standardise on closed layer indices
     # (lookups automatically throws ValueError if any references not present in model layers)
+    collection_sets = copy.deepcopy(collection_sets)
     for collection_set in collection_sets:
         _assert_at_most_one_property_of(collection_set, ['layers', 'layer_indices', 'layer_names'])
 
@@ -1912,6 +1922,14 @@ def _normalize_collection_sets_for_variables(model: tf.keras.Model, collection_s
     Handles the variations allowed in collection_sets used for selecting capture of model variables.
     Fully resolves all collection sets to: 'variable_indices' and 'slices'.
 
+    Returns a copy of the provided collection_sets because the inputs may be re-used between
+    multiple callbacks. As in this example:
+    > collection_sets=[{layer_indices: [5]}]
+    > variables = VariableHistoryCallback(collection_sets=collection_sets)
+    > activity = ActivityHistoryCallback(collection_sets=collection_sets)
+    > gradients = GradientHistoryCallback(collection_sets=collection_sets)
+    > fit(model, train_data, callbacks=[variables, activity, gradients])
+
     Args:
         model: the model being examined
         collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
@@ -1938,7 +1956,7 @@ def _normalize_collection_sets_for_variables(model: tf.keras.Model, collection_s
           variable that hasn't otherwise been specified in any other collection sets.
 
     Returns:
-        updated collection_sets (modified in place)
+        new collection_sets after modification
     """
     def _assert_at_most_one_property_of(obj, allowed: list):
         present = [key for key in allowed if key in obj]
@@ -1956,6 +1974,7 @@ def _normalize_collection_sets_for_variables(model: tf.keras.Model, collection_s
 
     # validate and standardise on closed variable indices
     # (lookups automatically throws ValueError if any references not present in model layers)
+    collection_sets = copy.deepcopy(collection_sets)
     for collection_set in collection_sets:
         _assert_at_most_one_property_of(collection_set, ['layers', 'layer_indices', 'layer_names',
                                                          'variable_indices', 'trainable_variable_indices'])

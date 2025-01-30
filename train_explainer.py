@@ -135,10 +135,10 @@ def explain_near_zero_gradients(callbacks: list,
 
     Usage:
     > l_idx = 35
-    > variables = VariableHistoryCallback(collection_sets=[{layer_indices: l_idx}, before_updates=True)
-    > activity = ActivityHistoryCallback(collection_sets=[{layer_indices: [l_idx-1, l_idx]})
-    > gradients = GradientHistoryCallback(collection_sets=[{layer_indices: l_idx})
-    > output_gradients = LayerOutputGradientHistoryCallback(collection_sets=[{layer_indices: l_idx})
+    > variables = VariableHistoryCallback(collection_sets=[{layer_indices: [l_idx]}], before_updates=True)
+    > activity = ActivityHistoryCallback(collection_sets=[{layer_indices: [l_idx-1, l_idx]}])
+    > gradients = GradientHistoryCallback(collection_sets=[{layer_indices: [l_idx]}])
+    > output_gradients = LayerOutputGradientHistoryCallback(collection_sets=[{layer_indices: [l_idx]}])
     > fit(model, train_data, callbacks=[variables, activity, gradients, output_gradients])
     > explain_near_zero_gradients(l_idx, epoch=..., callbacks=[variables, activity, gradients, output_gradients])
     """
@@ -257,6 +257,17 @@ def explain_near_zero_gradients(callbacks: list,
     next_layer_handlers_and_notes = [_get_layer_handler(l_idx, '2') for l_idx in outbound_layer_indices]
     next_layer_handlers = [handler for handler, note in next_layer_handlers_and_notes]
     next_layer_handler_notes = [note for handler, note in next_layer_handlers_and_notes]
+
+    # sanity check that minimum required information is present
+    if target_layer_handler.get_weight_gradients() is None:
+        print(f"Warning - unable to provide accurate report because {', '.join(missing_infos)}")
+        print(f"Error - No gradients found for weights of the target layer")
+    if target_layer_handler.get_weights() is None:
+        print(f"Warning - unable to provide accurate report because {', '.join(missing_infos)}")
+        print(f"Error - No weights found for weights of the target layer")
+    if target_layer_handler.get_A() is None:
+        print(f"Warning - unable to provide accurate report because {', '.join(missing_infos)}")
+        print(f"Error - No output activations found for weights of the target layer")
 
     def _explain_tensor(name, tensor, mask_name=None, mask=None, negatives_are_bad=False, include_summary_by_unit=False):
         quantiles = [0, 25, 50, 75, 100]
