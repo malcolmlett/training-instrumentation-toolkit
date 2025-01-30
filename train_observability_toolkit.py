@@ -1069,13 +1069,8 @@ class ActivityHistoryCallback(BaseGradientCallback):
 
         # internal tracking
         self._epoch = 0
-        self._layer_names = None  # TODO remove
         self._layer_shapes = None
         self._filtered_value_layer_indices = None
-
-    @property
-    def layer_names(self):
-        return self._layer_names
 
     @property
     def layer_shapes(self):
@@ -1149,9 +1144,6 @@ class ActivityHistoryCallback(BaseGradientCallback):
         """
         Validates configuration and partially expands it, now that we have access to the model.
         """
-        # pre-compute lookups
-        self._layer_names = [layer.name for layer in self.model.layers]
-
         # init stats
         self.model_stats = {key: [] for key in self._model_stat_keys()}
         self.layer_stats = [{key: [] for key in self._stat_keys()} for _ in self.model.layers]
@@ -2533,10 +2525,10 @@ def plot_activity_rate_history(activity_callback):
     iterations = activity_callback.epochs if hasattr(activity_callback, 'epochs') else activity_callback.steps
     iteration_name = 'epoch' if hasattr(activity_callback, 'epochs') else 'step'
     num_layers = len(activity_callback.layer_stats)
+    model = activity_callback.model
     model_stats = activity_callback.model_stats
     layer_stats = activity_callback.layer_stats
-    layer_names = activity_callback.layer_names
-    model = activity_callback.model
+    layer_names = [layer.name for layer in model.layers]
     channel_sizes = [shape[-1] for shape in activity_callback.layer_shapes]
 
     # start figure
