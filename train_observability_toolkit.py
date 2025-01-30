@@ -104,6 +104,15 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
     # prepare model for layer output collection
     # (original model output(s) will be first entry of new outputs array, it will have single tensor or list
     # accordingly)
+    # FIXME this is now triggering the following warning when the model gets called during the train step.
+    #  It appears to be because model.inputs returns some sort of post-processed KerasTensor
+    #  but Model(inputs=...) is usually passed a less-compiled version of KerasTensor.
+    #  Note: tf.keras.Input() returns KerasTensor.
+    #  > /usr/local/lib/python3.11/dist-packages/keras/src/models/functional.py:237: UserWarning: The structure of
+    #  >   `inputs` doesn't match the expected structure.
+    #  > Expected: ['keras_tensor_66']
+    #  > Received: inputs=Tensor(shape=(32, 2))
+    #  >   warnings.warn(msg)
     monitoring_model = tf.keras.Model(
         inputs=model.inputs,
         outputs=[model.outputs] + [layer.output for layer in model.layers])
