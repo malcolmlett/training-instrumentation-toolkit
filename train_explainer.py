@@ -531,7 +531,8 @@ def describe_tensor_near_zero_explanation(counts, sums=None, *, mask=None, thres
             return f"{neg_fraction * 100:.1f}% negative"
 
 
-def get_layer_handler_for(layer, layer_index, variables, gradients, inputs, output, layer_subscript=None, return_note=False):
+def get_layer_handler_for(layer, layer_index, variables, gradients, inputs, output, output_gradients,
+                          layer_subscript=None, return_note=False):
     """
     Factory for layer handlers. Identifies and instantiates the best layer handler for the given layer.
     Returns:
@@ -543,17 +544,17 @@ def get_layer_handler_for(layer, layer_index, variables, gradients, inputs, outp
     if isinstance(layer, tf.keras.layers.Dense):
         handler = DenseLayerHandler(
             display_name=display_name, variables=variables, gradients=gradients, inputs=inputs, output=output,
-            layer_subscript=layer_subscript)
+            output_gradients=output_gradients, layer_subscript=layer_subscript)
     elif 'dense' in layer.name:
         handler = DenseLayerHandler(
             display_name=display_name, variables=variables, gradients=gradients, inputs=inputs, output=output,
-            layer_subscript=layer_subscript)
+            output_gradients=output_gradients, layer_subscript=layer_subscript)
         note = "Treating as standard Dense layer due to name, results may not be accurate"
     else:
         # fallback to generic handler
         handler = LayerHandler(
             display_name=display_name, variables=variables, gradients=gradients, inputs=inputs, output=output,
-            layer_subscript=layer_subscript)
+            output_gradients=output_gradients, layer_subscript=layer_subscript)
 
     if return_note:
         return handler, note
@@ -753,25 +754,29 @@ class LayerHandler:
     it's simpler than trying to find a code-friendly notation for 'A_{l-1}'.
     """
 
-    def __init__(self, display_name, variables, gradients, inputs, output, layer_subscript=None):
+    def __init__(self, display_name, variables, gradients, inputs, output, output_gradients, layer_subscript=None):
         """
         Args:
             variables: list of tensor.
-                The state of the variables for this layer only at the time of interest.
+                The state of the variables for this layer at the time of interest, or None if unknown.
             gradients: list of tensor.
                 The gradients for the variables at the time of interest, or None if unknown.
             inputs: list of tensor.
                 The actual input values to this layer at the time of interest, or None if unknown.
             output: tensor
                 The actual post-activation output from this layer at the time of interest, or None if unknown.
+            output_gradients: tensor
+                Computed gradients w.r.t. the output from this layer at the time of interest, or None if unknown.
             layer_subscript: string
-                Used in warnings and error messages to identify the layer via a subscript, eg: 'l' gets used as 'A_l', 'Z_l', etc.
+                Used in warnings and error messages to identify the layer via a subscript, eg: 'l' gets used as
+                'A_l', 'Z_l', etc.
         """
         self._display_name = display_name
         self._variables = variables
         self._gradients = gradients
         self._inputs = inputs
         self._output = output
+        self._output_gradients = output_gradients
         if layer_subscript:
             self.subscript = f"_{layer_subscript}"
         else:
@@ -796,6 +801,10 @@ class LayerHandler:
     @property
     def output(self):
         return self._output
+
+    @property
+    def output_gradients(self):
+        return self._output_gradients
 
     def get_weights(self):
         """
@@ -864,7 +873,7 @@ class LayerHandler:
             return_note: bool.
                 Whether to additionally return any warning note.
         Raises:
-            UnsupportedNetworkError if cannot handle this for the given layer type
+            UnsupportedNetworkError: if cannot handle this for the given layer type
         Returns:
             - computed value
             - equation (optional output)
@@ -879,7 +888,7 @@ class LayerHandler:
         Args:
             confidence: passed to matmul_explainer
         Raises:
-            UnsupportedNetworkError if cannot handle this for the given layer type
+            UnsupportedNetworkError: if cannot handle this for the given layer type
         Returns:
             counts, sums
         """
@@ -899,7 +908,7 @@ class LayerHandler:
             return_note: bool.
                 Whether to additionally return any warning note.
         Raises:
-            UnsupportedNetworkError if cannot handle this for the given layer type
+            UnsupportedNetworkError: if cannot handle this for the given layer type
         Returns:
             - computed value
             - equation (optional output)
@@ -949,7 +958,7 @@ class LayerHandler:
             return_note: bool.
                 Whether to additionally return any warning note.
         Raises:
-            UnsupportedNetworkError if cannot handle this for the given layer type
+            UnsupportedNetworkError: if cannot handle this for the given layer type
         Returns:
             - computed value
             - equation (optional output)
@@ -975,7 +984,7 @@ class LayerHandler:
             dJdA_l: the backprop received by this layer
             confidence: passed to matmul_explainer
         Raises:
-            UnsupportedNetworkError if cannot handle this for the given layer type
+            UnsupportedNetworkError: if cannot handle this for the given layer type
         Returns:
             counts, sums
         """
@@ -992,7 +1001,7 @@ class LayerHandler:
             return_note: bool.
                 Whether to additionally return any warning note.
         Raises:
-            UnsupportedNetworkError if cannot handle this for the given layer type
+            UnsupportedNetworkError: if cannot handle this for the given layer type
         Returns:
             - computed value
             - equation (optional output)
@@ -1008,23 +1017,25 @@ class LayerHandler:
             dJdZ_l: the result of the first step of backgroup through this layer, averaged over all output layers if there are multiple.
             confidence: passed to matmul_explainer
         Raises:
-            UnsupportedNetworkError if cannot handle this for the given layer type
+            UnsupportedNetworkError: if cannot handle this for the given layer type
         Returns:
             counts, sums
         """
         raise UnsupportedNetworkError(f"Not implemented for this layer type")
 
+    # TODO to support layers that receive multiple inputs, this method needs to be extended to take an input
+    #   number in order to calculate the value w.r.t. that input.
     def calculate_backprop(self, return_note=False):
         """
         Calculates or estimates the backprop gradients, dJdA_0, that would have been passed from
         this layer to the previous layer(s).
-        Note: for layers that receive multiple inputs, this method needs to be passed an input
-        number in order to calculate the value w.r.t. that input.
+        Note that estimating backprop gradients can be unreliable. Generally you will want to directly capture the
+        output gradients. But this approach can be used as a last resort.
         Args:
             return_note: bool.
                 Whether to additionally return any warning note.
         Raises:
-            UnsupportedNetworkError if cannot handle this for the given layer type
+            UnsupportedNetworkError: if cannot handle this for the given layer type
         Returns:
             - computed value
             - warning note or none if no warnings (optional output)
@@ -1033,8 +1044,8 @@ class LayerHandler:
 
 
 class DenseLayerHandler(LayerHandler):
-    def __init__(self, display_name, variables, gradients, inputs, output, layer_subscript=None):
-        super().__init__(display_name, variables, gradients, inputs, output, layer_subscript)
+    def __init__(self, display_name, variables, gradients, inputs, output, output_gradients, layer_subscript=None):
+        super().__init__(display_name, variables, gradients, inputs, output, output_gradients, layer_subscript)
 
     def calculate_Z(self, return_equation=False, return_note=False):
         A_0 = self.get_input()
