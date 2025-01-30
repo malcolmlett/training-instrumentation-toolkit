@@ -241,7 +241,7 @@ def explain_near_zero_gradients(callbacks: list,
                 warnings_out.append(f"layer {l_idx} outputs not collected")
             else:
                 output = activity.layer_outputs[l_idx][iteration]
-        if output_gradients and output_gradients is not None:
+        if output_gradients and output_gradients.gradients is not None:
             if output_gradients.gradients[l_idx] is None:
                 warnings_out.append(f"output gradients for layer {l_idx} not collected")
             else:
