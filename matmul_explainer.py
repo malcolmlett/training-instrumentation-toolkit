@@ -292,6 +292,8 @@ def tensor_classify(x, confidence: float = 0.95, threshold: float = None,
     It seems somewhat strange on its own, but it proves useful so that you can
     use the other functions to get a nice summary().
 
+    Internally uses TF operations, but returns as numpy for convenience of later processing.
+
     Args:
         x: np-array or tensor with any shape
         confidence: statistical confidence (0.0 to 1.0) that you wish to meet
@@ -313,28 +315,25 @@ def tensor_classify(x, confidence: float = 0.95, threshold: float = None,
     x_p, x_z, x_n, threshold = classification_mask(x, confidence, threshold)
 
     # compute counts and sums for each classification
-    counts = []
-    counts.append(tf.cast(x_p, tf.float32))
-    counts.append(tf.cast(x_z, tf.float32))
-    counts.append(tf.cast(x_n, tf.float32))
-
-    sums = []
-    sums.append(tf.where(x_p, x, tf.zeros_like(x)))
-    sums.append(tf.where(x_z, x, tf.zeros_like(x)))
-    sums.append(tf.where(x_n, x, tf.zeros_like(x)))
+    counts = [
+        tf.cast(x_p, tf.float32),
+        tf.cast(x_z, tf.float32),
+        tf.cast(x_n, tf.float32)]
+    sums = [
+        tf.where(x_p, x, tf.zeros_like(x)),
+        tf.where(x_z, x, tf.zeros_like(x)),
+        tf.where(x_n, x, tf.zeros_like(x))]
 
     # format into final output (numpy)
     counts = np.stack(counts, axis=-1)
     sums = np.stack(sums, axis=-1)
     if return_threshold:
-        return counts, sums, threshold
+        return counts, sums, threshold.numpy()
     else:
         return counts, sums
 
 
-# change threshold args to 'thresholds', taking a single value or a list, eg: 0.35; [None, 0.75]; [0.45, 0.75]
-def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, threshold2: float = None,
-                    return_thresholds=False):
+def matmul_classify(x, y, confidence: float = 0.95, thresholds: list = None, return_thresholds=False):
     """
     Calculates how the dot-product of x1 . x2 comes to have the range of values that it does.
 
@@ -355,6 +354,8 @@ def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, 
     of the separate inputs. Alternatively, an absolute magnitude threshold may be specified for
     any of the inputs.
 
+    Internally uses TF operations, but returns as numpy for convenience of later processing.
+
     Example usage:
     >>> a = np.tile(np.arange(0.0, 1.0, 0.1), (10,1))
     >>> counts, sums = matmul_classify(a, a, confidence=0.90)
@@ -368,16 +369,24 @@ def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, 
     >>> print(f"Derived matmul: {np.sum(sums, axis=-1)}")
 
     Args:
-      x1: np-array or tensor with shape (n, k)
-      x2: np-array or tensor with shape (k, m)
+      x: np-array or tensor with shape (n, k)
+      y: np-array or tensor with shape (k, m)
       confidence: statistical confidence (0.0 to 1.0) that you wish to meet
         that a value is accurately placed within the P, Z, or N categories.
         Higher values lead to more strict requirements for "near zero".
         1.0 only considers exactly 0.0 as "near zero".
-      threshold1: abs(X1) values less than this are considered near-zero,
-        otherwise inferred from confidence
-      threshold2: abs(X2) values less than this are considered near-zero,
-        otherwise inferred from confidence
+        Determines default for either threshold not specified.
+      thresholds: list or tuple of 2 floats.
+        Specifies explicit thresholds for either or both of the inputs.
+        Absolute values less than these thresholds, and values exactly equal to zero,
+        are considered "near zero". Otherwise inferred from confidence.
+        Various combinations are allowed:
+            - None         - both thresholds determined separately, based on confidence.
+            - single float - specifies thresholds against both inputs
+            - [float, float] - specifies separate thresholds against both inputs
+            - [float, None]  - specifies threshold against first only, the other is determined based on confidence
+            - [None, float]  - specifies threshold against second only, the other is determined based on confidence
+            - [None, None]   - both thresholds determined separately, based on confidence.
       return_thresholds: whether to additionally return the derived thresholds
 
     Returns:
@@ -387,47 +396,62 @@ def matmul_classify(x1, x2, confidence: float = 0.95, threshold1: float = None, 
     """
 
     # standardise on data format
-    x1 = np.array(x1)
-    x2 = np.array(x2)
+    x = tf.constant(x)
+    y = tf.constant(y)
 
     # apply thresholds and create masks
-    x1_p, x1_z, x1_n, threshold1 = classification_mask(x1, confidence, threshold1)
-    x2_p, x2_z, x2_n, threshold2 = classification_mask(x2, confidence, threshold2)
+    x_threshold, y_threshold = _parse_thresholds_arg(thresholds)
+    x_p, x_z, x_n, x_threshold = classification_mask(x, confidence, x_threshold)
+    y_p, y_z, y_n, y_threshold = classification_mask(y, confidence, y_threshold)
 
     # compute counts
-    counts = np.zeros((x1.shape[0], x2.shape[1], 9), dtype=int)
-    sums = np.zeros((x1.shape[0], x2.shape[1], 9), dtype=np.result_type(x1.dtype, x2.dtype))
+    counts = []
+    x_pc = tf.cast(x_p, tf.float32)
+    x_zc = tf.cast(x_z, tf.float32)
+    x_nc = tf.cast(x_n, tf.float32)
+    y_pc = tf.cast(y_p, tf.float32)
+    y_zc = tf.cast(y_z, tf.float32)
+    y_nc = tf.cast(y_n, tf.float32)
+    counts.append(tf.linalg.matmul(x_pc, y_pc))
+    counts.append(tf.linalg.matmul(x_pc, y_zc))
+    counts.append(tf.linalg.matmul(x_pc, y_nc))
+    counts.append(tf.linalg.matmul(x_zc, y_pc))
+    counts.append(tf.linalg.matmul(x_zc, y_zc))
+    counts.append(tf.linalg.matmul(x_zc, y_nc))
+    counts.append(tf.linalg.matmul(x_nc, y_pc))
+    counts.append(tf.linalg.matmul(x_nc, y_zc))
+    counts.append(tf.linalg.matmul(x_nc, y_nc))
 
-    counts[:, :, 0] = np.matmul(x1_p.astype(int), x2_p.astype(int))
-    counts[:, :, 1] = np.matmul(x1_p.astype(int), x2_z.astype(int))
-    counts[:, :, 2] = np.matmul(x1_p.astype(int), x2_n.astype(int))
-    counts[:, :, 3] = np.matmul(x1_z.astype(int), x2_p.astype(int))
-    counts[:, :, 4] = np.matmul(x1_z.astype(int), x2_z.astype(int))
-    counts[:, :, 5] = np.matmul(x1_z.astype(int), x2_n.astype(int))
-    counts[:, :, 6] = np.matmul(x1_n.astype(int), x2_p.astype(int))
-    counts[:, :, 7] = np.matmul(x1_n.astype(int), x2_z.astype(int))
-    counts[:, :, 8] = np.matmul(x1_n.astype(int), x2_n.astype(int))
+    sums = []
+    x_pv = tf.where(x_p, x, tf.zeros_like(x))
+    x_zv = tf.where(x_z, x, tf.zeros_like(x))
+    x_nv = tf.where(x_n, x, tf.zeros_like(x))
+    y_pv = tf.where(y_p, y, tf.zeros_like(y))
+    y_zv = tf.where(y_z, y, tf.zeros_like(y))
+    y_nv = tf.where(y_n, y, tf.zeros_like(y))
+    sums.append(tf.linalg.matmul(x_pv, y_pv))
+    sums.append(tf.linalg.matmul(x_pv, y_zv))
+    sums.append(tf.linalg.matmul(x_pv, y_nv))
+    sums.append(tf.linalg.matmul(x_zv, y_pv))
+    sums.append(tf.linalg.matmul(x_zv, y_zv))
+    sums.append(tf.linalg.matmul(x_zv, y_nv))
+    sums.append(tf.linalg.matmul(x_nv, y_pv))
+    sums.append(tf.linalg.matmul(x_nv, y_zv))
+    sums.append(tf.linalg.matmul(x_nv, y_nv))
 
-    sums[:, :, 0] = np.matmul(x1 * x1_p, x2 * x2_p)
-    sums[:, :, 1] = np.matmul(x1 * x1_p, x2 * x2_z)
-    sums[:, :, 2] = np.matmul(x1 * x1_p, x2 * x2_n)
-    sums[:, :, 3] = np.matmul(x1 * x1_z, x2 * x2_p)
-    sums[:, :, 4] = np.matmul(x1 * x1_z, x2 * x2_z)
-    sums[:, :, 5] = np.matmul(x1 * x1_z, x2 * x2_n)
-    sums[:, :, 6] = np.matmul(x1 * x1_n, x2 * x2_p)
-    sums[:, :, 7] = np.matmul(x1 * x1_n, x2 * x2_z)
-    sums[:, :, 8] = np.matmul(x1 * x1_n, x2 * x2_n)
-
+    # format into final output (numpy)
+    counts = np.stack(counts, axis=-1)
+    sums = np.stack(sums, axis=-1)
     if return_thresholds:
-        return counts, sums, [threshold1, threshold2]
+        return counts, sums, [x_threshold.numpy(), y_threshold.numpy()]
     else:
         return counts, sums
 
 
-# change threshold args to 'thresholds', taking a single value or a list, eg: 0.35; [None, 0.75]; [0.45, 0.75]
-def multiply_classify(x, y, confidence: float = 0.95, x_threshold: float = None, y_threshold: float = None,
-                      return_thresholds=False):
+def multiply_classify(x, y, confidence: float = 0.95, thresholds: list = None, return_thresholds=False):
     """
+    Calculates how the elementwise-product of x (.) y comes to have the range of values that it does.
+
     Like matmul_classify but for elementwise multiplication.
 
     Args:
@@ -438,10 +462,17 @@ def multiply_classify(x, y, confidence: float = 0.95, x_threshold: float = None,
           that a value is accurately placed within the P, Z, or N categories.
           Higher values lead to more strict requirements for "near zero".
           1.0 only considers exactly 0.0 as "near zero".
-        x_threshold: abs(X1) values less than this are considered near-zero,
-          otherwise inferred from confidence
-        y_threshold: abs(X2) values less than this are considered near-zero,
-          otherwise inferred from confidence
+        thresholds: list or tuple of 2 floats.
+            Specifies explicit thresholds for either or both of the inputs.
+            Absolute values less than these thresholds, and values exactly equal to zero,
+            are considered "near zero". Otherwise inferred from confidence.
+            Various combinations are allowed:
+                - None         - both thresholds determined separately, based on confidence.
+                - single float - specifies thresholds against both inputs
+                - [float, float] - specifies separate thresholds against both inputs
+                - [float, None]  - specifies threshold against first only, the other is determined based on confidence
+                - [None, float]  - specifies threshold against second only, the other is determined based on confidence
+                - [None, None]   - both thresholds determined separately, based on confidence.
         return_thresholds: whether to additionally return the derived thresholds
 
     Returns:
@@ -455,6 +486,7 @@ def multiply_classify(x, y, confidence: float = 0.95, x_threshold: float = None,
     y = tf.constant(y)
 
     # apply thresholds and create masks
+    x_threshold, y_threshold = _parse_thresholds_arg(thresholds)
     x_p, x_z, x_n, x_threshold = classification_mask(x, confidence, x_threshold)
     y_p, y_z, y_n, y_threshold = classification_mask(y, confidence, y_threshold)
 
@@ -497,15 +529,13 @@ def multiply_classify(x, y, confidence: float = 0.95, x_threshold: float = None,
     counts = np.stack(counts, axis=-1)
     sums = np.stack(sums, axis=-1)
     if return_thresholds:
-        return counts, sums, [x_threshold, y_threshold]
+        return counts, sums, [x_threshold.numpy(), y_threshold.numpy()]
     else:
         return counts, sums
 
 
-# change threshold args to 'thresholds', taking a single value or a list, eg: 0.35; [None, 0.75]; [0.45, 0.75]
 def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float = 0.95,
-                  inputs_threshold: float = None, kernel_threshold: float = None,
-                  return_thresholds=False):
+                  thresholds: list = None, return_thresholds=False):
     """
     Like matmul_classify but for convolutions.
     Supports 1D, 2D and 3D convolution.
@@ -526,13 +556,20 @@ def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float 
             left/right or up/down of the input such that output has the
             same height/width dimension as the input when `strides=1`.
         confidence: statistical confidence (0.0 to 1.0) that you wish to meet
-          that a value is accurately placed within the P, Z, or N categories.
-          Higher values lead to more strict requirements for "near zero".
-          1.0 only considers exactly 0.0 as "near zero".
-        inputs_threshold: abs(X1) values less than this are considered near-zero,
-          otherwise inferred from confidence
-        kernel_threshold: abs(X2) values less than this are considered near-zero,
-          otherwise inferred from confidence
+            that a value is accurately placed within the P, Z, or N categories.
+            Higher values lead to more strict requirements for "near zero".
+            1.0 only considers exactly 0.0 as "near zero".
+        thresholds: list or tuple of 2 floats.
+            Specifies explicit thresholds for either or both of the inputs.
+            Absolute values less than these thresholds, and values exactly equal to zero,
+            are considered "near zero". Otherwise inferred from confidence.
+            Various combinations are allowed:
+                - None         - both thresholds determined separately, based on confidence.
+                - single float - specifies thresholds against both inputs
+                - [float, float] - specifies separate thresholds against both inputs
+                - [float, None]  - specifies threshold against first only, the other is determined based on confidence
+                - [None, float]  - specifies threshold against second only, the other is determined based on confidence
+                - [None, None]   - both thresholds determined separately, based on confidence.
         return_thresholds: whether to additionally return the derived thresholds
 
     Returns:
@@ -546,6 +583,7 @@ def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float 
     kernel = tf.constant(kernel)
 
     # apply thresholds and create masks
+    inputs_threshold, kernel_threshold = _parse_thresholds_arg(thresholds)
     inputs_p, inputs_z, inputs_n, inputs_threshold = classification_mask(inputs, confidence, inputs_threshold)
     kernel_p, kernel_z, kernel_n, kernel_threshold = classification_mask(kernel, confidence, kernel_threshold)
 
@@ -588,7 +626,7 @@ def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float 
     counts = np.stack(counts, axis=-1)
     sums = np.stack(sums, axis=-1)
     if return_thresholds:
-        return counts, sums, [inputs_threshold, kernel_threshold]
+        return counts, sums, [inputs_threshold.numpy(), kernel_threshold.numpy()]
     else:
         return counts, sums
 
@@ -596,6 +634,7 @@ def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float 
 def classification_mask(x, confidence: float = 0.95, threshold: float = None):
     """
     Classifies the values of x as positive (P), near-zero (Z), or negative (N) according to a threshold.
+    Note: mainly intended for internal use. Returns TF tensors.
     Args:
         x: np-array or tensor
         confidence: statistical confidence (0.0 to 1.0) that you wish to meet
@@ -606,7 +645,7 @@ def classification_mask(x, confidence: float = 0.95, threshold: float = None):
             otherwise inferred by using confidence to draw an appropriate percentile from the
             values of x.
     Returns:
-        (pos_mask, zero_mask, neg_mask, threshold) - np-array bool tensors, plus the derived threshold
+        (pos_mask, zero_mask, neg_mask, threshold) - bool TF tensors, plus the derived threshold
 
     """
     # determine threshold
@@ -623,7 +662,7 @@ def classification_mask(x, confidence: float = 0.95, threshold: float = None):
     pos_mask = tf.logical_and(x > 0, tf.logical_not(zero_mask))
     neg_mask = tf.logical_and(x < 0, tf.logical_not(zero_mask))
 
-    return pos_mask.numpy(), zero_mask.numpy(), neg_mask.numpy(), threshold.numpy()
+    return pos_mask, zero_mask, neg_mask, threshold
 
 
 # It turns out that I shouldn't have bothered trying to sort the order of the final groups.
@@ -904,6 +943,34 @@ def standardize(counts, sums=None, terms=None, *, mask=None, return_terms_as_lis
         return counts, sums, terms_list
     else:
         return counts, sums, terms
+
+
+def _parse_thresholds_arg(thresholds):
+    """
+    Handles the variations allowed for the `thresholds` arg to the xxx_classify() methods.
+    Args:
+      thresholds: list or tuple of 2 floats, or None.
+        Specifies explicit thresholds for either or both of the inputs.
+        Absolute values less than these thresholds, and values exactly equal to zero,
+        are considered "near zero". Otherwise inferred from confidence.
+        Various combinations are allowed:
+            - None         - both thresholds determined separately, based on confidence.
+            - single float - specifies thresholds against both inputs
+            - [float, float] - specifies separate thresholds against both inputs
+            - [float, None]  - specifies threshold against first only, the other is determined based on confidence
+            - [None, float]  - specifies threshold against second only, the other is determined based on confidence
+            - [None, None]   - both thresholds determined separately, based on confidence.
+    Returns:
+        tuple (threshold1, threshold2)
+    """
+    t1 = None
+    t2 = None
+    if thresholds is not None:
+        try:
+            t1, t2 = thresholds
+        except ValueError:
+            raise ValueError(f"thresholds must have length 2, but got length {len(thresholds)}: {thresholds}")
+    return t1, t2
 
 
 def _partial_filter_by_sum(counts, sums, terms, masks, completeness):
