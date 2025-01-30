@@ -502,7 +502,7 @@ def describe_tensor_near_zero_explanation(counts, sums=None, *, mask=None, thres
         negatives_are_bad: whether negative values are equivalent to zeros
         verbose: whether to include extra working details in the description
     Returns:
-        textual description
+        list of textual descriptions, approximately with highest-degree summary first
     """
     # parse args
     counts, sums, _ = me.standardize(counts, sums, mask=mask)
@@ -522,13 +522,58 @@ def describe_tensor_near_zero_explanation(counts, sums=None, *, mask=None, thres
     else:
         near_zero_description = f"{zero_fraction * 100:.1f}% near-zero"
 
-    if zero_fraction > neg_fraction:
-        return near_zero_description
+    # order summaries, highest importance first
+    summaries = []
+    if neg_fraction > zero_fraction:
+        summaries.append(f"{neg_fraction * 100:.1f}% negative")
+        summaries.append(near_zero_description)
     else:
-        if verbose:
-            return f"{neg_fraction * 100:.1f}% negative, {near_zero_description}"
-        else:
-            return f"{neg_fraction * 100:.1f}% negative"
+        summaries.append(near_zero_description)
+        if neg_fraction > 0:
+            summaries.append(f"{neg_fraction * 100:.1f}% negative")
+
+    return summaries
+
+
+def describe_tensor_units_near_zero_explanation(counts, sums=None, *, mask=None, threshold=None,
+                                                negatives_are_bad=False, verbose=True):
+    """
+    Similar to describe_tensor_near_zero_explanation() but treats the tensor as having
+    shape `(batch, ..spatial_dims.., units)` and calculates on a per-unit basis before reporting
+    overal stats.
+    Args:
+        counts: counts from tensor_classify(), with shape: value_shape + (terms,),
+            or supply tensor with (counts, sums)
+        sums: counts from tensor_classify(), with shape: value_shape + (terms,)
+        mask: boolean mask against, with shape: value_shape
+        threshold: indication of the threshold that was used for masking, used for display purposes only
+        negatives_are_bad: whether negative values are equivalent to zeros
+        verbose: whether to include more information (currently has no effect)
+    Returns:
+        list of textual descriptions, approximately with highest-degree summary first
+    """
+    # parse args
+    counts, sums, _ = me.standardize(counts, sums, mask=mask)
+    if counts.shape[-1] != 3:
+        raise ValueError("Not a tensor classification")
+
+    # compute details for zeros and negatives (as appropriate)
+    if negatives_are_bad:
+        zero_mask = np.logical_or(counts[..., 1] > 0, counts[..., 2] > 0)
+    else:
+        zero_mask = counts[..., 1] > 0
+
+    # compute rates of occurrences of zero/neg across each unit
+    # - per-unit fraction of zero/neg values
+    # - overall fraction of units that are dead 100% of the time
+    # - mean fraction across all units is the same as the whole-tensor near-zero rate, so don't report on it
+    zero_rates = np.mean(zero_mask, axis=tuple(range(zero_mask.ndim-1)))
+    dead_fraction = np.sum(zero_rates == 1.0) / np.size(zero_rates)
+
+    condition_txt = "near-zero or negative" if negatives_are_bad else "near-zero"
+    dims_txt = "batch" if counts.ndim <= 3 else "batch and spatial"
+
+    return [f"{dead_fraction * 100:.1f}% of units always {condition_txt} across all {dims_txt} dims"]
 
 
 def get_layer_handler_for(layer, layer_index, variables, gradients, inputs, output, output_gradients,
