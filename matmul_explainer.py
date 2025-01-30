@@ -534,6 +534,93 @@ def multiply_classify(x, y, confidence: float = 0.95, thresholds: list = None, r
         return counts, sums
 
 
+def tensordot_classify(x, y, axes, confidence: float = 0.95, thresholds: list = None, return_thresholds=False):
+    """
+    Calculates how the tensor-dot of x and y come to have the range of values that it does.
+
+    Like matmul_classify but for the tensor-dot operation.
+
+    Args:
+        x: np-array or tensor
+        y: np-array or tensor, must have the same type and shape as x
+        axes: scalar int or a list of int. With same meaning as in tf.tensordot.
+        confidence: statistical confidence (0.0 to 1.0) that you wish to meet
+          that a value is accurately placed within the P, Z, or N categories.
+          Higher values lead to more strict requirements for "near zero".
+          1.0 only considers exactly 0.0 as "near zero".
+        thresholds: list or tuple of 2 floats.
+            Specifies explicit thresholds for either or both of the inputs.
+            Absolute values less than these thresholds, and values exactly equal to zero,
+            are considered "near zero". Otherwise inferred from confidence.
+            Various combinations are allowed:
+                - None         - both thresholds determined separately, based on confidence.
+                - single float - specifies thresholds against both inputs
+                - [float, float] - specifies separate thresholds against both inputs
+                - [float, None]  - specifies threshold against first only, the other is determined based on confidence
+                - [None, float]  - specifies threshold against second only, the other is determined based on confidence
+                - [None, None]   - both thresholds determined separately, based on confidence.
+        return_thresholds: whether to additionally return the derived thresholds
+
+    Returns:
+        (counts, sums) containing the counts and sums of each component, respectively.
+        Each a tensor with shape `value_shape + (9,)`, where `value_shape` is the output shape of the tensor-dot
+        operation.
+        OR
+        (counts, sums, thresholds) with list of thresholds also returned
+    """
+    # standardise on data format
+    x = tf.constant(x)
+    y = tf.constant(y)
+
+    # apply thresholds and create masks
+    x_threshold, y_threshold = _parse_thresholds_arg(thresholds)
+    x_p, x_z, x_n, x_threshold = classification_mask(x, confidence, x_threshold)
+    y_p, y_z, y_n, y_threshold = classification_mask(y, confidence, y_threshold)
+
+    # compute counts and sums for each classification
+    counts = []
+    x_pc = tf.cast(x_p, tf.float32)
+    x_zc = tf.cast(x_z, tf.float32)
+    x_nc = tf.cast(x_n, tf.float32)
+    y_pc = tf.cast(y_p, tf.float32)
+    y_zc = tf.cast(y_z, tf.float32)
+    y_nc = tf.cast(y_n, tf.float32)
+    counts.append(tf.tensordot(x_pc, y_pc, axes=axes))
+    counts.append(tf.tensordot(x_pc, y_zc, axes=axes))
+    counts.append(tf.tensordot(x_pc, y_nc, axes=axes))
+    counts.append(tf.tensordot(x_zc, y_pc, axes=axes))
+    counts.append(tf.tensordot(x_zc, y_zc, axes=axes))
+    counts.append(tf.tensordot(x_zc, y_nc, axes=axes))
+    counts.append(tf.tensordot(x_nc, y_pc, axes=axes))
+    counts.append(tf.tensordot(x_nc, y_zc, axes=axes))
+    counts.append(tf.tensordot(x_nc, y_nc, axes=axes))
+
+    sums = []
+    x_pv = tf.where(x_p, x, tf.zeros_like(x))
+    x_zv = tf.where(x_z, x, tf.zeros_like(x))
+    x_nv = tf.where(x_n, x, tf.zeros_like(x))
+    y_pv = tf.where(y_p, y, tf.zeros_like(y))
+    y_zv = tf.where(y_z, y, tf.zeros_like(y))
+    y_nv = tf.where(y_n, y, tf.zeros_like(y))
+    sums.append(tf.tensordot(x_pv, y_pv, axes=axes))
+    sums.append(tf.tensordot(x_pv, y_zv, axes=axes))
+    sums.append(tf.tensordot(x_pv, y_nv, axes=axes))
+    sums.append(tf.tensordot(x_zv, y_pv, axes=axes))
+    sums.append(tf.tensordot(x_zv, y_zv, axes=axes))
+    sums.append(tf.tensordot(x_zv, y_nv, axes=axes))
+    sums.append(tf.tensordot(x_nv, y_pv, axes=axes))
+    sums.append(tf.tensordot(x_nv, y_zv, axes=axes))
+    sums.append(tf.tensordot(x_nv, y_nv, axes=axes))
+
+    # format into final output (numpy)
+    counts = np.stack(counts, axis=-1)
+    sums = np.stack(sums, axis=-1)
+    if return_thresholds:
+        return counts, sums, [x_threshold.numpy(), y_threshold.numpy()]
+    else:
+        return counts, sums
+
+
 def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float = 0.95,
                   thresholds: list = None, return_thresholds=False):
     """
