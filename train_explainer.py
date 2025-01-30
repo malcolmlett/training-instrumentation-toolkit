@@ -369,13 +369,15 @@ def explain_near_zero_gradients(callbacks: list,
 
     print()
     print("Let:")
-    print("  A_0 <- input activation to target layer")
-    print("  W_l <- weights of target layer")
-    print("  Z_l <- pre-activation output of target layer")
-    print("  S_l <- effect of activation function as element-wise multiplier")
-    print("  A_l <- output activation of target layer")
+    print("  A_0      <- input activation to target layer")
+    print("  W_l      <- weights of target layer")
+    print("  Z_l      <- pre-activation output of target layer")
+    print("  S_l      <- effect of activation function as element-wise multiplier")
+    print("  A_l      <- output activation of target layer")
     if verbose:
-        print("  PZN <- breakdown of values into (P)ositive, near-(Z)ero, or (N)egative")
+        print("  PZN      <- breakdown of values into (P)ositive, near-(Z)ero, or (N)egative")
+        print("  x . y    <- matmul (aka dot product)")
+        print("  x (.) y  <- element-wise multiply")
 
     # explain forward pass
     # - let A_0 be input activation to this layer (not necessarily the first layer input)
@@ -962,9 +964,14 @@ class LayerHandler:
     #  Currently the main explain method will silently filter out the unknown variables and this method
     #  won't know they exist. So it's heuristics will produce bad results (eg: assuming there's no bias,
     #  which will affect display of Z calculations).
-    def __init__(self, display_name, variables, gradients, inputs, output, output_gradients, layer_subscript=None):
+    def __init__(self, display_name, layer, variables, gradients, inputs, output, output_gradients,
+                 layer_subscript=None):
         """
         Args:
+            display_name:
+                Made available as a property. For any use as needed.
+            layer:
+                The actual layer itself.
             variables: list of tensor.
                 The state of the variables for this layer at the time of interest, or None if unknown.
             gradients: list of tensor.
@@ -980,6 +987,7 @@ class LayerHandler:
                 'A_l', 'Z_l', etc.
         """
         self._display_name = display_name
+        self._layer = layer
         self._variables = variables
         self._gradients = gradients
         self._inputs = inputs
@@ -993,6 +1001,10 @@ class LayerHandler:
     @property
     def display_name(self):
         return self._display_name
+
+    @property
+    def layer(self):
+        return self._layer
 
     @property
     def variables(self):
@@ -1014,34 +1026,57 @@ class LayerHandler:
     def output_gradients(self):
         return self._output_gradients
 
+    def get_input(self):
+        """
+        Makes a mandatory fetch of the layer's single input.
+        Fails if there is no single unambiguous input. This avoids the need for sanity checking logic in
+        other calculation methods.
+        Returns:
+            The input tensor, if found.
+        Raises:
+            UnsupportedNetworkError: if cannot handle this for the given layer type
+        """
+        if self.inputs is None or len(self.inputs) == 0:
+            raise UnsupportedNetworkError("input to layer unknown")
+        if len(self.inputs) > 1:
+            raise UnsupportedNetworkError(f"multiple activations from previous layers: {[a.shape for a in self.inputs]}")
+        if self.inputs[0] is not None:
+            return self.inputs[0]
+        else:
+            raise UnsupportedNetworkError("input to layer unknown")
+
     def get_weights(self):
         """
-        Identifies which of the layer's variables is the main weights tensor, or kernel in the case of convolutional layers.
-        The default implementation just picks the largest variable.
+        Makes a mandatory fetch of the layer's main weights.
+        Identifies which of the layer's variables is the main weights tensor, or kernel in the case of convolutional
+        layers. The default implementation just picks the largest variable.
+        Fails if the gradients cannot be found. This avoids the need for sanity checking logic in
+        other calculation methods.
         Returns:
-            The weights, or none if this layer is understood but has no variables.
+            The weights, if found.
         Raises:
-            UnsupportedNetworkError if cannot handle this for the given layer type
+            UnsupportedNetworkError: if cannot handle this for the given layer type
         """
-        if self.variables is None:
-            raise UnsupportedNetworkError("Variables unknown")
-        if len(self.variables) > 0:
+        largest = None
+        if self.variables is not None and len(self.variables) > 0:
             largest, _ = _split_by_largest(self.variables)
+        if largest is not None:
             return largest
         else:
-            return None
+            raise UnsupportedNetworkError("weights unknown")
 
-    def get_biases(self):
+    def get_biases_or_none(self):
         """
+        Makes an optional fetch of the layer's main weights.
         Identifies which of the layer's variables is the main bias tensor.
         The default implementation just picks the second largest variable, if one is present.
         Returns:
             The biases, or none if this layer is understood but has less than two variables.
         Raises:
-            UnsupportedNetworkError if cannot handle this for the given layer type
+            UnsupportedNetworkError: if cannot handle this for the given layer type
         """
         if self.variables is None:
-            raise UnsupportedNetworkError("Variables unknown")
+            raise UnsupportedNetworkError("variables unknown")
         if len(self.variables) >= 2:
             _, rest = _split_by_largest(self.variables)
             return rest[0]
@@ -1050,27 +1085,32 @@ class LayerHandler:
 
     def get_weight_gradients(self):
         """
-        Identifies which of the layer's gradients are the gradients for the main weights, or for the kernel in the case of
-        convolutional layers.
-        The default implementation just picks the largest gradients.
+        Makes a mandatory fetch of the gradients of the layer's main weights.
+        Identifies which of the layer's gradients are the gradients for the main weights, or for the kernel in the case
+        of convolutional layers. The default implementation just picks the largest gradients.
+        Fails if the gradients cannot be found. This avoids the need for sanity checking logic in
+        other calculation methods.
         Returns:
-            The gradients, or none if this layer is understood but has no gradients.
+            The gradients, if known.
         Raises:
             UnsupportedNetworkError if cannot handle this for the given layer type
         """
-        if self.gradients is None:
-            raise UnsupportedNetworkError("Gradients unknown")
-        if len(self.gradients) > 0:
+        largest = None
+        if self.gradients is not None and len(self.gradients) > 0:
             largest, _ = _split_by_largest(self.gradients)
+        if largest is not None:
             return largest
         else:
-            return None
+            raise UnsupportedNetworkError("gradients unknown")
 
     def get_A(self):
         """
         Gets the post-activation output from this layer, if known.
         """
-        return self.output
+        if self.output is not None:
+            return self.output
+        else:
+            raise UnsupportedNetworkError(f"A{self.subscript} unknown")
 
     def calculate_Z(self, return_equation=False, return_note=False):
         """
@@ -1252,8 +1292,9 @@ class LayerHandler:
 
 
 class DenseLayerHandler(LayerHandler):
-    def __init__(self, display_name, variables, gradients, inputs, output, output_gradients, layer_subscript=None):
-        super().__init__(display_name, variables, gradients, inputs, output, output_gradients, layer_subscript)
+    def __init__(self, display_name, layer, variables, gradients, inputs, output, output_gradients,
+                 layer_subscript=None):
+        super().__init__(display_name, layer, variables, gradients, inputs, output, output_gradients, layer_subscript)
 
     def calculate_Z(self, return_equation=False, return_note=False):
         # The following mirrors how TF Dense layer copes with unexpected spatial dims - by treating them
@@ -1262,7 +1303,7 @@ class DenseLayerHandler(LayerHandler):
         #   Z_l = tf.matmul(A_0, W_l)
         A_0 = self.get_input()
         W_l = self.get_weights()
-        b_l = self.get_biases()  # may be None
+        b_l = self.get_biases_or_none()  # may be None
         Z_l = tf.tensordot(A_0, W_l, axes=([-1], [0]))
         equation = f"A_0 . W{self.subscript}"
         if b_l is not None:
@@ -1296,7 +1337,7 @@ class DenseLayerHandler(LayerHandler):
         axes_dJdZ = list(range(len(dJdZ_l.shape) - 1))  # sum over all but last dim
         dJdW_l = tf.tensordot(A_0, dJdZ_l, axes=[axes_A, axes_dJdZ])
         if tf.rank(A_0) > 2 or tf.rank(dJdZ_l) > 2:
-            equation = f"tensordot(A_0, dJ/dZ{self.subscript}, axes=[{axes_A}, {axes_dJdZ}])"
+            equation = f"A_0 tensordot(axes=[{axes_A}, {axes_dJdZ}]) dJ/dZ{self.subscript})"
         else:
             equation = f"A_0^T . dJ/dZ{self.subscript}"
 
@@ -1333,7 +1374,6 @@ class DenseLayerHandler(LayerHandler):
         W_l = self.get_weights()
         dJdW_l = self.get_weight_gradients()
         A_0 = self.get_input()
-
         if tf.rank(A_0) > 2 or tf.rank(dJdW_l) > 2:
             raise UnsupportedNetworkError("backprop estimation not supported with spatial dims")
 
@@ -1346,12 +1386,89 @@ class DenseLayerHandler(LayerHandler):
             res.append(None)
         return tuple(res) if len(res) > 1 else res[0]
 
-    def get_input(self):
-        if self.inputs is None or len(self.inputs) == 0:
-            raise UnsupportedNetworkError("Inputs to layer unknown")
-        if len(self.inputs) > 1:
-            raise UnsupportedNetworkError(f"Multiple activations from previous layer: {[a.shape for a in self.inputs]}")
-        return self.inputs[0]
+
+class ConvLayerHandler(LayerHandler):
+    def __init__(self, display_name, layer, variables, gradients, inputs, output, output_gradients,
+                 layer_subscript=None):
+        super().__init__(display_name, layer, variables, gradients, inputs, output, output_gradients, layer_subscript)
+
+    def calculate_Z(self, return_equation=False, return_note=False):
+        # The following mirrors how TF Dense layer copes with unexpected spatial dims - by treating them
+        # as if they're part of the batch. All done via the magic of tensordot.
+        # The following is the equivalent of this for a simple (batch, channels) input:
+        #   Z_l = tf.matmul(A_0, W_l)
+        A_0 = self.get_input()    # shape: (batch, ..spatial_dims.., in_channels)
+        W_l = self.get_weights()  # shape: (k_h, k_w, in_channels, out_channels)
+        b_l = self.get_biases_or_none()   # shape: (out_channels,), may be None
+
+        conv_params, note = self.get_conv_params()
+        Z_l = tf.nn.convolution(input=A_0, filters=W_l, **conv_params)
+        equation = f"A_0 conv W{self.subscript}"
+        if b_l is not None:
+            Z_l = Z_l + b_l
+            equation = f"A_0 conv W{self.subscript} + b{self.subscript}"
+
+        res = [Z_l]
+        if return_equation:
+            res.append(equation)
+        if return_note:
+            res.append(None)
+        return tuple(res) if len(res) > 1 else res[0]
+
+    def classify_Z_calculation(self, confidence):
+        A_0 = self.get_input()
+        W_l = self.get_weights()
+        conv_params, _ = self.get_conv_params()
+        return me.conv_classify(A_0, W_l, confidence=confidence, **conv_params)
+
+    def calculate_dJdW(self, dJdZ_l, return_equation=False, return_note=False):
+        # while tf.nn.conv2d_backprop_filter() and tf.nn.conv1d_backprop_filter() are available,
+        # they are actually equivalent to a transposed convolution, and there is a multi-dimensional
+        # equivalent of that, just like for the forward pass. So we use that to make life easy.
+        A_0 = self.get_input()
+        W = self.get_weights()
+        conv_params, note = self.get_conv_params()
+        #dJdW = tf.nn.conv2d_backprop_filter(
+        #    input=A_0,
+        #    filter_sizes=W.shape,
+        #    out_backprop=dJdZ,
+        #    **conv_params
+        #)
+        dJdW_l = tf.nn.conv_transpose(
+            input=dJdZ_l,
+            filters=A_0,
+            output_shape=W.shape,
+            **conv_params)
+        equation = f"dJ/dZ{self.subscript} conv^T A_0"
+
+        res = [dJdW_l]
+        if return_equation:
+            res.append(equation)
+        if return_note:
+            res.append(None)
+        return tuple(res) if len(res) > 1 else res[0]
+
+    def classify_dJdW_calculation(self, dJdZ_l, confidence):
+        A_0 = self.get_input()
+        axes_A = list(range(len(A_0.shape) - 1))
+        axes_dJdZ = list(range(len(dJdZ_l.shape) - 1))
+        return me.tensordot_classify(A_0, dJdZ_l, axes=[axes_A, axes_dJdZ], confidence=confidence)
+
+    def get_conv_params(self):
+        # determines the other arguments to tf.nn.convolution() if possible
+        # Returns: **kwargs, note
+        kwargs = {}
+        dodgy = False
+        if hasattr(self.layer, 'strides'):
+            kwargs['strides'] = self.layer.strides
+        else:
+            dodgy = True
+        if hasattr(self.layer, 'padding'):
+            kwargs['padding'] = None if self.layer.padding is None else self.layer.padding.upper()
+        else:
+            dodgy = True
+        note = "padding and strides may be inaccurate" if dodgy else None
+        return kwargs, note
 
 
 def reload_safe_isinstance(obj, cls):
