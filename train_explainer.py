@@ -107,16 +107,72 @@ def explain_near_zero_gradients_skeleton(layer_index: int,
     # TODO ...
 
 
-def explain_near_zero_gradients(layer_index: int,
-                                gradients: tot.GradientHistoryCallback,
-                                activity: tot.ActivityHistoryCallback,
-                                variables: tot.VariableHistoryCallback,
+def explain_near_zero_gradients(callbacks: list,
+                                layer_index: int,
                                 epoch=None, step=None,
                                 confidence: float = 0.99,
                                 threshold: float = None,
                                 verbose=False):
+    """
+    Attempts to identify the explanation for zero and near-zero gradients in a given layer.
+
+    Callbacks must be populated with data from a call to fit(). Callbacks must
+    be populated with full raw data collection for at least the layer in question
+    plus:
+    - activity: also must capture raw activity for the input layers to the layer in question.
+
+    Args:
+        callbacks: List of callbacks as supplied to fit() and now populated with data.
+          See above for additional requirements.
+        layer_index: layer to examine
+        epoch: epoch number selection from callback histories, if callbacks captured against epochs
+        step: step number selection from callback histories, if callbacks captured against update steps
+        confidence: confidence level for near-zero classification throughout
+            Ignored for the selected layer gradients if `threshold` is set, but still used for other thresholds
+        threshold: this layer gradients equal or below this magnitude are considered "near-zero".
+            Not used for other thresholding.
+        verbose: whether to show more detailed information.
+
+    Usage:
+    > l_idx = 35
+    > variables = VariableHistoryCallback(collection_sets=[{layer_indices: l_idx}, before_updates=True)
+    > activity = ActivityHistoryCallback(collection_sets=[{layer_indices: [l_idx-1, l_idx]})
+    > gradients = GradientHistoryCallback(collection_sets=[{layer_indices: l_idx})
+    > output_gradients = LayerOutputGradientHistoryCallback(collection_sets=[{layer_indices: l_idx})
+    > fit(model, train_data, callbacks=[variables, activity, gradients, output_gradients])
+    > explain_near_zero_gradients(l_idx, epoch=..., callbacks=[variables, activity, gradients, output_gradients])
+    """
+
+    # parse arguments - extract individual callbacks by type
+    variables = None
+    activity = None
+    gradients = None
+    output_gradients = None
+    for cb in callbacks:
+        if reload_safe_isinstance(cb, tot.VariableHistoryCallback):
+            variables = cb
+        elif reload_safe_isinstance(cb, tot.ActivityHistoryCallback):
+            activity = cb
+        elif reload_safe_isinstance(cb, tot.GradientHistoryCallback):
+            gradients = cb
+        elif reload_safe_isinstance(cb, tot.LayerOutputGradientHistoryCallback):
+            output_gradients = cb
+
+    # parse arguments - identify iteration number
+    if epoch is not None:
+        indices = np.nonzero(gradients.epochs == epoch)[0]
+        if len(indices) == 0:
+            raise ValueError(f"Epoch {epoch} not found in gradient history")
+        iteration = indices[0]
+    elif step is not None:
+        indices = np.nonzero(gradients.steps == step)[0]
+        if len(indices) == 0:
+            raise ValueError(f"Step {step} not found in gradient history")
+        iteration = indices[0]
+    else:
+        raise ValueError("One of epoch or step must be specified")
+
     # get model and identify inbound and outbound layers
-    iteration = step if epoch is None else epoch
     model = gradients.model
     target_layer = model.layers[layer_index]
     inbound_layer_indices = _find_inbound_layers(model, target_layer, return_type='index')
@@ -136,9 +192,10 @@ def explain_near_zero_gradients(layer_index: int,
         grads = [gradients.gradients[var_idx][iteration] for var_idx in l_to_var_indices[l_idx]]
         inputs = [activity.layer_outputs[l_idx2][iteration] for l_idx2 in inbound_layer_indices]
         output = activity.layer_outputs[l_idx][iteration]
+        output_grads = output_gradients.gradients[l_idx][iteration]
         return get_layer_handler_for(
             layer=layer, layer_index=l_idx, layer_subscript=subscript, return_note=True,
-            variables=vars, gradients=grads, inputs=inputs, output=output)
+            variables=vars, gradients=grads, inputs=inputs, output=output, output_gradients=output_grads)
 
     # get variables, activities, and gradients of interest
     # TODO do something with handler notes
@@ -148,20 +205,39 @@ def explain_near_zero_gradients(layer_index: int,
     next_layer_handlers = [handler for handler, note in next_layer_handlers_and_notes]
     next_layer_handler_notes = [note for handler, note in next_layer_handlers_and_notes]
 
-    def _explain_tensor(name, tensor, mask_name=None, mask=None, negatives_are_bad=False):
+    def _explain_tensor(name, tensor, mask_name=None, mask=None, negatives_are_bad=False, include_summary_by_unit=False):
         quantiles = [0, 25, 50, 75, 100]
         counts, sums, threshold = me.tensor_classify(tensor, confidence=confidence, return_threshold=True)
+        summaries, _ = describe_tensor_near_zero_explanation(counts, sums, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)
+        if not verbose:
+           summaries = [summaries[0]]  # pick first only
+        if include_summary_by_unit:
+            extra, extra_fractions = te.describe_tensor_units_near_zero_explanation(counts, sums, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)
+            if verbose:
+                summaries.extend(extra)
+            elif extra_fractions[0] > (1.1 * (1 - confidence)):
+                summaries.append(extra[0])
         print(f"{name}:")
         print(f"  shape:             {np.shape(tensor)} -> total values: {np.size(tensor)}")
-        print(f"  summary:           {describe_tensor_near_zero_explanation(counts, sums, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)}")
+        print(f"  summary:           {', '.join(summaries)}")
         if verbose:
             print(f"  value percentiles: {quantiles} -> {tfp.stats.percentile(tensor, quantiles).numpy()}")
             print(f"  PZN counts/sums:   {me.summarise(counts, sums, show_percentages=False, show_means=False)}")
             print(f"  PZN counts/means:  {me.summarise(counts, sums, show_percentages=True, show_means=True)}")
         if mask_name:
-            print(f"  {(mask_name + ':'):19} {describe_tensor_near_zero_explanation(counts, sums, mask=mask, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)}")
+            mask_summaries, _ = describe_tensor_near_zero_explanation(counts, sums, mask=mask, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)
+            if not verbose:
+              mask_summaries = [mask_summaries[0]]  # pick first only
+            print(f"  {(mask_name + ':'):19} {', '.join(mask_summaries)}")
         if mask_name and verbose:
             print(f"  {(mask_name + ':'):19} {me.summarise(counts, sums, mask=mask, show_percentages=True, show_means=True)}")
+
+    def _explain_actual_vs_estimate(name, actual, estimate):
+        error = estimate - actual
+        quantiles = [0, 25, 50, 75, 100]
+        print(f"{name} estimate vs actual:")
+        print(f"  RMSE:              {np.sqrt(np.mean(error**2))}")
+        print(f"  error percentiles: {quantiles} -> {tfp.stats.percentile(error, quantiles).numpy()}")
 
     def _explain_combination(name, inputs, result, counts, sums, fixed_threshold=None):
         # note: has noteworthy level of zeros if exceed 1.1x the percent we'd expect from the confidence level alone.
@@ -241,7 +317,7 @@ def explain_near_zero_gradients(layer_index: int,
     print(f"Forward pass...")
     for idx, A_0 in enumerate(target_layer_handler.inputs):
         name = "A_0" if len(target_layer_handler.inputs) == 1 else f"A_0#{idx}"
-        _explain_tensor(name + ' - input value', A_0)
+        _explain_tensor(name + ' - input value', A_0, include_summary_by_unit=True)
 
     W_l = target_layer_handler.get_weights()
     _explain_tensor("W_l - weights of target layer", W_l,
@@ -253,7 +329,7 @@ def explain_near_zero_gradients(layer_index: int,
         counts, sums = target_layer_handler.classify_Z_calculation(confidence=confidence)
         _explain_combination(f"Z_l = {Z_l_eqn}", ['A_0', 'W_l'], Z_l, counts, sums)
         _explain_combination_near_zero("Z_l", ['A_0', 'W_l'], Z_l, counts, sums)
-        _explain_tensor("Z_l - pre-activation output", Z_l, negatives_are_bad=True)
+        _explain_tensor("Z_l - pre-activation output", Z_l, negatives_are_bad=True, include_summary_by_unit=True)
         if Z_l_note and verbose:
             print(f"  note:              {Z_l_note}")
     except UnsupportedNetworkError as e:
@@ -263,7 +339,7 @@ def explain_near_zero_gradients(layer_index: int,
     A_l = target_layer_handler.get_A()
     try:
         S_l, S_l_note = target_layer_handler.calculate_S(return_note=True)
-        _explain_tensor("S_l - activation function", S_l)
+        _explain_tensor("S_l - activation function", S_l, include_summary_by_unit=True)
         if S_l_note and verbose:
             print(f"  note:              {S_l_note}")
     except UnsupportedNetworkError as e:
@@ -278,29 +354,36 @@ def explain_near_zero_gradients(layer_index: int,
     # - compute dJ/dW_l = A_0^T . dJ/dZ_l    <-- note: experimentally this produces very accurate results.
     print()
     print(f"Backward pass...")
-    dJdA_l_list = []
-    for idx, next_layer_handler in enumerate(next_layer_handlers):
-        suffix = "" if len(next_layer_handlers) == 1 else f"#{idx}"
-        try:
-            backprop, note = next_layer_handler.calculate_backprop(return_note=True)
-            _explain_tensor(f"dJ/dA_l{suffix} - backprop from next layer {next_layer_handler.display_name}", backprop)
-            if note and verbose:
-                print(f"  note:              {note}")
-            elif verbose:
-                print(f"  note:              estimated via weights and gradients in next layer")
-            dJdA_l_list.append(backprop)
-        except UnsupportedNetworkError as e:
-            print(f"dJ/dA_l{suffix} - backprop from next layer {next_layer_handler.display_name}")
-            print(f"  note:              unable to infer due to {e}")
-            # ignore and continue on with backprops received from any other next layers
-
-    # if multiple next layers, backprop to this layer is mean across their individual backprops
-    if len(dJdA_l_list) > 0:
-        dJdA_l = np.mean(np.stack(dJdA_l_list, axis=-1), axis=-1)
+    dJdA_l = target_layer_handler.output_gradients
+    if dJdA_l is not None:
+        _explain_tensor(f"dJ/dA_l - backprop into this layer", dJdA_l, include_summary_by_unit=True)
     else:
-        dJdA_l = None
-    if len(dJdA_l_list) > 1:
-        _explain_tensor(f"dJ/dA_l - final backprop into this layer", dJdA_l)
+        # estimate dJdA_l by estimating backprop from each output layer and then combining
+        # - unlikely to need to do this, but I wrote this code before I realised I could directly extract output
+        #   gradients
+        dJdA_l_list = []
+        for idx, next_layer_handler in enumerate(next_layer_handlers):
+            suffix = "" if len(next_layer_handlers) == 1 else f"#{idx}"
+            try:
+                backprop, note = next_layer_handler.calculate_backprop(return_note=True)
+                _explain_tensor(f"dJ/dA_l{suffix} - backprop from next layer {next_layer_handler.display_name}",
+                                backprop, include_summary_by_unit=True)
+                if note and verbose:
+                    print(f"  note:              {note}")
+                elif verbose:
+                    print(f"  note:              estimated via weights and gradients in next layer")
+                dJdA_l_list.append(backprop)
+            except UnsupportedNetworkError as e:
+                print(f"dJ/dA_l{suffix} - backprop from next layer {next_layer_handler.display_name}")
+                print(f"  note:              unable to infer due to {e}")
+                # ignore and continue on with backprops received from any other next layers
+        # if multiple next layers, backprop to this layer is mean across their individual backprops
+        if len(dJdA_l_list) > 0:
+            dJdA_l = np.mean(np.stack(dJdA_l_list, axis=-1), axis=-1)
+        else:
+            dJdA_l = None
+        if len(dJdA_l_list) > 1:
+            _explain_tensor(f"dJ/dA_l - final backprop into this layer", dJdA_l, include_summary_by_unit=True)
 
     if dJdA_l is None:
         print(f"compute dJ/dZ_l:")
@@ -314,7 +397,7 @@ def explain_near_zero_gradients(layer_index: int,
             counts, sums = target_layer_handler.classify_dJdZ_calculation(dJdA_l, confidence=confidence)
             _explain_combination(f"dJ/dZ_l = {dJdZ_l_eqn}", [f"dJ/dA_l", 'S_l'], dJdZ_l, counts, sums)
             _explain_combination_near_zero("dJ/dZ_l", ['dJ/dA_l', 'S_l'], dJdZ_l, counts, sums)
-            _explain_tensor("dJ/dZ_l", dJdZ_l)
+            _explain_tensor("dJ/dZ_l", dJdZ_l, include_summary_by_unit=True)
             if dJdZ_l_note and verbose:
                 print(f"  note:              {dJdZ_l_note}")
         except UnsupportedNetworkError as e:
@@ -322,14 +405,16 @@ def explain_near_zero_gradients(layer_index: int,
             print(f"  note:              Unable to infer due to {e}")
             dJdZ_l = None
 
+    dJdW_l_est = None
     if dJdZ_l is None:
         print(f"compute dJ/dW_l:")
         print(f"  note:              Unable to infer without dJ/dZ_l")
     else:
         # typically: dJ/dW_l = A_0^T . dJ/dZ_l
+        # - using actual dJdW_l for determination of thresholds
         dJdW_l = target_layer_handler.get_weight_gradients()
         try:
-            _, dJdW_l_eqn, dJdW_l_note = target_layer_handler.calculate_dJdW(
+            dJdW_l_est, dJdW_l_eqn, dJdW_l_note = target_layer_handler.calculate_dJdW(
                 dJdZ_l, return_equation=True, return_note=True)
             counts, sums = target_layer_handler.classify_dJdW_calculation(dJdZ_l, confidence=confidence)
             _explain_combination(f"dJ/dW_l = {dJdW_l_eqn}", ['A_0^T', 'dJ/dZ_l'], dJdW_l, counts, sums, threshold)
@@ -339,6 +424,8 @@ def explain_near_zero_gradients(layer_index: int,
             print(f"  note:              Unable to infer due to {e}")
 
     dJdW_l = target_layer_handler.get_weight_gradients()
+    if dJdW_l is not None and dJdW_l_est is not None and verbose:
+        _explain_actual_vs_estimate("dJ/dW_l", dJdW_l, dJdW_l_est)
     _explain_tensor("dJ/dW_l", dJdW_l)
 
 
@@ -1174,3 +1261,14 @@ class DenseLayerHandler(LayerHandler):
         if len(self.inputs) > 1:
             raise UnsupportedNetworkError(f"Multiple activations from previous layer: {[a.shape for a in self.inputs]}")
         return self.inputs[0]
+
+
+def reload_safe_isinstance(obj, cls):
+    """
+    Because I do a lot of `reload(module)` during development, `isinstance` tests become unreliable.
+    """
+    if isinstance(obj, cls):
+        return True
+    obj_cls_fqn = f"{type(obj).__module__}.{type(obj).__name__}"
+    cls_fqn = f"{cls.__module__}.{cls.__name__}"
+    return obj_cls_fqn == cls_fqn
