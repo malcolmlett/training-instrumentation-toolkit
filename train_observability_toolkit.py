@@ -6,7 +6,6 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import tqdm
-import copy
 
 # tip: to get output shape of a layer:
 #  model.layers[l].compute_output_shape(model.layers[l].input.shape)
@@ -1842,11 +1841,6 @@ def _normalize_collection_sets_for_layers(model: tf.keras.Model, collection_sets
     Returns:
         new collection_sets after modification
     """
-    def _assert_at_most_one_property_of(obj, allowed: list):
-        present = [key for key in allowed if key in obj]
-        if len(present) > 1:
-            raise ValueError(f"At most one of {allowed} can be present. Found: {present}")
-
     # precompute lookups
     layer_names = [layer.name for layer in model.layers]
     all_layer_indices = list(range(len(model.layers)))
@@ -1857,7 +1851,7 @@ def _normalize_collection_sets_for_layers(model: tf.keras.Model, collection_sets
 
     # validate and standardise on closed layer indices
     # (lookups automatically throws ValueError if any references not present in model layers)
-    collection_sets = copy.deepcopy(collection_sets)
+    collection_sets = _copy_collection_sets(collection_sets)
     for collection_set in collection_sets:
         _assert_at_most_one_property_of(collection_set, ['layers', 'layer_indices', 'layer_names'])
 
@@ -1958,11 +1952,6 @@ def _normalize_collection_sets_for_variables(model: tf.keras.Model, collection_s
     Returns:
         new collection_sets after modification
     """
-    def _assert_at_most_one_property_of(obj, allowed: list):
-        present = [key for key in allowed if key in obj]
-        if len(present) > 1:
-            raise ValueError(f"At most one of {allowed} can be present. Found: {present}")
-
     # precompute lookups
     layer_names = [layer.name for layer in model.layers]
     all_variable_indices = list(range(len(model.variables)))
@@ -1974,7 +1963,7 @@ def _normalize_collection_sets_for_variables(model: tf.keras.Model, collection_s
 
     # validate and standardise on closed variable indices
     # (lookups automatically throws ValueError if any references not present in model layers)
-    collection_sets = copy.deepcopy(collection_sets)
+    collection_sets = _copy_collection_sets(collection_sets)
     for collection_set in collection_sets:
         _assert_at_most_one_property_of(collection_set, ['layers', 'layer_indices', 'layer_names',
                                                          'variable_indices', 'trainable_variable_indices'])
@@ -2054,6 +2043,34 @@ def _normalize_collection_sets_for_variables(model: tf.keras.Model, collection_s
             pass
 
     return collection_sets
+
+
+def _assert_at_most_one_property_of(source_list, allowed: list):
+    """
+    Internal method used for validating input arguments.
+    Verifies that `source_list` contains at most one of the items in allowed, while ignoring everything else.
+    """
+    present = [key for key in allowed if key in source_list]
+    if len(present) > 1:
+        raise ValueError(f"At most one of {allowed} can be present. Found: {present}")
+
+
+def _copy_collection_sets(collection_sets):
+    """
+    Internal method used by `_normalize_collection_sets_for_xxx()`.
+    Performs an intermediate-depth clone:
+    - clones the outer list and each dict,
+    - but copies the dict values by reference.
+
+    Copes with the possibility that the user has created a single collection_sets object and shared amongst multiple
+    callbacks, while also coping with the possibility that some of the dict values are lists of layer or variable
+    object references, which we don't want to try to clone.
+    """
+    result_sets = []
+    for collection_set in collection_sets:
+        copied = collection_set.copy()
+        result_sets.append(copied)
+    return result_sets
 
 
 def measure_unit_activity(model, dataset, include_channel_activity=False, include_spatial_activity=False,
