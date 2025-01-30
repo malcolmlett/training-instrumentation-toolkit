@@ -224,12 +224,12 @@ def explain_near_zero_gradients(callbacks: list,
                 if variables.variables[var_idx] is None:
                     warnings_out.append(f"variable {var_idx} not collected")
                 else:
-                    vars.append(variables.variables[var_idx])
+                    vars.append(variables.variables[var_idx][iteration])
             if gradients and gradients.gradients is not None:
                 if gradients.gradients[var_idx] is None:
                     warnings_out.append(f"gradients of variable {var_idx} not collected")
                 else:
-                    grads.append(gradients.gradients[var_idx])
+                    grads.append(gradients.gradients[var_idx][iteration])
         for l_idx2 in inbound_layer_indices:
             if activity and activity.layer_outputs is not None:
                 if activity.layer_outputs[l_idx2] is None:
@@ -245,7 +245,7 @@ def explain_near_zero_gradients(callbacks: list,
             if output_gradients.gradients[l_idx] is None:
                 warnings_out.append(f"output gradients for layer {l_idx} not collected")
             else:
-                output_grads = output_gradients.gradients[l_idx]
+                output_grads = output_gradients.gradients[l_idx][iteration]
         return get_layer_handler_for(
             layer=layer, layer_index=l_idx, layer_subscript=subscript, return_note=True,
             variables=vars, gradients=grads, inputs=inputs, output=output, output_gradients=output_grads)
@@ -276,7 +276,7 @@ def explain_near_zero_gradients(callbacks: list,
         if not verbose:
            summaries = [summaries[0]]  # pick first only
         if include_summary_by_unit:
-            extra, extra_fractions = te.describe_tensor_units_near_zero_explanation(counts, sums, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)
+            extra, extra_fractions = describe_tensor_units_near_zero_explanation(counts, sums, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)
             if verbose:
                 summaries.extend(extra)
             elif extra_fractions[0] > (1.1 * (1 - confidence)):
