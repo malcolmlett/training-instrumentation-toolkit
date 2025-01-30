@@ -2263,7 +2263,7 @@ def plot_variable_history(variable_callback: VariableHistoryCallback, magnitudes
     placement[1:] += np.cumsum(band_log_scales[0, :])[0:-1]
     for f_idx in range(len(filtered_layer_metas)):
         l_idx, layer, v_idx = filtered_layer_metas[f_idx]
-        plt.text(len(iterations) / 100, placement[l_idx], layer.name, ha="left")
+        plt.text(len(iterations) / 100, placement[f_idx], layer.name, ha="left")
 
     # individual layers or variables
     for v_idx in range(num_variable_stats):
@@ -2377,7 +2377,7 @@ def plot_gradient_history(gradient_callback: GradientHistoryCallback, magnitudes
     placement[1:] += np.cumsum(band_log_scales[0, :])[0:-1]
     for f_idx in range(len(filtered_layer_metas)):
         l_idx, layer, v_idx = filtered_layer_metas[f_idx]
-        plt.text(len(iterations) / 100, placement[l_idx], layer.name, ha="left")
+        plt.text(len(iterations) / 100, placement[f_idx], layer.name, ha="left")
 
     # individual layers
     for v_idx in range(num_gradient_stats):
@@ -2472,7 +2472,7 @@ def plot_output_gradient_history(gradient_callback: LayerOutputGradientHistoryCa
     for s_idx in range(len(layer_stats)):
         l_idx = layer_ids[s_idx]
         layer = model.layers[l_idx]
-        plt.text(len(iterations) / 100, placement[l_idx], layer.name, ha="left")
+        plt.text(len(iterations) / 100, placement[s_idx], layer.name, ha="left")
 
     # individual layers
     for s_idx in range(num_layer_stats):
