@@ -133,6 +133,7 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
     activations = None
 
     # train
+    print(f"Training via custom fit() function. Will produce a few warnings; you can usually ignore these.")
     callbacks.on_train_begin()
     for gradient_callback in gradient_callbacks:
         gradient_callback.on_train_begin()
