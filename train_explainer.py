@@ -1173,7 +1173,7 @@ class LayerHandler:
             - warning note or none if no warnings (optional output)
         """
         S_l = self.calculate_S()
-        dJdZ_l = np.multiply(dJdA_l, S_l)
+        dJdZ_l = tf.multiply(dJdA_l, S_l)
         equation = f"dJdA{self.subscript} (.) S{self.subscript}"
 
         res = [dJdZ_l]
@@ -1256,10 +1256,14 @@ class DenseLayerHandler(LayerHandler):
         super().__init__(display_name, variables, gradients, inputs, output, output_gradients, layer_subscript)
 
     def calculate_Z(self, return_equation=False, return_note=False):
+        # The following mirrors how TF Dense layer copes with unexpected spatial dims - by treating them
+        # as if they're part of the batch. All done via the magic of tensordot.
+        # The following is the equivalent of this for a simple (batch, channels) input:
+        #   Z_l = tf.matmul(A_0, W_l)
         A_0 = self.get_input()
         W_l = self.get_weights()
         b_l = self.get_biases()  # may be None
-        Z_l = np.matmul(A_0, W_l)
+        Z_l = tf.tensordot(A_0, W_l, axes=([-1], [0]))
         equation = f"A_0 . W{self.subscript}"
         if b_l is not None:
             Z_l = Z_l + b_l
@@ -1278,10 +1282,23 @@ class DenseLayerHandler(LayerHandler):
         return me.matmul_classify(A_0, W_l, confidence=confidence)
 
     def calculate_dJdW(self, dJdZ_l, return_equation=False, return_note=False):
+        # The following mirrors how TF Dense layer copes with unexpected spatial dims - by treating them
+        # as if they're part of the batch. All done via the magic of tensordot.
+        # The following is the equivalent of this for simple (batch, in_channels) and (batch, out_channels) values:
+        #   A_0t = tf.transpose(A_0)
+        #   dJdW_l = tf.matmul(A_0t, dJdZ_l)
+        # But it works for:
+        #   A_0:    (batch, ..spatial_dims.., in_channels)
+        #   dJdZ_l: (batch, ..spatial_dims.., out_channels)
+        #   dJdW:   (in_channels, out_channels)
         A_0 = self.get_input()
-        A_0t = tf.transpose(A_0)
-        dJdW_l = np.matmul(A_0t, dJdZ_l)
-        equation = f"A_0^T . dJ/dZ{self.subscript}"
+        axes_A = list(range(len(A_0.shape) - 1))  # sum over all but last dim
+        axes_dJdZ = list(range(len(dJdZ_l.shape) - 1))  # sum over all but last dim
+        dJdW_l = tf.tensordot(A_0, dJdZ_l, axes=[axes_A, axes_dJdZ])
+        if tf.rank(A_0) > 2 or tf.rank(dJdZ_l) > 2:
+            equation = f"tensordot(A_0, dJ/dZ{self.subscript}, axes=[{axes_A}, {axes_dJdZ}])"
+        else:
+            equation = f"A_0^T . dJ/dZ{self.subscript}"
 
         res = [dJdW_l]
         if return_equation:
@@ -1292,8 +1309,9 @@ class DenseLayerHandler(LayerHandler):
 
     def classify_dJdW_calculation(self, dJdZ_l, confidence):
         A_0 = self.get_input()
-        A_0t = tf.transpose(A_0)
-        return me.matmul_classify(A_0t, dJdZ_l, confidence=confidence)
+        axes_A = list(range(len(A_0.shape) - 1))
+        axes_dJdZ = list(range(len(dJdZ_l.shape) - 1))
+        return me.tensordot_classify(A_0, dJdZ_l, axes=[axes_A, axes_dJdZ], confidence=confidence)
 
     def calculate_backprop(self, return_note=False):
         # We need the backprop gradients that are produced by this layer and which feed into the gradient update step of
@@ -1312,10 +1330,13 @@ class DenseLayerHandler(LayerHandler):
         #    => dJ/dZ_l = (A_0+)^T . dJ/dW_l                   <-- (b x f_l) = (b x f_0) . (f_0 x f_l)
         # #2:
         #    dJ/dA_0 = dJ/dZ_l . dZ_l/dA_0 = dJ/dZ_l . W_l^T   <-- (b x f_0) = (b x f_l) . (f_l x f_0)
-        # TODO do trickery for tensors with spatial dims -- need to be treated like batch dims
         W_l = self.get_weights()
         dJdW_l = self.get_weight_gradients()
         A_0 = self.get_input()
+
+        if tf.rank(A_0) > 2 or tf.rank(dJdW_l) > 2:
+            raise UnsupportedNetworkError("backprop estimation not supported with spatial dims")
+
         A_0_inv = tf.linalg.pinv(A_0)
         dJdZ_l = tf.linalg.matmul(A_0_inv, dJdW_l, transpose_a=True)
         dJdA_0 = tf.linalg.matmul(dJdZ_l, W_l, transpose_b=True)
