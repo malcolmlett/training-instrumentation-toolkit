@@ -114,18 +114,21 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
     else:
         train_step_fn = tf.function(_gradient_returning_train_step)
 
-    # train
-    logs = {}  # holds latest value at any given moment in time
+    # latest values
+    # - these are computed at each step, but we need to provide values at the end of each epoch,
+    #   so we'll just hold onto the last value computed at each step
+    logs = {}
     loss = None
     trainable_gradients = None
     output_gradients = None
     activations = None
+
+    # train
     callbacks.on_train_begin()
     for gradient_callback in gradient_callbacks:
         gradient_callback.on_train_begin()
     for epoch in range(initial_epoch, epochs):
         model.reset_metrics()
-        start = tf.timestamp()
         callbacks.on_epoch_begin(epoch)
         for gradient_callback in gradient_callbacks:
             gradient_callback.on_epoch_begin(epoch)
@@ -152,7 +155,6 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
                     output_gradients=output_gradients if gradient_callback.needs_output_gradients else None)
 
         # end of epoch
-        dur = (tf.timestamp() - start).numpy()
         callbacks.on_epoch_end(epoch, logs)  # should be passing loss and mse
         for gradient_callback in gradient_callbacks:
             gradient_callback.on_epoch_end(
@@ -869,10 +871,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
         Initialises tracking, now that we know the model and number of epochs and steps per epoch.
         """
         # init stats
-        filtered_stats_variable_indices = [_index_by_identity(self.model.variables, var)
-                                           for var in self.model.trainable_variables]
-        self.gradient_stats = [[] if var_idx in filtered_stats_variable_indices
-                               else None for var_idx in range(len(self.model.variables))]
+        self.gradient_stats = [[] for l_idx in range(len(self.model.layers))]
 
         # expand collection_sets and initialise gradient storages
         # (TODO also prepare slicing rules)
@@ -934,13 +933,20 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
 
     def _collect_stats(self, gradients):
         # compute stats for each individual layer
+        # - note: some layers cannot compute output gradients and we'll just get a None
+        #   here. There's no easy way of knowing which during setup, so we modify the setup
+        #   here now that we have that information.
         for l_idx, stat_list in enumerate(self.gradient_stats):
             if stat_list is not None:
-                stats_tensor = _compute_percentile_stats(
-                    gradients[l_idx],
-                    quartiles=self._gradient_stats_quantiles,
-                    magnitudes=self.magnitudes)
-                stat_list.append(stats_tensor)
+                if gradients[l_idx] is None:
+                    # turns out that gradients aren't calculated for this layer
+                    self.gradient_stats[l_idx] = None
+                else:
+                    stats_tensor = _compute_percentile_stats(
+                        gradients[l_idx],
+                        quartiles=self._gradient_stats_quantiles,
+                        magnitudes=self.magnitudes)
+                    stat_list.append(stats_tensor)
 
     def _collect_raw_values(self, gradients):
         # TODO do slicing
