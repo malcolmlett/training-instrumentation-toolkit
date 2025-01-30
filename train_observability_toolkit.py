@@ -278,7 +278,7 @@ class BaseGradientCallback:
             epoch: Integer, index of epoch.
         """
 
-    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations=None, output_gradients=None):
+    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations, output_gradients):
         """Called at the end of an epoch during training.
         Subclasses should override for any actions to run.
 
@@ -309,7 +309,7 @@ class BaseGradientCallback:
             batch: Integer, index of batch within the current epoch.
         """
 
-    def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations=None, output_gradients=None):
+    def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations, output_gradients):
         """Called at the end of a training batch in `fit` methods.
 
         Subclasses should override for any actions to run.
@@ -704,7 +704,7 @@ class GradientHistoryCallback(BaseGradientCallback):
         """
         self._epoch = epoch
 
-    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations=None):
+    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations, output_gradients):
         """
         Collects gradient stats and raw gradients after each epoch, if configured.
         """
@@ -713,7 +713,7 @@ class GradientHistoryCallback(BaseGradientCallback):
             self._collect_stats(loss, gradients, trainable_variables, activations)
             self._collect_raw_values(gradients)
 
-    def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations=None):
+    def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations, output_gradients):
         """
         Collects gradient stats and raw gradients after each update step, if configured.
         """
@@ -807,7 +807,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
         else:
             self.epochs = []
         self.model_stats = None
-        self.gradient_stats = []  # initially list (by layer) of list (by iteration) of tensors  # TODO rename as layer_stats
+        self.layer_stats = []  # initially list (by layer) of list (by iteration) of tensors
         self._gradient_values = None
         self._layer_shapes = None
 
@@ -824,30 +824,28 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
     def layer_shapes(self):
         return self._layer_shapes
 
-    # TODO rename as collected_layer_stats
     @property
-    def collected_gradient_stats(self):
+    def collected_layer_stats(self):
         """
         Gets stats against each gradient, omitting any gradient that have no collected stats.
-        Use collected_gradient_stats_indices() to identify which gradients are included.
+        Use collected_layers_stats_indices() to identify which gradients are included.
         """
-        return [stats for stats in self.gradient_stats if stats is not None]
+        return [stats for stats in self.layer_stats if stats is not None]
 
-    # TODO rename as collected_layer_stats_indices
     @property
-    def collected_gradient_stats_indices(self):
+    def collected_layer_stats_indices(self):
         """
-        Indices of gradients for which stats are returned by collected_gradient_stats.
+        Indices of gradients for which stats are returned by collected_layer_stats.
         Indices are as per the layer's position in model.layers.
         """
-        return [l_idx for l_idx, stats in enumerate(self.gradient_stats) if stats is not None]
+        return [l_idx for l_idx, stats in enumerate(self.layer_stats) if stats is not None]
 
     @property
     def collected_layer_shapes(self):
         """
         Indices of layers as returned by collected_layer_stats()
         """
-        return [self._layer_shapes[l_idx] for l_idx, stats in enumerate(self.gradient_stats) if stats is not None]
+        return [self._layer_shapes[l_idx] for l_idx, stats in enumerate(self.layer_stats) if stats is not None]
 
     @property
     def gradients(self):
@@ -899,7 +897,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
         # init stats
         # - assume initially that we can get gradients for every layer
         # - this will be later revised
-        self.gradient_stats = [[] for _ in range(len(self.model.layers))]
+        self.layer_stats = [[] for _ in range(len(self.model.layers))]
 
         # expand collection_sets and initialise gradient storages
         # (TODO also prepare slicing rules)
@@ -924,14 +922,14 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
         # convert per-variable stats
         # - from: list (by var) of list (by iteration) of tensor
         # - to:   list (by var) of pd-dataframe: iterations x quartiles
-        for var_idx in range(len(self.gradient_stats)):
-            if self.gradient_stats[var_idx] is not None:
-                table = [stats.numpy() for stats in self.gradient_stats[var_idx]]
+        for var_idx in range(len(self.layer_stats)):
+            if self.layer_stats[var_idx] is not None:
+                table = [stats.numpy() for stats in self.layer_stats[var_idx]]
                 df = pd.DataFrame(table, columns=self._gradient_stats_quantiles)
-                self.gradient_stats[var_idx] = df
+                self.layer_stats[var_idx] = df
 
         # calculate global model stats
-        self.model_stats = compute_scale_distribution_across_stats_list(self.gradient_stats, scale_quantile=75)
+        self.model_stats = compute_scale_distribution_across_stats_list(self.layer_stats, scale_quantile=75)
 
     def on_epoch_begin(self, epoch, logs=None):
         """
@@ -975,11 +973,11 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
         # - note: some layers cannot compute output gradients and we'll just get a None
         #   here. There's no easy way of knowing which during setup, so we modify the setup
         #   here now that we have that information.
-        for l_idx, stat_list in enumerate(self.gradient_stats):
+        for l_idx, stat_list in enumerate(self.layer_stats):
             if stat_list is not None:
                 if gradients[l_idx] is None:
                     # turns out that gradients aren't calculated for this layer
-                    self.gradient_stats[l_idx] = None
+                    self.layer_stats[l_idx] = None
                 else:
                     stats_tensor = _compute_percentile_stats(
                         gradients[l_idx],
@@ -1212,7 +1210,7 @@ class ActivityHistoryCallback(BaseGradientCallback):
             for layer_channel_activity_sum in self._layer_channel_activity_sums:
                 layer_channel_activity_sum.assign(tf.zeros_like(layer_channel_activity_sum))
 
-    def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations=None):
+    def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations, output_gradients):
         """
         Accumulates activations from each step. Also emits stats, if configured at per-step level.
         """
@@ -1228,7 +1226,7 @@ class ActivityHistoryCallback(BaseGradientCallback):
             self._collect_stats(1)
             self._collect_raw_values(activations)
 
-    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations=None):
+    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations, output_gradients):
         """
         Collects gradient stats and raw gradients after each epoch, if configured at per-epoch level.
         """
@@ -1322,9 +1320,9 @@ class ActivityHistoryCallback(BaseGradientCallback):
 
     def plot_summary(self):
         """
-        Alias for calling tot.plot_unit_activity(activity_callback).
+        Alias for calling tot.plot_activity_rate_history(activity_callback).
         """
-        plot_unit_activity(self)
+        plot_activity_rate_history(self)
 
 
 class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
@@ -1480,9 +1478,9 @@ class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
 
     def plot_summary(self):
         """
-        Alias for calling tot.plot_unit_activity(activity_callback).
+        Alias for calling tot.plot_activity_rate_history(activity_callback).
         """
-        plot_unit_activity(self)
+        plot_activity_rate_history(self)
 
 
 def _log_normalize(arr, axis=None):
@@ -2441,8 +2439,8 @@ def plot_output_gradient_history(gradient_callback: LayerOutputGradientHistoryCa
         needs_conversion_to_magnitudes = False
     model = gradient_callback.model
     model_stats = gradient_callback.model_stats
-    layer_stats = gradient_callback.collected_gradient_stats
-    layer_ids = gradient_callback.collected_gradient_stats_indices
+    layer_stats = gradient_callback.collected_layer_stats
+    layer_ids = gradient_callback.collected_layer_stats_indices
     layer_names = [model.layers[l_idx].name for l_idx in layer_ids]
     layer_shapes = gradient_callback.layer_shapes
 
