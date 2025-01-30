@@ -958,6 +958,10 @@ class LayerHandler:
     it's simpler than trying to find a code-friendly notation for 'A_{l-1}'.
     """
 
+    # TODO need to better detect situations where only some of the layer's variables/gradients are available.
+    #  Currently the main explain method will silently filter out the unknown variables and this method
+    #  won't know they exist. So it's heuristics will produce bad results (eg: assuming there's no bias,
+    #  which will affect display of Z calculations).
     def __init__(self, display_name, variables, gradients, inputs, output, output_gradients, layer_subscript=None):
         """
         Args:
