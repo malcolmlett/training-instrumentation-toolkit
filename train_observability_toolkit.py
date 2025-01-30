@@ -797,8 +797,9 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
         else:
             self.epochs = []
         self.model_stats = None
-        self.gradient_stats = []  # initially list (by variable) of list (by iteration) of tensors
+        self.gradient_stats = []  # initially list (by layer) of list (by iteration) of tensors  # TODO rename as layer_stats
         self._gradient_values = None
+        self._layer_shapes = None
 
         # internal tracking
         self._epoch = 0
@@ -810,6 +811,11 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
         return True
 
     @property
+    def layer_shapes(self):
+        return self._layer_shapes
+
+    # TODO rename as collected_layer_stats
+    @property
     def collected_gradient_stats(self):
         """
         Gets stats against each gradient, omitting any gradient that have no collected stats.
@@ -817,13 +823,21 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
         """
         return [stats for stats in self.gradient_stats if stats is not None]
 
+    # TODO rename as collected_layer_stats_indices
     @property
     def collected_gradient_stats_indices(self):
         """
         Indices of gradients for which stats are returned by collected_gradient_stats.
         Indices are as per the layer's position in model.layers.
         """
-        return [idx for idx, stats in enumerate(self.gradient_stats) if stats is not None]
+        return [l_idx for l_idx, stats in enumerate(self.gradient_stats) if stats is not None]
+
+    @property
+    def collected_layer_shapes(self):
+        """
+        Indices of layers as returned by collected_layer_stats()
+        """
+        return [self._layer_shapes[l_idx] for l_idx, stats in enumerate(self.gradient_stats) if stats is not None]
 
     @property
     def gradients(self):
@@ -2367,6 +2381,101 @@ def plot_gradient_history(gradient_callback: GradientHistoryCallback, magnitudes
         if variable_shapes:
             plt.text(plot_width * 0.5, plot_mid,
                      f"{variable_shapes[v_idx]}",
+                     horizontalalignment='center', verticalalignment='center')
+
+    plt.show()
+
+
+def plot_output_gradient_history(gradient_callback: LayerOutputGradientHistoryCallback, magnitudes=False):
+    """
+    Generates a figure containing a number of plots to visualise layer output gradient stats
+    from a LayerOutputGradientHistoryCallback object.
+
+    Args:
+        gradient_callback: callback populated with gradient stats from training.
+        magnitudes: whether to show raw values or estimate stats for magnitudes.
+            When showing magnitudes, automatically switches to a log plot for easier
+            comparison across differing scales.
+            Forced when the original callback collected magnitude data.
+    """
+    # collect data
+    iterations = gradient_callback.epochs if hasattr(gradient_callback, 'epochs') else gradient_callback.steps
+    iteration_name = 'epoch' if hasattr(gradient_callback, 'epochs') else 'step'
+    needs_conversion_to_magnitudes = magnitudes
+    if gradient_callback.magnitudes:
+        magnitudes = True  # forced
+        needs_conversion_to_magnitudes = False
+    model = gradient_callback.model
+    model_stats = gradient_callback.model_stats
+    layer_stats = gradient_callback.collected_gradient_stats
+    layer_ids = gradient_callback.collected_gradient_stats_indices
+    layer_names = [model.layers[l_idx].name for l_idx in layer_ids]
+    layer_shapes = gradient_callback.layer_shapes
+
+    num_layer_stats = len(layer_stats)
+
+    # start figure
+    # - at least 4 layer plots wide
+    # - otherwise target a square grid of layer plots
+    grid_width = max(4, round(math.sqrt(num_layer_stats) / 2) * 2)  # nearest even number >= 4
+    grid_height = 2 + math.ceil(num_layer_stats / grid_width)
+    plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
+
+    # all-model high-level summary
+    plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
+    _plot_add_quantiles(iterations, model_stats)
+    plt.margins(0)
+    plt.yscale('log')
+    plt.title('All model output gradients')
+    plt.xlabel(iteration_name)
+    plt.ylabel('mean scale of gradient magnitudes')
+    plt.legend()
+
+    # layer contributions - high-level summary
+    scales = get_scales_across_stats_list(layer_stats, scale_quantile=75)
+    band_log_scales = _log_normalize(scales, axis=-1)
+
+    plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
+    plt.stackplot(iterations, band_log_scales.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
+    plt.margins(0)
+    plt.title('Layer comparison')
+    plt.xlabel(iteration_name)
+    plt.ylabel('Gradient scale log-proportion')
+    # layer labels placed on centre of layer band on left-hand side
+    x_loc = round(band_log_scales.shape[0] / 100)
+    placement = band_log_scales[x_loc, :] * 0.5
+    placement[1:] += np.cumsum(band_log_scales[0, :])[0:-1]
+    for s_idx in range(len(layer_stats)):
+        l_idx = layer_ids[s_idx]
+        layer = model.layers[l_idx]
+        plt.text(len(iterations) / 100, placement[l_idx], layer.name, ha="left")
+
+    # individual layers
+    for s_idx in range(num_layer_stats):
+        r = 2 + s_idx // grid_width
+        c = s_idx % grid_width
+        plt.subplot2grid((grid_height, grid_width), (r, c))
+        data = layer_stats[s_idx]
+        if needs_conversion_to_magnitudes:
+            # approximate stats over magnitudes
+            data = np.abs(data.to_numpy())
+            data = np.sort(data, axis=-1)
+            data = pd.DataFrame(data, columns=layer_stats[s_idx].columns)
+        _plot_add_quantiles(iterations, data)
+        plt.margins(0)
+        plt.yscale('log' if magnitudes else 'linear')
+        if c == 0:
+            plt.ylabel('log-magnitude' if magnitudes else 'value')
+        plt.title(layer_names[s_idx])
+
+        # text overlay
+        plot_min = np.min(data.to_numpy())
+        plot_max = np.max(data.to_numpy())
+        plot_width = np.max(iterations)
+        plot_mid = (plot_min + plot_max) * 0.5
+        if layer_shapes:
+            plt.text(plot_width * 0.5, plot_mid,
+                     f"{layer_shapes[s_idx]}",
                      horizontalalignment='center', verticalalignment='center')
 
     plt.show()
