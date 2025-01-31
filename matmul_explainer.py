@@ -41,6 +41,7 @@
 import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
+import conv_tools as ct
 
 
 # TODO extend so that it can take a list of terms and do the right thing with them
@@ -714,6 +715,103 @@ def conv_classify(inputs, kernel, strides=1, padding="VALID", confidence: float 
     sums = np.stack(sums, axis=-1)
     if return_thresholds:
         return counts, sums, [inputs_threshold.numpy(), kernel_threshold.numpy()]
+    else:
+        return counts, sums
+
+
+def conv_backprop_filter_classify(x, d_out, kernel_shape, strides=1, padding="VALID", confidence: float = 0.95,
+                                  thresholds: list = None, return_thresholds=False):
+    """
+    Like matmul_classify but for calculation of gradients w.r.t. the filter.
+    Supports 1D, 2D and 3D convolution.
+    Uses `conv_tools.conv_backprop_filter()` internally.
+
+    Args:
+        x: Original input tensor of rank N+2 that had one of the `tf.nn.conv` operations applied against it.
+            Shape: `(batch_size, ..spatial_dims.., in_channels)`
+        d_out: Tensor of rank N+2, containing the `dJ/dOut` backprop gradients.
+            Shape: `(batch_size, ..spatial_dims, out_channels)`
+        kernel_shape: N+2 tensor, list, or tuple identifying the shape of the filter used during convolution.
+        strides: int or int tuple/list of `len(inputs_spatial_shape)`,
+            specifying the strides of the convolution along each spatial
+            dimension. If `strides` is int, then every spatial dimension shares
+            the same `strides`.
+        padding: string, either `"valid"` or `"same"`. `"valid"` means no
+            padding is applied, and `"same"` results in padding evenly to the
+            left/right or up/down of the input such that output has the
+            same height/width dimension as the input when `strides=1`.
+        confidence: statistical confidence (0.0 to 1.0) that you wish to meet
+            that a value is accurately placed within the P, Z, or N categories.
+            Higher values lead to more strict requirements for "near zero".
+            1.0 only considers exactly 0.0 as "near zero".
+        thresholds: list or tuple of 2 floats.
+            Specifies explicit thresholds for either or both of the inputs.
+            Absolute values less than these thresholds, and values exactly equal to zero,
+            are considered "near zero". Otherwise inferred from confidence.
+            Various combinations are allowed:
+                - None         - both thresholds determined separately, based on confidence.
+                - single float - specifies thresholds against both inputs
+                - [float, float] - specifies separate thresholds against both inputs
+                - [float, None]  - specifies threshold against first only, the other is determined based on confidence
+                - [None, float]  - specifies threshold against second only, the other is determined based on confidence
+                - [None, None]   - both thresholds determined separately, based on confidence.
+        return_thresholds: whether to additionally return the derived thresholds
+
+    Returns:
+        (counts, sums) containing the counts and sums of each component, respectively.
+        Each a tensor with shape `(batch_size,) + inputs_spatial_shape + (num_channels,9)`.
+        OR
+        (counts, sums, thresholds) with list of thresholds also returned
+    """
+    # standardise on data format
+    x = tf.constant(x)
+    d_out = tf.constant(d_out)
+
+    # apply thresholds and create masks
+    inputs_threshold, d_out_threshold = _parse_thresholds_arg(thresholds)
+    inputs_p, inputs_z, inputs_n, inputs_threshold = classification_mask(x, confidence, inputs_threshold)
+    d_out_p, d_out_z, d_out_n, d_out_threshold = classification_mask(d_out, confidence, d_out_threshold)
+
+    # compute counts and sums for each classification
+    counts = []
+    inputs_pc = tf.cast(inputs_p, tf.float32)
+    inputs_zc = tf.cast(inputs_z, tf.float32)
+    inputs_nc = tf.cast(inputs_n, tf.float32)
+    d_out_pc = tf.cast(d_out_p, tf.float32)
+    d_out_zc = tf.cast(d_out_z, tf.float32)
+    d_out_nc = tf.cast(d_out_n, tf.float32)
+    counts.append(ct.conv_backprop_filter(x=inputs_pc, d_out=d_out_pc, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    counts.append(ct.conv_backprop_filter(x=inputs_pc, d_out=d_out_zc, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    counts.append(ct.conv_backprop_filter(x=inputs_pc, d_out=d_out_nc, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    counts.append(ct.conv_backprop_filter(x=inputs_zc, d_out=d_out_pc, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    counts.append(ct.conv_backprop_filter(x=inputs_zc, d_out=d_out_zc, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    counts.append(ct.conv_backprop_filter(x=inputs_zc, d_out=d_out_nc, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    counts.append(ct.conv_backprop_filter(x=inputs_nc, d_out=d_out_pc, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    counts.append(ct.conv_backprop_filter(x=inputs_nc, d_out=d_out_zc, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    counts.append(ct.conv_backprop_filter(x=inputs_nc, d_out=d_out_nc, kernel_shape=kernel_shape, strides=strides, padding=padding))
+
+    sums = []
+    inputs_pv = tf.where(inputs_p, x, tf.zeros_like(x))
+    inputs_zv = tf.where(inputs_z, x, tf.zeros_like(x))
+    inputs_nv = tf.where(inputs_n, x, tf.zeros_like(x))
+    d_out_pv = tf.where(d_out_p, d_out, tf.zeros_like(d_out))
+    d_out_zv = tf.where(d_out_z, d_out, tf.zeros_like(d_out))
+    d_out_nv = tf.where(d_out_n, d_out, tf.zeros_like(d_out))
+    sums.append(ct.conv_backprop_filter(x=inputs_pv, d_out=d_out_pv, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    sums.append(ct.conv_backprop_filter(x=inputs_pv, d_out=d_out_zv, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    sums.append(ct.conv_backprop_filter(x=inputs_pv, d_out=d_out_nv, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    sums.append(ct.conv_backprop_filter(x=inputs_zv, d_out=d_out_pv, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    sums.append(ct.conv_backprop_filter(x=inputs_zv, d_out=d_out_zv, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    sums.append(ct.conv_backprop_filter(x=inputs_zv, d_out=d_out_nv, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    sums.append(ct.conv_backprop_filter(x=inputs_nv, d_out=d_out_pv, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    sums.append(ct.conv_backprop_filter(x=inputs_nv, d_out=d_out_zv, kernel_shape=kernel_shape, strides=strides, padding=padding))
+    sums.append(ct.conv_backprop_filter(x=inputs_nv, d_out=d_out_nv, kernel_shape=kernel_shape, strides=strides, padding=padding))
+
+    # format into final output (numpy)
+    counts = np.stack(counts, axis=-1)
+    sums = np.stack(sums, axis=-1)
+    if return_thresholds:
+        return counts, sums, [inputs_threshold.numpy(), d_out_threshold.numpy()]
     else:
         return counts, sums
 
