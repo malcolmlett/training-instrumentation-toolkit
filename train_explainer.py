@@ -758,6 +758,15 @@ def get_layer_handler_for(layer, layer_index, variables, gradients, inputs, outp
             display_name=display_name, layer=layer, variables=variables, gradients=gradients, inputs=inputs,
             output=output, output_gradients=output_gradients, layer_subscript=layer_subscript)
         note = "Treating as standard Dense layer due to name, results may not be accurate"
+    elif isinstance(layer, (tf.keras.layers.Conv1D, tf.keras.layers.Conv2D, tf.keras.layers.Conv3D)):
+        handler = ConvLayerHandler(
+            display_name=display_name, layer=layer, variables=variables, gradients=gradients, inputs=inputs,
+            output=output, output_gradients=output_gradients, layer_subscript=layer_subscript)
+    elif 'conv' in layer.name:
+        handler = ConvLayerHandler(
+            display_name=display_name, layer=layer, variables=variables, gradients=gradients, inputs=inputs,
+            output=output, output_gradients=output_gradients, layer_subscript=layer_subscript)
+        note = "Treating as standard Conv layer due to name, results may not be accurate"
     else:
         # fallback to generic handler
         handler = LayerHandler(
