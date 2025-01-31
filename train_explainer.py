@@ -1441,7 +1441,7 @@ class ConvLayerHandler(LayerHandler):
         conv_params, note = self.get_conv_params()
         try:
             dJdW_l = conv_tools.conv_backprop_filter(x=A_0, d_out=dJdZ_l, kernel_shape=W.shape, **conv_params)
-            equation = f"dJ/dZ{self.subscript} conv^T A_0"  # simplification
+            equation = f"A_0 conv^T dJ/dZ{self.subscript}"  # simplification
         except ValueError as e:
             raise UnsupportedNetworkError(f"unsupported convolution - {e}")
 
