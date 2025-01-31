@@ -1,6 +1,8 @@
 import numpy as np
 import tensorflow as tf
 import tensorflow_probability as tfp
+
+import conv_tools
 import train_observability_toolkit as tot
 import matmul_explainer as me
 
@@ -1428,18 +1430,11 @@ class ConvLayerHandler(LayerHandler):
         A_0 = self.get_input()
         W = self.get_weights()
         conv_params, note = self.get_conv_params()
-        #dJdW = tf.nn.conv2d_backprop_filter(
-        #    input=A_0,
-        #    filter_sizes=W.shape,
-        #    out_backprop=dJdZ,
-        #    **conv_params
-        #)
-        dJdW_l = tf.nn.conv_transpose(
-            input=dJdZ_l,
-            filters=A_0,
-            output_shape=W.shape,
-            **conv_params)
-        equation = f"dJ/dZ{self.subscript} conv^T A_0"
+        try:
+            dJdW_l = conv_tools.conv_backprop_filter(x=A_0, d_out=dJdZ_l, kernel_shape=W.shape, **conv_params)
+            equation = f"dJ/dZ{self.subscript} conv^T A_0"  # simplification
+        except ValueError as e:
+            raise UnsupportedNetworkError(f"unsupported convolution - {e}")
 
         res = [dJdW_l]
         if return_equation:
@@ -1450,23 +1445,35 @@ class ConvLayerHandler(LayerHandler):
 
     def classify_dJdW_calculation(self, dJdZ_l, confidence):
         A_0 = self.get_input()
-        axes_A = list(range(len(A_0.shape) - 1))
-        axes_dJdZ = list(range(len(dJdZ_l.shape) - 1))
-        return me.tensordot_classify(A_0, dJdZ_l, axes=[axes_A, axes_dJdZ], confidence=confidence)
+        W = self.get_weights()
+        conv_params, note = self.get_conv_params()
+        try:
+            return me.conv_backprop_filter_classify(x=A_0, d_out=dJdZ_l, kernel_shape=W.shape, **conv_params)
+        except ValueError as e:
+            raise UnsupportedNetworkError(f"unsupported convolution - {e}")
 
     def get_conv_params(self):
         # determines the other arguments to tf.nn.convolution() if possible
         # Returns: **kwargs, note
         kwargs = {}
         dodgy = False
+
         if hasattr(self.layer, 'strides'):
             kwargs['strides'] = self.layer.strides
         else:
             dodgy = True
+
         if hasattr(self.layer, 'padding'):
             kwargs['padding'] = None if self.layer.padding is None else self.layer.padding.upper()
         else:
             dodgy = True
+
+        if hasattr(self.layer, 'dilation_rate'):
+            if self.layer.dilation_rate is not None:
+                if (np.array(self.layer.dilation_rate) > 1).any():
+                    raise UnsupportedNetworkError(f"unable to handle convolutional dilations "
+                                                  f"{self.layer.dilation_rate}")
+
         note = "padding and strides may be inaccurate" if dodgy else None
         return kwargs, note
 
