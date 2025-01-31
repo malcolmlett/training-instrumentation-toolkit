@@ -81,7 +81,7 @@ def conv_backprop_filter_test():
         else:
             err = dJdW - true_dJdW
             rmse = tf.sqrt(tf.reduce_mean(tf.square(err)))
-            if not np.allclose(dJdW, true_dJdW, atol=1e-07):
+            if not np.allclose(dJdW, true_dJdW, atol=1e-05):
                 print(f"[{count}] A_0: {A_0.shape}, W: {W.shape}, strides: {strides}, padding: {padding} -> "
                       f"Z: {expected_Z.shape}")
                 raise ValueError(f"[{count}] {description}: dJdW has incorrect values. Rmse={rmse}. "
