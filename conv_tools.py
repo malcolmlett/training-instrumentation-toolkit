@@ -47,3 +47,63 @@ def dilate(tensor, strides=None):
     )
 
     return new_tensor
+
+
+def tf_NHWC_to_HWIO(out):
+    """
+    Converts [batch, in_depth, in_height, in_width, in_channels]
+    to       [filter_depth, filter_height, filter_width, in_channels, out_channels]
+    """
+    return tf.transpose(out, perm=[1, 2, 3, 0, 4])
+
+def tf_NHWC_to_CHWN(out):
+    """
+    Converts [batch, in_depth, in_height, in_width, in_channels]
+    to       [in_channels, in_height, in_width, batch]
+    """
+    return tf.transpose(out, perm=[4, 1, 2, 3, 0])
+
+
+def tf_crop(x, croppings):
+    """
+    Mirrors the tf.pad() api for cropping.
+    Crops a tensor by removing elements from the start and end of each dimension.
+    Args:
+        x: N-dimensional input tensor
+        croppings: List of N tuples [(crop_before_1, crop_after_1), (crop_before_2, crop_after_2), ...]
+                    specifying how much to crop from each dimension.
+    Returns:
+        Cropped tensor.
+    """
+    tensor_shape = tf.shape(x)
+    if len(croppings) != len(tensor_shape):
+        raise ValueError(f"Croppings length must match number of dimensions: {len(croppings)} != {len(tensor_shape)}")
+
+    # Compute the start and new size for each dimension
+    begin = [c[0] for c in croppings]  # Start indices for cropping
+    size = [tensor_shape[i] - (c[0] + c[1]) for i, c in enumerate(croppings)]  # Compute new sizes
+
+    return tf.slice(x, begin, size)
+
+
+def tf_crop_spatial(x, croppings):
+    """
+    Like tf_crop() except that it operates only against spatial dimensions.
+    Crops a tensor by removing elements from the start and end of each spatial dimension.
+    Args:
+        x: (N+2)-dimensional input tensor
+        croppings: List of N tuples [(crop_before_1, crop_after_1), (crop_before_2, crop_after_2), ...]
+                    specifying how much to crop from each dimension.
+    Returns:
+        Cropped N+2 tensor.
+    """
+
+    if croppings is None:
+        return x  # no changes
+    if len(croppings) != len(x.shape)-2:
+        raise ValueError(f"Number of croppings must match tensor spatial dims: "
+                         f"{len(croppings)} doesn't match {x.shape}")
+
+    croppings = [[0, 0]] + list(croppings) + [[0, 0]]
+    return tf_crop(x, croppings)
+
