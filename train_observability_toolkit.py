@@ -329,7 +329,55 @@ class BaseGradientCallback:
         """
 
 
-class VariableHistoryCallback(tf.keras.callbacks.Callback):
+class _StatsCollectingCapability:
+    @staticmethod
+    def _stats_dict_list_to_dataframes(stats_by_item, columns):
+        """
+        Args:
+            stats_by_item: list (by variable/layer) of dict (by stat) of list (by iteration)
+        Returns:
+            list (by variable/alyer) of pandas dataframe (iterations x stats)
+        """
+        item_dataframes = []
+        for item_stats in stats_by_item:
+            if item_stats is not None:
+                table = [iteration_stats.numpy() for iteration_stats in item_stats]
+                df = pd.DataFrame(table, columns=columns)
+            else:
+                df = None
+            item_dataframes.append(df)
+        return item_dataframes
+
+    # TODO update to take the {variable|layer}_magnitude_stats
+    #  and probably use the 50th percentile so that it gives smoother layer-coontribution plots
+    @staticmethod
+    def _compute_scale_distribution_across_stats_list(stats_dataframes, scale_quantile=75, quantiles=None):
+        """
+        Calculates meta-stats against a set of quantile stats.
+        Assumes the use of dataframes where each column represents a quantile, represented as a number in range 0 to 100.
+        Args:
+            stats_dataframes: list of pandas dataframes of shape (iterations, quantiles)
+            scale_quantile: the quantile used as a proxy for the "scale" of the typical values.
+                Both this quantile and its opposite (100 - scale_quantile) must be present within the columns of
+                the dataframe.
+            quantiles: set of quantiles to return in final result.
+        Returns:
+            pandas dataframe with shape (iterations, quantiles)
+        """
+        quantiles = quantiles or [0, 25, 50, 75, 100]
+
+        # collect a table of all scales across all stats
+        scales = get_scales_across_stats_list(stats_dataframes, scale_quantile)
+
+        # calculate stats across the table
+        stats = tfp.stats.percentile(scales, quantiles, axis=-1, interpolation='linear')
+        stats = tf.transpose(stats)
+
+        # return as dataframe with quantiles as columns
+        return pd.DataFrame(stats.numpy(), columns=quantiles)
+
+
+class VariableHistoryCallback(tf.keras.callbacks.Callback, _StatsCollectingCapability):
     """
     Standard model.fit() callback that captures the state of variables during training.
     Variable states may be captured BEFORE or AFTER each update step or epoch, depending on the needs.
@@ -346,7 +394,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             or None for untracked variables. The dataframe has rows = iterations, and columns = stats (quartiles).
     """
 
-    def __init__(self, per_step=False, before_updates=False, magnitudes=False, trainable_only=True,
+    def __init__(self, per_step=False, before_updates=False, trainable_only=True,
                  collection_sets=None, **kwargs):
         """
         Args:
@@ -362,8 +410,6 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
                 If True, this reflects the notion of capturing the weights and biases that were used DURING
                 the update step.
 
-            magnitudes: whether to collect stats on variables magnitudes, or on their raw values (default).
-
             trainable_only: bool. Whether to only include stats for trainable variables, or all variables otherwise.
 
             collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
@@ -373,7 +419,6 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         super().__init__(**kwargs)
         self.per_step = per_step
         self.before_updates = before_updates
-        self.magnitudes = magnitudes
         self.trainable_only = trainable_only
         self.collection_sets = collection_sets
 
@@ -383,7 +428,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         else:
             self.epochs = []
         self.model_stats = None
-        self.variable_stats = []  # initially list (by variable) of list (by iteration) of tensors
+        self.variable_value_stats = []  # initially list (by variable) of list (by iteration) of tensors
+        self.variable_magnitude_stats = []  # initially list (by variable) of list (by iteration) of tensors
         self._variable_values = None
 
         # internal tracking
@@ -392,20 +438,28 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         self._variable_stats_quantiles = [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
 
     @property
-    def collected_variable_stats(self):
+    def collected_variable_value_stats(self):
         """
-        Gets stats against each variable, omitting any variable that have no collected stats.
-        Use collected_variable_stats_indices() to identify which layers are included.
+        Gets stats against each raw variable value, omitting any variable that have no collected stats.
+        Use collected_variable_stats_indices() to identify which model variables are included.
         """
-        return [stats for stats in self.variable_stats if stats is not None]
+        return [stats for stats in self.variable_value_stats if stats is not None]
+
+    @property
+    def collected_variable_magnitude_stats(self):
+        """
+        Gets stats against the magnitudes of each variable, omitting any variable that have no collected stats.
+        Use collected_variable_stats_indices() to identify which variables are included.
+        """
+        return [stats for stats in self.variable_value_stats if stats is not None]
 
     @property
     def collected_variable_stats_indices(self):
         """
-        Indices of variables for which stats are returned by collected_variable_stats.
-        Indices are as per the variable's position in model.variables.
+        Indices of variables for which stats are returned by collected_variable_value_stats and
+        collected_variable_magnitude_stats. Indices are as per the variable's position in model.variables.
         """
-        return [idx for idx, stats in enumerate(self.variable_stats) if stats is not None]
+        return [idx for idx, stats in enumerate(self.variable_value_stats) if stats is not None]
 
     @property
     def variables(self):
@@ -456,8 +510,10 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         stats_variables = self.model.trainable_variables if self.trainable_only else self.model.variables
         filtered_stats_variable_indices = [_index_by_identity(self.model.variables, var)
                                            for var in stats_variables]
-        self.variable_stats = [[] if var_idx in filtered_stats_variable_indices else None
-                               for var_idx in range(len(self.model.variables))]
+        self.variable_value_stats = [[] if var_idx in filtered_stats_variable_indices else None
+                                     for var_idx in range(len(self.model.variables))]
+        self.variable_magnitude_stats = [[] if var_idx in filtered_stats_variable_indices else None
+                                         for var_idx in range(len(self.model.variables))]
 
         # expand collection_sets and initialise variable storages
         # (TODO also prepare slicing rules)
@@ -482,14 +538,15 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
         # convert per-variable stats
         # - from: list (by var) of list (by iteration) of tensor
         # - to:   list (by var) of pd-dataframe: iterations x quartiles
-        for var_idx in range(len(self.variable_stats)):
-            if self.variable_stats[var_idx] is not None:
-                table = [stats.numpy() for stats in self.variable_stats[var_idx]]
-                df = pd.DataFrame(table, columns=self._variable_stats_quantiles)
-                self.variable_stats[var_idx] = df
+        self.variable_value_stats = self._stats_dict_list_to_dataframes(
+            self.variable_value_stats, self._variable_stats_quantiles)
+        self.variable_magnitude_stats = self._stats_dict_list_to_dataframes(
+            self.variable_magnitude_stats, self._variable_stats_quantiles)
 
         # calculate global model stats
-        self.model_stats = compute_scale_distribution_across_stats_list(self.variable_stats, scale_quantile=75)
+        # TODO update
+        self.model_stats = self._compute_scale_distribution_across_stats_list(
+            self.variable_value_stats, scale_quantile=75)
 
     def on_epoch_begin(self, epoch, logs=None):
         self._epoch = epoch
@@ -516,9 +573,14 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
             self._collect_stats()
             self._collect_raw_values()
 
+    # TODO continue from here
+    #  and wrap it up in re-usable logic if suitable
+    #  and and update _compute_percentile_stats to return both
+    #  raw and magnitude stats in a single @tf.function instance,
+    #  for faster processing.
     def _collect_stats(self):
         # compute quantile stats for each individual variable
-        for var_idx, stat_list in enumerate(self.variable_stats):
+        for var_idx, stat_list in enumerate(self.variable_value_stats):
             if stat_list is not None:
                 var = self.model.variables[var_idx]
                 stats_tensor = _compute_percentile_stats(
@@ -536,7 +598,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback):
                     val_list.append(state)
 
 
-class GradientHistoryCallback(BaseGradientCallback):
+class GradientHistoryCallback(BaseGradientCallback, _StatsCollectingCapability):
     """
     Custom tot.fit() gradient callback that captures statistics across the gradients during training.
     Optionally also captures selected raw gradients.
@@ -696,7 +758,7 @@ class GradientHistoryCallback(BaseGradientCallback):
                 self.gradient_stats[var_idx] = df
 
         # calculate global model stats
-        self.model_stats = compute_scale_distribution_across_stats_list(self.gradient_stats, scale_quantile=75)
+        self.model_stats = self._compute_scale_distribution_across_stats_list(self.gradient_stats, scale_quantile=75)
 
     def on_epoch_begin(self, epoch, logs=None):
         """
@@ -763,7 +825,7 @@ class GradientHistoryCallback(BaseGradientCallback):
         plot_gradient_history(self)
 
 
-class LayerOutputGradientHistoryCallback(BaseGradientCallback):
+class LayerOutputGradientHistoryCallback(BaseGradientCallback, _StatsCollectingCapability):
     """
     Custom tot.fit() gradient callback that captures statistics across the layer output gradients
     during training.
@@ -929,7 +991,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
                 self.layer_stats[var_idx] = df
 
         # calculate global model stats
-        self.model_stats = compute_scale_distribution_across_stats_list(self.layer_stats, scale_quantile=75)
+        self.model_stats = self._compute_scale_distribution_across_stats_list(self.layer_stats, scale_quantile=75)
 
     def on_epoch_begin(self, epoch, logs=None):
         """
@@ -997,7 +1059,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback):
                         val_list.append(gradients[l_idx])
 
 
-class ActivityHistoryCallback(BaseGradientCallback):
+class ActivityHistoryCallback(BaseGradientCallback, _StatsCollectingCapability):
     """
     Custom tot.fit() gradient callback function that collects unit activation rates during training.
     Optionally additionally captures raw layer outputs for selected layers.
@@ -1025,7 +1087,7 @@ class ActivityHistoryCallback(BaseGradientCallback):
                 'max_activation_rate': np.array() of float,
                 'min_dead_rate': np.array() of float,
                 'mean_dead_rate': np.array() of float,
-                'max_deade_rate': np.array() of float
+                'max_dead_rate': np.array() of float
             }
         layer_stats: list (by layer) of dicts (by stat key) of np-array (by iteration) of statistics, eg:
             [{
@@ -1776,32 +1838,6 @@ def get_scales_across_stats_list(stats_dataframes, scale_quantile=75):
     return np.stack(scales, axis=-1)  # shape: iterations x variables
 
 
-def compute_scale_distribution_across_stats_list(stats_dataframes, scale_quantile=75, quantiles=None):
-    """
-    Calculates meta-stats against a set of quantile stats.
-    Assumes the use of dataframes where each column represents a quantile, represented as a number in range 0 to 100.
-    Args:
-        stats_dataframes: list of pandas dataframes of shape (iterations, quantiles)
-        scale_quantile: the quantile used as a proxy for the "scale" of the typical values.
-            Both this quantile and its opposite (100 - scale_quantile) must be present within the columns of
-            the dataframe.
-        quantiles: set of quantiles to return in final result.
-    Returns:
-        pandas dataframe with shape (iterations, quantiles)
-    """
-    quantiles = quantiles or [0, 25, 50, 75, 100]
-
-    # collect a table of all scales across all stats
-    scales = get_scales_across_stats_list(stats_dataframes, scale_quantile)
-
-    # calculate stats across the table
-    stats = tfp.stats.percentile(scales, quantiles, axis=-1, interpolation='linear')
-    stats = tf.transpose(stats)
-
-    # return as dataframe with quantiles as columns
-    return pd.DataFrame(stats.numpy(), columns=quantiles)
-
-
 def _normalize_collection_sets_for_layers(model: tf.keras.Model, collection_sets: list):
     """
     Handles the variations allowed in collection_sets used for selecting capture of
@@ -2239,7 +2275,7 @@ def plot_variable_history(variable_callback: VariableHistoryCallback, magnitudes
     model_stats = variable_callback.model_stats
 
     model = variable_callback.model
-    variable_stats = variable_callback.collected_variable_stats
+    variable_stats = variable_callback.collected_variable_value_stats
     variable_ids = variable_callback.collected_variable_stats_indices
     num_variable_stats = len(variable_stats)
     layer_id_lookup = layer_indices_by_variable(model)
