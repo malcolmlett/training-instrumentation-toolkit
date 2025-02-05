@@ -330,6 +330,29 @@ class BaseGradientCallback:
 
 
 class _StatsCollectingCapability:
+    @tf.function
+    def _compute_value_and_magnitude_percentile_stats(self, tensors, quantiles):
+        """
+        Computes a set of percentiles across the raw values and magnitudes of each
+        provided tensor.
+
+        For tensors that commonly have values distributed either side of zero, the median will
+        typically be around zero, and the 25th and 75th percentiles represent the respective medians
+        in the positive and negative halves.
+
+        Args:
+            tensors: list of tensors for which percentiles should be calculated. Must not contain any Nones.
+            quantiles: list of quantiles to compute values for
+        Returns:
+            - value_percentiles - tensor of percentile values across the tensor values
+            - magnitude_percentile - tensor of percentile values across the tensor magnitudes
+        """
+        def computation(tensor):
+            value_percentiles = tfp.stats.percentile(tensor, quantiles, interpolation='linear')
+            magnitude_percentiles = tfp.stats.percentile(tf.abs(tensor), quantiles, interpolation='linear')
+            return value_percentiles, magnitude_percentiles
+        return [computation(tensor) for tensor in tensors]
+
     @staticmethod
     def _stats_dict_list_to_dataframes(stats_by_item, columns):
         """
@@ -348,18 +371,13 @@ class _StatsCollectingCapability:
             item_dataframes.append(df)
         return item_dataframes
 
-    # TODO update to take the {variable|layer}_magnitude_stats
-    #  and probably use the 50th percentile so that it gives smoother layer-coontribution plots
     @staticmethod
-    def _compute_scale_distribution_across_stats_list(stats_dataframes, scale_quantile=75, quantiles=None):
+    def _compute_scale_distribution_across_stats_list(magnitude_stats_dataframes, quantiles=None):
         """
         Calculates meta-stats against a set of quantile stats.
         Assumes the use of dataframes where each column represents a quantile, represented as a number in range 0 to 100.
         Args:
-            stats_dataframes: list of pandas dataframes of shape (iterations, quantiles)
-            scale_quantile: the quantile used as a proxy for the "scale" of the typical values.
-                Both this quantile and its opposite (100 - scale_quantile) must be present within the columns of
-                the dataframe.
+            magnitude_stats_dataframes: list (by item) of pandas dataframes of shape (iterations, quantiles)
             quantiles: set of quantiles to return in final result.
         Returns:
             pandas dataframe with shape (iterations, quantiles)
@@ -367,7 +385,7 @@ class _StatsCollectingCapability:
         quantiles = quantiles or [0, 25, 50, 75, 100]
 
         # collect a table of all scales across all stats
-        scales = get_scales_across_stats_list(stats_dataframes, scale_quantile)
+        scales = get_scales_across_stats_list(magnitude_stats_dataframes, 50)
 
         # calculate stats across the table
         stats = tfp.stats.percentile(scales, quantiles, axis=-1, interpolation='linear')
@@ -388,9 +406,9 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _StatsCollectingCapab
             (only populated if verbose == 0)
         steps: list of int. Step numbers correlated to captured gradients/gradient-stats
             (only populated if verbose > 0)
-        model_stats: pandas data-frame with rows = iterations, columns = stats (quantiles).
-            Contains stats across the general magnitudes of weights across the variables.
-        variable_stats: list of pandas data-frames. One data-frame for each variable that is tracked,
+        variable_value_stats: list of pandas data-frames. One data-frame for each variable that is tracked,
+            or None for untracked variables. The dataframe has rows = iterations, and columns = stats (quartiles).
+        variable_magnitude_stats: list of pandas data-frames. One data-frame for each variable that is tracked,
             or None for untracked variables. The dataframe has rows = iterations, and columns = stats (quartiles).
     """
 
@@ -427,7 +445,6 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _StatsCollectingCapab
             self.steps = []
         else:
             self.epochs = []
-        self.model_stats = None
         self.variable_value_stats = []  # initially list (by variable) of list (by iteration) of tensors
         self.variable_magnitude_stats = []  # initially list (by variable) of list (by iteration) of tensors
         self._variable_values = None
@@ -436,6 +453,15 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _StatsCollectingCapab
         self._epoch = 0
         self._filtered_value_variable_indices = None
         self._variable_stats_quantiles = [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
+
+    @property
+    def model_magnitude_stats(self):
+        """
+        Gets stats across the general magnitudes of values across the variables.
+        Returns:
+             pandas data-frame with rows = iterations, columns = stats (quantiles).
+        """
+        return self._compute_scale_distribution_across_stats_list(self.variable_magnitude_stats)
 
     @property
     def collected_variable_value_stats(self):
@@ -497,10 +523,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _StatsCollectingCapab
         Gets the indices of variables returned by collected_variables() as they
         were on the original model and returned by model.variables.
         """
-        if self._filtered_value_variable_indices is not None:
-            return self._filtered_value_variable_indices
-        else:
-            return None
+        return self._filtered_value_variable_indices
 
     def on_train_begin(self, logs=None):
         """
@@ -543,11 +566,6 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _StatsCollectingCapab
         self.variable_magnitude_stats = self._stats_dict_list_to_dataframes(
             self.variable_magnitude_stats, self._variable_stats_quantiles)
 
-        # calculate global model stats
-        # TODO update
-        self.model_stats = self._compute_scale_distribution_across_stats_list(
-            self.variable_value_stats, scale_quantile=75)
-
     def on_epoch_begin(self, epoch, logs=None):
         self._epoch = epoch
         if not self.per_step and self.before_updates:
@@ -573,21 +591,17 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _StatsCollectingCapab
             self._collect_stats()
             self._collect_raw_values()
 
-    # TODO continue from here
-    #  and wrap it up in re-usable logic if suitable
-    #  and and update _compute_percentile_stats to return both
-    #  raw and magnitude stats in a single @tf.function instance,
-    #  for faster processing.
     def _collect_stats(self):
         # compute quantile stats for each individual variable
-        for var_idx, stat_list in enumerate(self.variable_value_stats):
-            if stat_list is not None:
-                var = self.model.variables[var_idx]
-                stats_tensor = _compute_percentile_stats(
-                    var,
-                    quartiles=self._variable_stats_quantiles,
-                    magnitudes=self.magnitudes)
-                stat_list.append(stats_tensor)
+        tensors = [self.model.variables[var_idx] for var_idx, stat_list in enumerate(self.variable_value_stats)
+                   if stat_list is not None]
+        stat_pairs = self._compute_value_and_magnitude_percentile_stats(tensors, self._variable_stats_quantiles)
+
+        # append to stats list
+        var_indices = [var_idx for var_idx, stat_list in enumerate(self.variable_value_stats) if stat_list is not None]
+        for var_idx, (value_percentiles, magnitude_percentiles) in zip(var_indices, stat_pairs):
+            self.variable_value_stats[var_idx].append(value_percentiles)
+            self.variable_magnitude_stats[var_idx].append(magnitude_percentiles)
 
     def _collect_raw_values(self):
         # TODO do slicing
@@ -1808,15 +1822,20 @@ def _append_dict_list(dic, addendum_dict):
 #  more accurately:
 #    sum([(percentile-prev_percentile) * (quantile+prev_quantile)/2 for ...
 #         in zip(offset(percentiles), offset(stats), percentiles, stats])
-def get_scales_across_stats_list(stats_dataframes, scale_quantile=75):
+def get_scales_across_stats_list(stats_dataframes, scale_quantile=50):
     """
     Extracts a set of "scale" heuristics from a set of quantile stats.
     Assumes the use of dataframes where each column represents a quantile, represented as a number in range 0 to 100.
+
+    In the future, might change to defaulting to estimate the mean magnitude.
+    Note that this works best if stats have been collected ocross magnitudes.
+
     Args:
         stats_dataframes: list of pandas dataframes of shape (iterations, quantiles)
-        scale_quantile: the quantile used as a proxy for the "scale" of the typical values.
-            Must be present within the columns of the dataframe.
-            Its opposite (100-scale-quantile) must also be present.
+        scale_quantile: a hint about the quantile to attempt to use as the proxy for the
+            "scale" of typical values.
+            If present, the both this quantile and its opposite (100 - scale_quantile)
+            must be present within the stats.
     Returns:
         np-array with shape (iterations, variables)
     """
@@ -1824,6 +1843,8 @@ def get_scales_across_stats_list(stats_dataframes, scale_quantile=75):
     for variable_stat in stats_dataframes:
         if variable_stat is not None:
             # estimate the overall magnitude scale at the target quantile
+            # - assumes that the original dataset was either raw values centered around
+            #   zero, or was magnitude values.
             pos_mean = variable_stat[scale_quantile].to_numpy()
             neg_mean = variable_stat[100-scale_quantile].to_numpy()
             if np.any(neg_mean < 0):
