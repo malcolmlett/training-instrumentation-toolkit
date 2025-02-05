@@ -329,7 +329,7 @@ class BaseGradientCallback:
         """
 
 
-class _StatsCollectingCapability:
+class _ValueStatsCollectingCapability:
     @tf.function
     def _compute_value_and_magnitude_percentile_stats(self, tensors, quantiles):
         """
@@ -395,7 +395,49 @@ class _StatsCollectingCapability:
         return pd.DataFrame(stats.numpy(), columns=quantiles)
 
 
-class VariableHistoryCallback(tf.keras.callbacks.Callback, _StatsCollectingCapability):
+class _ActivityStatsCollectingCapability:
+    def __init__(self):
+        self._activity_stats = []  # initially list (by layer) of dicts (by stat) of lists (by iteration)
+        self._initialised = False
+
+    def _init_activity_stats(self, values):
+        """
+        Final initialisation of tracking that has to be deferred until we have our first activation data.
+        There seems to be some dynamism in determining the output shape of a Layer object, and we need that
+        accurate for this final initialisation.
+        Args:
+            values: list of tensors of raw tracked values
+        """
+        if not self._initialised:
+            self._activity_stats = [{key: [] for key in self._activity_stat_keys()} for value in values if value is not None]
+            self._initialised = True
+
+            # TODO revise
+            self._layer_shapes = [tensor.shape for tensor in values]
+            self._channel_sizes = [tensor.shape[-1] for tensor in values]
+            self._spatial_dims =\
+                [tensor.shape[1:-1] if len(tensor.shape) > 2 else () for tensor in values]
+            self._layer_channel_activity_sums =\
+                [tf.Variable(tf.zeros(size, dtype=tf.float32)) for size in self._channel_sizes]  # by channel
+
+    def _finalize_activity_stats(self):
+        # TODO turn into list of pandas dataframes
+        for i_idx in range(len(self._activity_stats)):
+            if self._activity_stats[i_idx] is not None:
+                for key in self._activity_stats[i_idx].keys():
+                    self._activity_stats[i_idx][key] = np.array(self._activity_stats[i_idx][key])
+
+    @staticmethod
+    def _activity_stat_keys():
+        """
+        Gets the list of stats that will be computed.
+        Currently static but may be computed based on configuration in the future.
+        """
+        return ['dead_rate', 'activation_rate']
+
+
+class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollectingCapability,
+                              _ActivityStatsCollectingCapability):
     """
     Standard model.fit() callback that captures the state of variables during training.
     Variable states may be captured BEFORE or AFTER each update step or epoch, depending on the needs.
@@ -447,6 +489,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _StatsCollectingCapab
             self.epochs = []
         self.variable_value_stats = []  # initially list (by variable) of list (by iteration) of tensors
         self.variable_magnitude_stats = []  # initially list (by variable) of list (by iteration) of tensors
+        self.activity_stats = []  # initially list (by layer) of dicts (by stat) of lists (by iteration)
         self._variable_values = None
 
         # internal tracking
@@ -478,6 +521,14 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _StatsCollectingCapab
         Use collected_variable_stats_indices() to identify which variables are included.
         """
         return [stats for stats in self.variable_value_stats if stats is not None]
+
+    @property
+    def collected_variable_activity_stats(self):
+        """
+        Gets stats against the activity and dead rates of each variable, omitting any variable that have no collected
+        stats. Use collected_variable_stats_indices() to identify which variables are included.
+        """
+        return [stats for stats in self.variable_activity_stats if stats is not None]
 
     @property
     def collected_variable_stats_indices(self):
@@ -612,7 +663,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _StatsCollectingCapab
                     val_list.append(state)
 
 
-class GradientHistoryCallback(BaseGradientCallback, _StatsCollectingCapability):
+class GradientHistoryCallback(BaseGradientCallback, _ValueStatsCollectingCapability):
     """
     Custom tot.fit() gradient callback that captures statistics across the gradients during training.
     Optionally also captures selected raw gradients.
@@ -839,7 +890,7 @@ class GradientHistoryCallback(BaseGradientCallback, _StatsCollectingCapability):
         plot_gradient_history(self)
 
 
-class LayerOutputGradientHistoryCallback(BaseGradientCallback, _StatsCollectingCapability):
+class LayerOutputGradientHistoryCallback(BaseGradientCallback, _ValueStatsCollectingCapability):
     """
     Custom tot.fit() gradient callback that captures statistics across the layer output gradients
     during training.
@@ -1073,7 +1124,8 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, _StatsCollectingC
                         val_list.append(gradients[l_idx])
 
 
-class ActivityHistoryCallback(BaseGradientCallback, _StatsCollectingCapability):
+class ActivityHistoryCallback(BaseGradientCallback, _ValueStatsCollectingCapability,
+                              _ActivityStatsCollectingCapability):
     """
     Custom tot.fit() gradient callback function that collects unit activation rates during training.
     Optionally additionally captures raw layer outputs for selected layers.
@@ -1139,14 +1191,24 @@ class ActivityHistoryCallback(BaseGradientCallback, _StatsCollectingCapability):
             self.steps = []
         else:
             self.epochs = []
-        self.model_stats = {}  # initially dict (by stat) of lists (by iteration)
-        self.layer_stats = []  # initially list (by layer) of dicts (by stat) of lists (by iteration)
+        # TODO ermove self.model_stats = {}  # initially dict (by stat) of lists (by iteration)
+        # TODO remove self.layer_stats = []  # initially list (by layer) of dicts (by stat) of lists (by iteration)
         self._output_values = None  # initially list (by layer) of list (by step/epoch) of layer output tensors
 
         # internal tracking
         self._epoch = 0
         self._layer_shapes = None
         self._filtered_value_layer_indices = None
+
+    @property
+    def model_activity_stats(self):
+        # FIXME
+        dic = {}
+        for key in self._activity_stat_keys():
+            dic[f"min_{key}"] = np.min(self._activity_stats[key])
+            dic[f"max_{key}"] = np.max(self._activity_stats[key])
+            dic[f"mean_{key}"] = np.mean(self._activity_stats[key])
+        return dic
 
     @property
     def layer_shapes(self):
@@ -1158,14 +1220,14 @@ class ActivityHistoryCallback(BaseGradientCallback, _StatsCollectingCapability):
         Same as layer_shapes, because all layers always have outputs, but included for consistency with
         other callbacks in this suite and in case of changes in the future.
         """
-        return self.layer_stats
+        return self._activity_stats
 
     @property
     def collected_layer_stats_indices(self):
         """
         Indices of layers as returned by collected_layer_stats()
         """
-        return [idx for idx, stats in enumerate(self.layer_stats) if stats is not None]
+        return [idx for idx, stats in enumerate(self._activity_stats) if stats is not None]
 
     # TODO remove this method
     @property
@@ -1220,35 +1282,14 @@ class ActivityHistoryCallback(BaseGradientCallback, _StatsCollectingCapability):
         """
         Validates configuration and partially expands it, now that we have access to the model.
         """
-        # init stats
-        self.model_stats = {key: [] for key in self._model_stat_keys()}
-        self.layer_stats = [{key: [] for key in self._stat_keys()} for _ in self.model.layers]
-
-        # expand collection_sets
+        # expand collection_sets and initialise variable storages
+        # (TODO also prepare slicing rules)
         if self.collection_sets:
             self.collection_sets = _normalize_collection_sets_for_layers(self.model, self.collection_sets)
             self._filtered_value_layer_indices = [index for collection_set in self.collection_sets
                                                   for index in collection_set['layer_indices']]
-
-        # initialise list of gradient storages across gradients and iterations
-        # (TODO also prepare slicing rules)
-        if self.collection_sets:
             self._output_values = [[] if l_idx in self._filtered_value_layer_indices else None
                                    for l_idx in range(len(self.model.layers))]
-
-    def _init_on_first_update(self, activations):
-        """
-        Final initialisation of tracking that has to be deferred until we have our first activation data.
-        There seems to be some dynamism in determining the output shape of a Layer object, and we need that
-        accurate for this final initialisation.
-        """
-        if not hasattr(self, "_layer_channel_activity_sums"):
-            self._layer_shapes = [activation.shape for activation in activations]
-            self._channel_sizes = [activation.shape[-1] for activation in activations]
-            self._spatial_dims =\
-                [activation.shape[1:-1] if len(activation.shape) > 2 else () for activation in activations]
-            self._layer_channel_activity_sums =\
-                [tf.Variable(tf.zeros(size, dtype=tf.float32)) for size in self._channel_sizes]  # by channel
 
     def on_train_end(self):
         """
@@ -1260,11 +1301,7 @@ class ActivityHistoryCallback(BaseGradientCallback, _StatsCollectingCapability):
             self.steps = np.array(self.steps)
         else:
             self.epochs = np.array(self.epochs)
-        for key in self.model_stats.keys():
-            self.model_stats[key] = np.array(self.model_stats[key])
-        for l_idx in range(len(self.layer_stats)):
-            for key in self.layer_stats[l_idx].keys():
-                self.layer_stats[l_idx][key] = np.array(self.layer_stats[l_idx][key])
+        self._finalize_activity_stats()
 
     def on_epoch_begin(self, epoch, logs=None):
         """
@@ -1282,7 +1319,7 @@ class ActivityHistoryCallback(BaseGradientCallback, _StatsCollectingCapability):
         """
         Accumulates activations from each step. Also emits stats, if configured at per-step level.
         """
-        self._init_on_first_update(activations)
+        self._init_activity_stats(activations)
 
         # accumulate activation data
         is_accum = (not self.per_step)  # accum over steps in whole epoch, or otherwise just overwrite per step
@@ -1349,35 +1386,6 @@ class ActivityHistoryCallback(BaseGradientCallback, _StatsCollectingCapability):
             'dead_rate': dead_rate.numpy(),
             'activation_rate': tf.reduce_mean(active_rates).numpy()
         }
-
-    # TODO consider doing this at end once have already converted these values to numpy(). Will be faster.
-    def _compute_model_stats(self, layer_stats_list):
-        dic = {}
-        for key in self._stat_keys():
-            dic[f"min_{key}"] = min([stats[key] for stats in layer_stats_list])
-            dic[f"max_{key}"] = max([stats[key] for stats in layer_stats_list])
-            dic[f"mean_{key}"] = np.mean([stats[key] for stats in layer_stats_list])
-        return dic
-
-    @staticmethod
-    def _stat_keys():
-        """
-        Gets the list of stats that will be computed.
-        Currently static but may be computed based on configuration in the future.
-        """
-        return ['dead_rate', 'activation_rate']
-
-    def _model_stat_keys(self):
-        """
-        Gets the list of stats that will be computed.
-        Currently static but may be computed based on configuration in the future.
-        """
-        keys = []
-        for key in self._stat_keys():
-            keys.append(f"min_{key}")
-            keys.append(f"max_{key}")
-            keys.append(f"mean_{key}")
-        return keys
 
     def plot(self):
         """
