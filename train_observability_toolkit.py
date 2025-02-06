@@ -330,14 +330,65 @@ class BaseGradientCallback:
         """
 
 
-class _ValueStatsCollectingMixin:
+class ValueStatsCollectingMixin:
     """
     Mixin for callback classes the need to measure the value statistics over the items that they capture.
     "Items" are typically something related to layers or variables.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, value_stats=True, value_stats_quantiles=None, *args, **kwargs):
+        """
+        Args:
+            value_stats: bool.
+                Whether to enable collection of value stats.
+
+            value_stats_quantiles: list of percentiles in range 0 .. 100.
+                Default: [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
+        """
         super().__init__(*args, **kwargs)
+        self.value_stats_enabled = value_stats
+        self.value_stats_quantiles = value_stats_quantiles or [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
+
+        # shape of data structure is optimised for speed of accumulation during training
+        # so needs to be converted to a more usable data structure after training
+        # - initially: list (by item) of list (by iteration) of tensors (by quantile)
+        # - finally:   list (by item) of pandas dataframes with shape (iterations, stats)
+        self._item_value_stats = None
+        self._item_magnitude_stats = None
+
+    @property
+    def model_magnitude_stats(self):
+        """
+        Stats across the general magnitudes of values across the variables.
+        Pandas data-frame with shape (iterations, percentiles).
+        """
+        return self._compute_scale_distribution_across_stats_list(self._item_magnitude_stats)
+
+    def _init_value_stats(self, values):
+        """
+        Initialisation of tracking once we have a first example of what the values look like.
+        """
+        self.variable_value_stats = [[] if value is not None else None for value in values]
+        self.variable_magnitude_stats = [[] if value is not None else None for value in values]
+
+    def _finalize_value_stats(self):
+        # convert data structures
+        # - from: list (by item) of list (by iteration) of tensor (by stat)
+        # - to:   list (by item) of pd-dataframe: iterations x percentiles
+        self._item_value_stats = self._stats_tensor_list_to_dataframes(
+            self._item_value_stats, self.value_stats_quantiles)
+        self._item_magnitude_stats = self._stats_tensor_list_to_dataframes(
+            self._item_magnitude_stats, self.value_stats_quantiles)
+
+    def _collect_value_stats(self, values):
+        # compute quantile stats for each individual variable
+        stat_pairs = self._compute_value_and_magnitude_percentile_stats(values, self.value_stats_quantiles)
+
+        # append to stats list
+        var_indices = [var_idx for var_idx, stat_list in enumerate(self.variable_value_stats) if stat_list is not None]
+        for var_idx, (value_percentiles, magnitude_percentiles) in zip(var_indices, stat_pairs):
+            self.variable_value_stats[var_idx].append(value_percentiles)
+            self.variable_magnitude_stats[var_idx].append(magnitude_percentiles)
 
     @tf.function
     def _compute_value_and_magnitude_percentile_stats(self, tensors, quantiles):
@@ -363,12 +414,12 @@ class _ValueStatsCollectingMixin:
         return [computation(tensor) for tensor in tensors]
 
     @staticmethod
-    def _stats_dict_list_to_dataframes(stats_by_item, columns):
+    def _stats_tensor_list_to_dataframes(stats_by_item, columns):
         """
         Args:
-            stats_by_item: list (by variable/layer) of dict (by stat) of list (by iteration)
+            stats_by_item: list (by item) of list (by iteration) of TF tensor (by stat)
         Returns:
-            list (by variable/alyer) of pandas dataframe (iterations x stats)
+            list (by item) of pandas dataframe (iterations x stats)
         """
         item_dataframes = []
         for item_stats in stats_by_item:
@@ -404,7 +455,7 @@ class _ValueStatsCollectingMixin:
         return pd.DataFrame(stats.numpy(), columns=quantiles)
 
 
-class _ActivityStatsCollectingMixin:
+class ActivityStatsCollectingMixin:
     """
     Mixin for callback classes the need to measure the activity rates of the items that they capture.
     "Items" are typically something related to layers or variables.
@@ -413,6 +464,12 @@ class _ActivityStatsCollectingMixin:
     * All layers are assumed to produce outputs with shapes of form: `(batch_size, ..spatial_dims.., channels)`.
     * We focus on the channels dimension as representing a set of output neurons, or "units",
       each producing a single float output value. The output value may vary across batch and spatial dimensions.
+
+    Assumes the following for the calculation of "activation rates" across variables:
+    * All variables are assumed to have shapes of form: `(..spatial_dims.., channels)`
+    * Then treat these the same as for layer outputs, but without the batch dimension.
+
+    Then assumes and computes:
     * A unit or channel is "active" if it has any non-zero value.
     * A unit or channel is "dead" if it always has zero values across batch and spatial dimensions.
     * The activation rate for a unit is the fraction of batch/spatial positions for which that unit is active.
@@ -422,10 +479,6 @@ class _ActivityStatsCollectingMixin:
     * The "dead rate" is the fraction of units that are dead.
     * The "spatial dead rate" uses the concept, but measures across discrete spatial positions.
         It identifies the fraction of spatial positions that are always dead across the batch and channel dims.
-
-    Assumes the following for the calculation of "activation rates" across variables:
-    * All variables are assumed to have shapes of form: `(..spatial_dims.., channels)`
-    * TODO figure out what to do here
 
     """
     def __init__(self, activity_stats=True, data_format="BSC", *args, **kwargs):
@@ -453,7 +506,7 @@ class _ActivityStatsCollectingMixin:
         # so needs to be converted to a more usable data structure after training
         # - initially: list (by iteration) of list (by item) of tuples (by stat)
         # - finally:   list (by item) of pandas dataframes with shape (iterations, stats)
-        self._activity_stats = [] if self.activity_stats_enabled else None
+        self._activity_stats = None
         self._model_activity_stats = None
 
         # the following gets initialised only within _init_activity_stats()
@@ -487,13 +540,17 @@ class _ActivityStatsCollectingMixin:
         Final initialisation of tracking that has to be deferred until we have our first activation data.
         There seems to be some dynamism in determining the output shape of a Layer object, and we need that
         accurate for this final initialisation.
+
+        Safe to call this every iteration. Only takes effect on the first call.
+
         Args:
             values: list of tensors of raw tracked values, some of which may be None
         """
         if self.activity_stats_enabled and not self._initialised:
-            has_batch_dim = 'B' in self.activity_data_format
+            self._activity_stats = []
 
             # TODO either expose some of these as properties or don't save in fields
+            has_batch_dim = 'B' in self.activity_data_format
             self._item_shapes = [tensor.shape if tensor is not None else None for tensor in values]
             self._channel_sizes = [tensor.shape[-1] if tensor is not None else None
                                    for tensor in values]
@@ -631,7 +688,7 @@ class _ActivityStatsCollectingMixin:
                 in zip(channel_activity_sums, spatial_activity_sums)]
 
 
-class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollectingMixin, _ActivityStatsCollectingMixin):
+class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingMixin, ActivityStatsCollectingMixin):
     """
     Standard model.fit() callback that collects various statistics and/or raw values of
     the model variables during training.
@@ -643,10 +700,6 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollecting
             (only populated if verbose == 0)
         steps: list of int. Step numbers correlated to captured gradients/gradient-stats
             (only populated if verbose > 0)
-        variable_value_stats: list of pandas data-frames. One data-frame for each variable that is tracked,
-            or None for untracked variables. The dataframe has rows = iterations, and columns = stats (quartiles).
-        variable_magnitude_stats: list of pandas data-frames. One data-frame for each variable that is tracked,
-            or None for untracked variables. The dataframe has rows = iterations, and columns = stats (quartiles).
     """
 
     def __init__(self, per_step=False, before_updates=False, trainable_only=True,
@@ -675,7 +728,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollecting
               See _normalize_collection_sets_for_variables() for format details.
         """
         # Callback doesn't honour python 3's MRO, so init mixins directly
-        _ActivityStatsCollectingMixin.__init__(self, data_format='SC', *args, **kwargs)
+        ActivityStatsCollectingMixin.__init__(self, data_format='SC', *args, **kwargs)
         self.per_step = per_step
         self.before_updates = before_updates
         self.trainable_only = trainable_only
@@ -686,23 +739,29 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollecting
             self.steps = []
         else:
             self.epochs = []
-        self.variable_value_stats = None  # initially list (by variable) of list (by iteration) of tensors
-        self.variable_magnitude_stats = None  # initially list (by variable) of list (by iteration) of tensors
         self._variable_values = None
 
         # internal tracking
         self._epoch = 0
         self._filtered_value_variable_indices = None
-        self._variable_stats_quantiles = [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
 
     @property
-    def model_magnitude_stats(self):
+    def variable_value_stats(self):
         """
-        Gets stats across the general magnitudes of values across the variables.
-        Returns:
-             pandas data-frame with rows = iterations, columns = stats (quantiles).
+        List (by variable) of dataframes containing value stats, or None if not enabled.
+        Each variable's list entry is either as pandas dataframe of shape (iterations, percentiles),
+        or None if stats are not collected for that variable.
         """
-        return self._compute_scale_distribution_across_stats_list(self.variable_magnitude_stats)
+        return self._item_value_stats
+
+    @property
+    def variable_magnitude_stats(self):
+        """
+        List (by variable) of dataframes containing value magnitude stats, or None if not enabled.
+        Each variable's list entry is either as pandas dataframe of shape (iterations, percentiles),
+        or None if stats are not collected for that variable.
+        """
+        return self._item_magnitude_stats
 
     @property
     def variable_activity_stats(self):
@@ -719,26 +778,38 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollecting
     @property
     def collected_variable_value_stats(self):
         """
-        Gets stats against each raw variable value, omitting any variable that have no collected stats.
+        Variable value stats filtered only on those that have been collected.
+        None if value stats collection is disabled.
         Use collected_variable_stats_indices() to identify which model variables are included.
         """
-        return [stats for stats in self.variable_value_stats if stats is not None]
+        if self._item_value_stats is not None:
+            return [stats for stats in self._item_value_stats if stats is not None]
+        else:
+            return None
 
     @property
     def collected_variable_magnitude_stats(self):
         """
-        Gets stats against the magnitudes of each variable, omitting any variable that have no collected stats.
-        Use collected_variable_stats_indices() to identify which variables are included.
+        Variable magnitude stats filtered only on those that have been collected.
+        None if value stats collection is disabled.
+        Use collected_variable_stats_indices() to identify which model variables are included.
         """
-        return [stats for stats in self.variable_value_stats if stats is not None]
+        if self._item_magnitude_stats is not None:
+            return [stats for stats in self._item_magnitude_stats if stats is not None]
+        else:
+            return None
 
     @property
     def collected_variable_activity_stats(self):
         """
-        Gets stats against the activity and dead rates of each variable, omitting any variable that have no collected
-        stats. Use collected_variable_stats_indices() to identify which variables are included.
+        Variable activity stats filtered only on those that have been collected.
+        None if activity collection is disabled.
+        Use collected_variable_stats_indices() to identify which model variables are included.
         """
-        return [stats for stats in self.variable_activity_stats if stats is not None]
+        if self._activity_stats is not None:
+            return [stats for stats in self._activity_stats if stats is not None]
+        else:
+            return None
 
     @property
     def collected_variable_stats_indices(self):
@@ -791,13 +862,10 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollecting
         Initialises tracking, now that we know the model etc.
         """
         # init stats
-        stats_variables = self.model.trainable_variables if self.trainable_only else self.model.variables
-        filtered_stats_variable_indices = [_index_by_identity(self.model.variables, var)
-                                           for var in stats_variables]
-        self.variable_value_stats = [[] if var_idx in filtered_stats_variable_indices else None
-                                     for var_idx in range(len(self.model.variables))]
-        self.variable_magnitude_stats = [[] if var_idx in filtered_stats_variable_indices else None
-                                         for var_idx in range(len(self.model.variables))]
+        tracked_variables = self.model.trainable_variables if self.trainable_only else self.model.variables
+        values = [value if _index_by_identity(tracked_variables, value) >= 0 else None for value in self.model.variables]
+        self._init_value_stats(values)
+        self._init_activity_stats(values)
 
         # expand collection_sets and initialise variable storages
         # (TODO also prepare slicing rules)
@@ -819,13 +887,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollecting
         else:
             self.epochs = np.array(self.epochs)
 
-        # convert per-variable stats
-        # - from: list (by var) of list (by iteration) of tensor
-        # - to:   list (by var) of pd-dataframe: iterations x quartiles
-        self.variable_value_stats = self._stats_dict_list_to_dataframes(
-            self.variable_value_stats, self._variable_stats_quantiles)
-        self.variable_magnitude_stats = self._stats_dict_list_to_dataframes(
-            self.variable_magnitude_stats, self._variable_stats_quantiles)
+        # convert data structures to output formats
+        self._finalize_value_stats()
         self._finalize_activity_stats()
 
     def on_epoch_begin(self, epoch, logs=None):
@@ -855,25 +918,14 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollecting
                   if stat_list is not None]
 
         # value stats
-        self._collect_stats(values)
+        self._collect_value_stats(values)
 
         # activity stats
-        self._init_activity_stats(values)
         self._accum_activity_stats(values, is_accum=False)
         self._collect_activity_stats(1)  # always summing over 1 sample
 
         # raw data capture
         self._collect_raw_values(values)
-
-    def _collect_stats(self, values):
-        # compute quantile stats for each individual variable
-        stat_pairs = self._compute_value_and_magnitude_percentile_stats(values, self._variable_stats_quantiles)
-
-        # append to stats list
-        var_indices = [var_idx for var_idx, stat_list in enumerate(self.variable_value_stats) if stat_list is not None]
-        for var_idx, (value_percentiles, magnitude_percentiles) in zip(var_indices, stat_pairs):
-            self.variable_value_stats[var_idx].append(value_percentiles)
-            self.variable_magnitude_stats[var_idx].append(magnitude_percentiles)
 
     def _collect_raw_values(self, values):
         # TODO do slicing
@@ -883,7 +935,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollecting
                     val_list.append(tf.identity(value))  # take copy of current state
 
 
-class GradientHistoryCallback(BaseGradientCallback, _ValueStatsCollectingMixin):
+class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin):
     """
     Custom tot.fit() gradient callback that captures statistics across the gradients during training.
     Optionally also captures selected raw gradients.
@@ -1110,7 +1162,7 @@ class GradientHistoryCallback(BaseGradientCallback, _ValueStatsCollectingMixin):
         plot_gradient_history(self)
 
 
-class LayerOutputGradientHistoryCallback(BaseGradientCallback, _ValueStatsCollectingMixin):
+class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin):
     """
     Custom tot.fit() gradient callback that captures statistics across the layer output gradients
     during training.
@@ -1344,8 +1396,8 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, _ValueStatsCollec
                         val_list.append(gradients[l_idx])
 
 
-class LayerOutputHistoryCallback(BaseGradientCallback, _ValueStatsCollectingMixin,
-                                 _ActivityStatsCollectingMixin):
+class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin,
+                                 ActivityStatsCollectingMixin):
     """
     Custom tot.fit() gradient callback function that collects various statistics and/or raw values of
     layer outputs during training.
