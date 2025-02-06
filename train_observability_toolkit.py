@@ -396,9 +396,28 @@ class _ValueStatsCollectingCapability:
 
 
 class _ActivityStatsCollectingCapability:
+    """
+    Mixin for callback classes the need to measure the activity rates of the items that they capture.
+    "Items" are typically something related to layers or variables.
+    """
     def __init__(self):
-        self._activity_stats = []  # initially list (by layer) of dicts (by stat) of lists (by iteration)
+        # shape of data structure is optimised for speed of accumulation during training
+        # so needs to be converted to a more usable data structure after training
+        # - initially: list (by iteration) of list (by item) of tuples (by stat)
+        # - finally:   list (by item) of pandas dataframes with shape (iterations, stats)
+        self._activity_stats = []
+        self._model_activity_stats = None
+
+        # the following gets initialised only within _init_activity_stats()
         self._initialised = False
+        self._item_shapes = None  # shapes for each item
+        self._channel_sizes = None  # for each item: number of channels
+        self._spatial_shapes = None  # for each item: subset of shape relating just to spatial dims
+        self._item_channel_activity_sums = None  # tf.Variable accumulators for each item
+
+    @property
+    def model_activity_stats(self):
+        return self._model_activity_stats
 
     def _init_activity_stats(self, values):
         """
@@ -409,23 +428,97 @@ class _ActivityStatsCollectingCapability:
             values: list of tensors of raw tracked values
         """
         if not self._initialised:
-            self._activity_stats = [{key: [] for key in self._activity_stat_keys()} for value in values if value is not None]
+            self._item_shapes = [tensor.shape for tensor in values]
+            self._channel_sizes = [tensor.shape[-1] for tensor in values]  # TODO remove
+            self._spatial_shapes = [tensor.shape[1:-1] if len(tensor.shape) > 2 else () for tensor in values]  # TODO remove
+            self._item_channel_activity_sums =\
+                [tf.Variable(tf.zeros(size, dtype=tf.float32)) for size in self._channel_sizes]  # by channel
+            self._item_spatial_activity_sums =\
+                [tf.Variable(tf.zeros(shape, dtype=tf.float32)) for shape in self._spatial_shapes]  # by spatial pos
             self._initialised = True
 
-            # TODO revise
-            self._layer_shapes = [tensor.shape for tensor in values]
-            self._channel_sizes = [tensor.shape[-1] for tensor in values]
-            self._spatial_dims =\
-                [tensor.shape[1:-1] if len(tensor.shape) > 2 else () for tensor in values]
-            self._layer_channel_activity_sums =\
-                [tf.Variable(tf.zeros(size, dtype=tf.float32)) for size in self._channel_sizes]  # by channel
-
     def _finalize_activity_stats(self):
-        # TODO turn into list of pandas dataframes
-        for i_idx in range(len(self._activity_stats)):
-            if self._activity_stats[i_idx] is not None:
-                for key in self._activity_stats[i_idx].keys():
-                    self._activity_stats[i_idx][key] = np.array(self._activity_stats[i_idx][key])
+        """
+        To be called once training is complete. Does data format conversions.
+        """
+        # TODO to support live-monitoring, consider doing on-demand in property,
+        #  saving to a different variable, and invalidating if more data is added
+
+        # convert per-item stats
+        def convert(i_idx):
+            if self._activity_stats[0][i_idx] is not None:
+                item_data = [iteration_stats[i_idx] for iteration_stats in self._activity_stats]
+                return pd.DataFrame(item_data, columns=self._activity_stat_keys())
+            return None
+        num_items = len(self._activity_stats[0])
+        self._activity_stats = [convert(i_idx) for i_idx in range(num_items)]
+
+        # compute model-whole stats
+        dic = {}
+        for key in self._activity_stat_keys():
+            dic[f"min_{key}"] = self._activity_stats[key].min()
+            dic[f"max_{key}"] = self._activity_stats[key].max()
+            dic[f"mean_{key}"] = self._activity_stats[key].mean()
+        self._model_activity_stats = pd.DataFrame(dic)
+
+    def _reset_per_epoch_stats(self):
+        """
+        Resets accumulators for colection of data per-epoch.
+        """
+        if self._initialised:
+            for activity_sum in self._item_channel_activity_sums:
+                activity_sum.assign(tf.zeros_like(activity_sum))
+
+    @tf.function
+    def _accum_activity_stats(self, values, is_accum, outs_by_channel, outs_by_spatial):
+        """
+        Call for every step. Accumulates over steps in each epoch if wanted.
+        Args:
+            values: list of tensors, no None tensors allowed
+        """
+        for i_idx, tensor in enumerate(values):
+            active_mask = tf.cast(tf.not_equal(tensor, 0.0), tf.float32)
+            rate_by_channel = tf.reduce_mean(active_mask, axis=tf.range(tf.rank(active_mask) - 1))
+            rate_by_spatial = tf.reduce_mean(active_mask, axis=(0, -1))
+            if is_accum:
+                outs_by_channel[i_idx].assign_add(rate_by_channel)
+                outs_by_spatial[i_idx].assign_add(rate_by_spatial)
+            else:
+                outs_by_channel[i_idx].assign(rate_by_channel)
+                outs_by_spatial[i_idx].assign(rate_by_spatial)
+
+    # TODO to support live-monitoring, should also compute and append model stats
+    def _collect_activity_stats(self, num_batches):
+        """
+        Args:
+            num_batches - number of batches that have gone into the accumulated activity sums
+                (usually 1 for per-step collection, and steps_per_epoch for per-epoch collection)
+        """
+        def computation(channel_activity_sum, spatial_activity_sum):
+            # item-wide activation rate
+            # - mean rate of activation (non-zero) across batches, spatial dims, and channels
+            # - already taken mean across other dims, so take final mean across channels
+            # - note: have been summing over each step, so must divide by that
+            active_rate = tf.reduce_mean(channel_activity_sum / num_batches)
+
+            # per-channel dead rate
+            # - fraction of channels that are always zero
+            dead_channel_rate = tf.reduce_mean(tf.cast(tf.equal(channel_activity_sum, 0.0), tf.float32))
+
+            # per-spatial dead rate
+            # - fraction of spatial positions that are always zero
+            dead_spatial_rate = tf.reduce_mean(tf.cast(tf.equal(spatial_activity_sum, 0.0), tf.float32))
+
+            # return in same order as per _activity_stat_keys()
+            return active_rate, dead_channel_rate, dead_spatial_rate
+
+        @tf.function
+        def loop(channel_activity_sums, spatial_activity_sums):
+            return [computation(channel_activity_sum, spatial_activity_sum) for
+                    channel_activity_sum, spatial_activity_sum in
+                    zip(channel_activity_sums, spatial_activity_sums)]
+
+        self._activity_stats.append(loop(self._item_channel_activity_sums, self._item_spatial_activity_sums))
 
     @staticmethod
     def _activity_stat_keys():
@@ -433,11 +526,10 @@ class _ActivityStatsCollectingCapability:
         Gets the list of stats that will be computed.
         Currently static but may be computed based on configuration in the future.
         """
-        return ['dead_rate', 'activation_rate']
+        return ['activation_rate', 'dead_rate', 'spatial_dead_rate']
 
 
-class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollectingCapability,
-                              _ActivityStatsCollectingCapability):
+class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollectingCapability):
     """
     Standard model.fit() callback that captures the state of variables during training.
     Variable states may be captured BEFORE or AFTER each update step or epoch, depending on the needs.
@@ -489,7 +581,6 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollecting
             self.epochs = []
         self.variable_value_stats = []  # initially list (by variable) of list (by iteration) of tensors
         self.variable_magnitude_stats = []  # initially list (by variable) of list (by iteration) of tensors
-        self.activity_stats = []  # initially list (by layer) of dicts (by stat) of lists (by iteration)
         self._variable_values = None
 
         # internal tracking
@@ -1191,24 +1282,12 @@ class ActivityHistoryCallback(BaseGradientCallback, _ValueStatsCollectingCapabil
             self.steps = []
         else:
             self.epochs = []
-        # TODO ermove self.model_stats = {}  # initially dict (by stat) of lists (by iteration)
-        # TODO remove self.layer_stats = []  # initially list (by layer) of dicts (by stat) of lists (by iteration)
         self._output_values = None  # initially list (by layer) of list (by step/epoch) of layer output tensors
 
         # internal tracking
         self._epoch = 0
         self._layer_shapes = None
         self._filtered_value_layer_indices = None
-
-    @property
-    def model_activity_stats(self):
-        # FIXME
-        dic = {}
-        for key in self._activity_stat_keys():
-            dic[f"min_{key}"] = np.min(self._activity_stats[key])
-            dic[f"max_{key}"] = np.max(self._activity_stats[key])
-            dic[f"mean_{key}"] = np.mean(self._activity_stats[key])
-        return dic
 
     @property
     def layer_shapes(self):
@@ -1307,13 +1386,9 @@ class ActivityHistoryCallback(BaseGradientCallback, _ValueStatsCollectingCapabil
         """
         Tracks the current epoch number and resets sums across each epoch
         """
-        # track current epoch
         self._epoch = epoch
-
-        # reset sums for this epoch
-        if hasattr(self, "_layer_channel_activity_sums"):
-            for layer_channel_activity_sum in self._layer_channel_activity_sums:
-                layer_channel_activity_sum.assign(tf.zeros_like(layer_channel_activity_sum))
+        if not self.per_step:
+            self._reset_per_epoch_stats()
 
     def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations, output_gradients):
         """
@@ -1323,12 +1398,12 @@ class ActivityHistoryCallback(BaseGradientCallback, _ValueStatsCollectingCapabil
 
         # accumulate activation data
         is_accum = (not self.per_step)  # accum over steps in whole epoch, or otherwise just overwrite per step
-        self._accum_unit_stats(activations, is_accum, self._layer_channel_activity_sums)
+        self._accum_activity_stats(activations, is_accum, self._item_channel_activity_sums, self._item_spatial_activity_sums)
 
         # stats calculations for each step, if configured
         if self.per_step:
             self.steps.append(self.params['steps'] * self._epoch + batch)
-            self._collect_stats(1)
+            self._collect_activity_stats(1)
             self._collect_raw_values(activations)
 
     def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations, output_gradients):
@@ -1339,36 +1414,8 @@ class ActivityHistoryCallback(BaseGradientCallback, _ValueStatsCollectingCapabil
         # (uses partial stats that were accumulated across the steps in the batch)
         if not self.per_step:
             self.epochs.append(epoch)
-            self._collect_stats(self.params['steps'])
+            self._collect_activity_stats(self.params['steps'])
             self._collect_raw_values(activations)
-
-    # auto-graphed for faster iteration over layer outputs
-    @tf.function
-    def _accum_unit_stats(self, layer_outputs, is_accum, outs):
-        for l_idx, layer_output in enumerate(layer_outputs):
-            active_outputs = tf.cast(tf.not_equal(layer_output, 0.0), tf.float32)
-            active_counts_by_channel = tf.reduce_mean(active_outputs, axis=tf.range(tf.rank(active_outputs) - 1))
-            if is_accum:
-                outs[l_idx].assign_add(active_counts_by_channel)
-            else:
-                outs[l_idx].assign(active_counts_by_channel)
-
-    def _collect_stats(self, num_batches):
-        """
-        Significantly more complex than the _collect_stats() methods in the other history callbacks because
-        this one must perform complex computations in order to get access to the values used to collect
-        stats on.
-        """
-        # compute stats
-        iteration_layer_stats = [self._compute_channel_stats(channel_size, layer_active_sum, num_batches) for
-                                 channel_size, layer_active_sum in
-                                 zip(self._channel_sizes, self._layer_channel_activity_sums)]
-        iteration_model_stats = self._compute_model_stats(iteration_layer_stats)
-
-        # emit for results
-        _append_dict_list(self.model_stats, iteration_model_stats)
-        for l_idx, stats in enumerate(iteration_layer_stats):
-            _append_dict_list(self.layer_stats[l_idx], stats)
 
     def _collect_raw_values(self, activations):
         # TODO do slicing
@@ -1376,16 +1423,6 @@ class ActivityHistoryCallback(BaseGradientCallback, _ValueStatsCollectingCapabil
             for l_idx, val_list in enumerate(self._output_values):
                 if val_list is not None:
                     val_list.append(activations[l_idx])
-
-    # TODO consider wrapping in @tf.function to speed up the loop
-    @staticmethod
-    def _compute_channel_stats(channel_size, layer_active_sum, num_batches):
-        active_rates = layer_active_sum / num_batches
-        dead_rate = tf.reduce_sum(tf.cast(tf.equal(layer_active_sum, 0.0), tf.int32)) / channel_size
-        return {
-            'dead_rate': dead_rate.numpy(),
-            'activation_rate': tf.reduce_mean(active_rates).numpy()
-        }
 
     def plot(self):
         """
