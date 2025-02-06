@@ -234,6 +234,7 @@ class BaseGradientCallback:
     """
 
     def __init__(self):
+        super().__init__()
         self.params = None
         self._model = None
 
@@ -335,6 +336,9 @@ class _ValueStatsCollectingMixin:
     "Items" are typically something related to layers or variables.
     """
 
+    def __init__(self):
+        super().__init__()
+
     @tf.function
     def _compute_value_and_magnitude_percentile_stats(self, tensors, quantiles):
         """
@@ -406,6 +410,8 @@ class _ActivityStatsCollectingMixin:
     "Items" are typically something related to layers or variables.
     """
     def __init__(self):
+        super().__init__()
+
         # shape of data structure is optimised for speed of accumulation during training
         # so needs to be converted to a more usable data structure after training
         # - initially: list (by iteration) of list (by item) of tuples (by stat)
@@ -430,16 +436,16 @@ class _ActivityStatsCollectingMixin:
         There seems to be some dynamism in determining the output shape of a Layer object, and we need that
         accurate for this final initialisation.
         Args:
-            values: list of tensors of raw tracked values
+            values: list of tensors of raw tracked values, some of which may be None
         """
         if not self._initialised:
-            self._item_shapes = [tensor.shape for tensor in values]
-            self._channel_sizes = [tensor.shape[-1] for tensor in values]  # TODO remove
-            self._spatial_shapes = [tensor.shape[1:-1] if len(tensor.shape) > 2 else () for tensor in values]  # TODO remove
+            self._item_shapes = [tensor.shape if tensor is not None else None for tensor in values]
+            self._channel_sizes = [tensor.shape[-1] if tensor is not None else None for tensor in values]  # TODO remove
+            self._spatial_shapes = [tensor.shape[1:-1] if tensor is not None and len(tensor.shape) > 2 else () if tensor is not None else None for tensor in values]  # TODO remove
             self._item_channel_activity_sums =\
-                [tf.Variable(tf.zeros(size, dtype=tf.float32)) for size in self._channel_sizes]  # by channel
+                [tf.Variable(tf.zeros(size, dtype=tf.float32)) if size is not None else None for size in self._channel_sizes]  # by channel
             self._item_spatial_activity_sums =\
-                [tf.Variable(tf.zeros(shape, dtype=tf.float32)) for shape in self._spatial_shapes]  # by spatial pos
+                [tf.Variable(tf.zeros(shape, dtype=tf.float32)) if shape is not None else None for shape in self._spatial_shapes]  # by spatial pos
             self._initialised = True
 
     def _finalize_activity_stats(self):
@@ -452,7 +458,7 @@ class _ActivityStatsCollectingMixin:
         # convert per-item stats
         def convert(i_idx):
             if self._activity_stats[0][i_idx] is not None:
-                item_data = [iteration_stats[i_idx] for iteration_stats in self._activity_stats]
+                item_data = [np.stack(iteration_stats[i_idx], axis=-1) for iteration_stats in self._activity_stats]
                 return pd.DataFrame(item_data, columns=self._activity_stat_keys())
             return None
         num_items = len(self._activity_stats[0])
@@ -461,9 +467,10 @@ class _ActivityStatsCollectingMixin:
         # compute model-whole stats
         dic = {}
         for key in self._activity_stat_keys():
-            dic[f"min_{key}"] = self._activity_stats[key].min()
-            dic[f"max_{key}"] = self._activity_stats[key].max()
-            dic[f"mean_{key}"] = self._activity_stats[key].mean()
+            key_stats = [item_stats[key].to_numpy() for item_stats in self._activity_stats]
+            dic[f"min_{key}"] = np.min(key_stats, axis=0)
+            dic[f"max_{key}"] = np.max(key_stats, axis=0)
+            dic[f"mean_{key}"] = np.mean(key_stats, axis=0)
         self._model_activity_stats = pd.DataFrame(dic)
 
     def _reset_per_epoch_stats(self):
@@ -477,20 +484,22 @@ class _ActivityStatsCollectingMixin:
     @tf.function
     def _accum_activity_stats(self, values, is_accum, outs_by_channel, outs_by_spatial):
         """
-        Call for every step. Accumulates over steps in each epoch if wanted.
+        Auto-graphed function that accumulates partially computed stats each step, in preparation
+        for calculating target stats either each step or each epoch.
         Args:
-            values: list of tensors, no None tensors allowed
+            values: list of tensors, some of which may be None
         """
         for i_idx, tensor in enumerate(values):
-            active_mask = tf.cast(tf.not_equal(tensor, 0.0), tf.float32)
-            rate_by_channel = tf.reduce_mean(active_mask, axis=tf.range(tf.rank(active_mask) - 1))
-            rate_by_spatial = tf.reduce_mean(active_mask, axis=(0, -1))
-            if is_accum:
-                outs_by_channel[i_idx].assign_add(rate_by_channel)
-                outs_by_spatial[i_idx].assign_add(rate_by_spatial)
-            else:
-                outs_by_channel[i_idx].assign(rate_by_channel)
-                outs_by_spatial[i_idx].assign(rate_by_spatial)
+            if tensor is not None:
+                active_mask = tf.cast(tf.not_equal(tensor, 0.0), tf.float32)
+                rate_by_channel = tf.reduce_mean(active_mask, axis=tf.range(tf.rank(active_mask) - 1))
+                rate_by_spatial = tf.reduce_mean(active_mask, axis=(0, -1))
+                if is_accum:
+                    outs_by_channel[i_idx].assign_add(rate_by_channel)
+                    outs_by_spatial[i_idx].assign_add(rate_by_spatial)
+                else:
+                    outs_by_channel[i_idx].assign(rate_by_channel)
+                    outs_by_spatial[i_idx].assign(rate_by_spatial)
 
     # TODO to support live-monitoring, should also compute and append model stats
     def _collect_activity_stats(self, num_batches):
@@ -498,6 +507,16 @@ class _ActivityStatsCollectingMixin:
         Args:
             num_batches - number of batches that have gone into the accumulated activity sums
                 (usually 1 for per-step collection, and steps_per_epoch for per-epoch collection)
+        """
+        iteration_activity_stats = self._compute_activity_stats(
+           self._item_channel_activity_sums, self._item_spatial_activity_sums, num_batches)
+        self._activity_stats.append(iteration_activity_stats)
+
+    @tf.function
+    def _compute_activity_stats(self, channel_activity_sums, spatial_activity_sums, num_batches):
+        """
+        Auto-graphed function that calculates the set of activity stats for a single iteration.
+        Returns a list of tuples, one for each item, with Nones for those without data.
         """
         def computation(channel_activity_sum, spatial_activity_sum):
             # item-wide activation rate
@@ -517,13 +536,10 @@ class _ActivityStatsCollectingMixin:
             # return in same order as per _activity_stat_keys()
             return active_rate, dead_channel_rate, dead_spatial_rate
 
-        @tf.function
-        def loop(channel_activity_sums, spatial_activity_sums):
-            return [computation(channel_activity_sum, spatial_activity_sum) for
-                    channel_activity_sum, spatial_activity_sum in
-                    zip(channel_activity_sums, spatial_activity_sums)]
-
-        self._activity_stats.append(loop(self._item_channel_activity_sums, self._item_spatial_activity_sums))
+        return [computation(channel_activity_sum, spatial_activity_sum)
+                if channel_activity_sum is not None else None
+                for channel_activity_sum, spatial_activity_sum
+                in zip(channel_activity_sums, spatial_activity_sums)]
 
     @staticmethod
     def _activity_stat_keys():
