@@ -608,8 +608,10 @@ class ActivityStatsCollectingMixin:
         spatial/channel positions are only active for some batches.
         """
         if self._activity_stats_initialised:
-            self._accum_activity_stats_internal(values, is_accum, self._channel_activity_sums,
-                                                self._spatial_activity_sums)
+            self._accum_activity_stats_internal(
+                values, is_accum,
+                self._channel_activity_sums,
+                self._spatial_activity_sums)
 
     def _reset_per_epoch_activity_stats(self):
         """
@@ -617,6 +619,8 @@ class ActivityStatsCollectingMixin:
         """
         if self._activity_stats_initialised:
             for activity_sum in self._channel_activity_sums:
+                activity_sum.assign(tf.zeros_like(activity_sum))
+            for activity_sum in self._spatial_activity_sums:
                 activity_sum.assign(tf.zeros_like(activity_sum))
 
     # TODO to support live-monitoring, should also compute and append model stats
@@ -628,7 +632,9 @@ class ActivityStatsCollectingMixin:
         """
         if self._activity_stats_initialised:
             iteration_activity_stats = self._compute_activity_stats(
-               self._channel_activity_sums, self._spatial_activity_sums, num_batches)
+                self._channel_activity_sums,
+                self._spatial_activity_sums,
+                num_batches)
             self._activity_stats.append(iteration_activity_stats)
 
     @staticmethod
@@ -733,6 +739,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
               See _normalize_collection_sets_for_variables() for format details.
         """
         # Callback doesn't honour python 3's MRO, so init mixins directly
+        ValueStatsCollectingMixin.__init__(self, *args, **kwargs)
         ActivityStatsCollectingMixin.__init__(self, data_format='SC', *args, **kwargs)
         self.per_step = per_step
         self.before_updates = before_updates
@@ -748,6 +755,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
 
         # internal tracking
         self._epoch = 0
+        self._collected_stats_indices = None
+        self._variable_stats_mask = None
         self._filtered_value_variable_indices = None
 
     @property
@@ -822,7 +831,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
         Indices of variables for which stats are returned by collected_variable_value_stats and
         collected_variable_magnitude_stats. Indices are as per the variable's position in model.variables.
         """
-        return [idx for idx, stats in enumerate(self.variable_value_stats) if stats is not None]
+        return self._collected_stats_indices
 
     @property
     def variables(self):
@@ -866,9 +875,16 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
         """
         Initialises tracking, now that we know the model etc.
         """
-        # init stats
+        # collect and filter first set of values
+        # - precompute _collected_stats_indices and _variable_stats_mask independent of
+        #   data collection mixins because they might be disabled
         tracked_variables = self.model.trainable_variables if self.trainable_only else self.model.variables
-        values = [value if _index_by_identity(tracked_variables, value) >= 0 else None for value in self.model.variables]
+        values = [value if _index_by_identity(tracked_variables, value) >= 0 else None
+                  for value in self.model.variables]
+        self._collected_stats_indices = [idx for idx, value in enumerate(values) if value is not None]
+        self._variable_stats_mask = [value is not None for value in values]
+
+        # init stats
         self._init_value_stats(values)
         self._init_activity_stats(values)
 
@@ -918,9 +934,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
             self._do_collection()
 
     def _do_collection(self):
-        values = [self.model.variables[var_idx]
-                  for var_idx, stat_list in enumerate(self.variable_value_stats)
-                  if stat_list is not None]
+        values = [value if included else None for value, included
+                  in zip(self.model.variables, self._variable_stats_mask)]
 
         # value stats
         self._collect_value_stats(values)
