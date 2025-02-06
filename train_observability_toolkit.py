@@ -1162,6 +1162,219 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin):
         plot_gradient_history(self)
 
 
+class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin,
+                                 ActivityStatsCollectingMixin):
+    """
+    Custom tot.fit() gradient callback function that collects various statistics and/or raw values of
+    layer outputs during training.
+
+    Other properties:
+        epochs: list of int. Epoch numbers correlated to captured gradients/gradient-stats
+            (only populated if verbose == 0)
+        steps: list of int. Step numbers correlated to captured gradients/gradient-stats
+            (only populated if verbose > 0)
+        layer_outputs: list (by layer) of list (by step/epoch) of layer output tensors.
+            Property is None if no layers being captured, otherwise each layer index is represented
+            by the top-level list, with each layer entry being None if that layer is not captured.
+    """
+
+    def __init__(self, per_step=False, magnitudes=False, collection_sets=None, *args, **kwargs):
+        """
+        Args:
+            per_step: bool. Whether to collect per-step stats, or per-epoch otherwise.
+                By default, activity is accumulated per-epoch, and an 'epochs' list is available
+                that tracks the display indices of each sample.
+                If per-step is set, then a `steps` list is available instead, and activity
+                is collected on each update step.
+                The same applies to layer output capture if enabled.
+
+            magnitudes: whether to collect stats on gradient magnitudes (default), or on their raw values.
+
+            activity_stats: bool, default: True.
+                Whether to collect activity stats.
+
+            collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
+              If omitted, this callback collects only stats.
+              See _normalize_collection_sets_for_variables() for format details.
+        """
+
+        super().__init__(*args, **kwargs)
+        self.per_step = per_step
+        self.magnitudes = magnitudes
+        self.collection_sets = collection_sets
+
+        # results variable creation
+        if per_step:
+            self.steps = []
+        else:
+            self.epochs = []
+        self._output_values = None  # initially list (by layer) of list (by step/epoch) of layer output tensors
+
+        # internal tracking
+        self._epoch = 0
+        self._layer_shapes = None
+        self._filtered_value_layer_indices = None
+
+    @property
+    def layer_shapes(self):
+        """
+        None if activity collection is disabled.
+        """
+        return self._layer_shapes
+
+    @property
+    def layer_activity_stats(self):
+        """
+        List (by layer) of dataframes containing activity stats, or None if not enabled.
+        Each layer's list entry is either as pandas dataframe of shape (iterations, stats), with the following
+        stats, or None if stats are not collected for that layer:
+            - activation_rate - mean fraction of units active at any given time
+            - dead_rate - fraction of units/channels that are always zero across batch and spatial dims
+            - spatial_dead_rate - fraction of spatial positions that are always zero across batch and channel dims
+        """
+        return self._activity_stats
+
+    @property
+    def collected_layer_activity_stats(self):
+        """
+        Layer activity stats filtered only on those that have been collected.
+        None if activity collection is disabled.
+        """
+        if self._activity_stats is not None:
+            return [stats for stats in self._activity_stats if stats is not None]
+        else:
+            return None
+
+    # TODO make independent of which stats are collected
+    @property
+    def collected_layer_stats_indices(self):
+        """
+        Indices of layers as returned by collected_layer_stats()
+        None if activity collection is disabled.
+        """
+        if self._activity_stats is not None:
+            return [idx for idx, stats in enumerate(self._activity_stats) if stats is not None]
+        else:
+            return None
+
+    # TODO remove this method
+    @property
+    def collected_layer_stats_names(self):
+        """
+        Names of layers as returned by collected_layer_stats()
+        None if disabled.
+        """
+        return [layer.name for layer in self.model.layers]
+
+    @property
+    def layer_outputs(self):
+        """
+        Gets a list corresponding to all layers, with lists of collected
+        outputs for those being collected and Nones for the rest.
+        The order and size of the returned list corresponds exactly to that returned
+        by model.layers.
+
+        Returns:
+            list (by model.layers) of list (by step/epoch) of layer outputs.
+            None if variable capturing not enabled.
+        """
+        return self._output_values
+
+    @property
+    def collected_layer_outputs(self):
+        """
+        Gets the list of collected layer outputs, containing only those that are collected.
+        The indices of the returned layer outputs relative to the original model can only be
+        determined via collected_layer_output_indices().
+
+        Returns:
+            list (by captured output) of list (by step/epoch) of layer output tensors.
+            None if variable capturing not enabled.
+        """
+        if self._output_values is not None:
+            return [var_list for var_list in self._output_values if var_list is not None]
+        else:
+            return None
+
+    @property
+    def collected_layer_output_indices(self):
+        """
+        Gets the layer indices for outputs returned by collected_layer_outputs() as they
+        were on the original model and returned by model.layers.
+        """
+        if self._output_values is not None:
+            return [l_idx for l_idx, var_list in enumerate(self._output_values) if var_list is not None]
+        else:
+            return None
+
+    def on_train_begin(self):
+        """
+        Validates configuration and partially expands it, now that we have access to the model.
+        """
+        # expand collection_sets and initialise variable storages
+        # (TODO also prepare slicing rules)
+        if self.collection_sets:
+            self.collection_sets = _normalize_collection_sets_for_layers(self.model, self.collection_sets)
+            self._filtered_value_layer_indices = [index for collection_set in self.collection_sets
+                                                  for index in collection_set['layer_indices']]
+            self._output_values = [[] if l_idx in self._filtered_value_layer_indices else None
+                                   for l_idx in range(len(self.model.layers))]
+
+    def on_train_end(self):
+        """
+        Cleans up tracking, and converts some things to numpy arrays for easier consumption.
+        High-level indices and stats are all converted to numpy.
+        Raw values are retained as TF values.
+        """
+        if self.per_step:
+            self.steps = np.array(self.steps)
+        else:
+            self.epochs = np.array(self.epochs)
+        self._finalize_activity_stats()
+
+    def on_epoch_begin(self, epoch, logs=None):
+        """
+        Tracks the current epoch number and resets sums across each epoch
+        """
+        self._epoch = epoch
+        if not self.per_step:
+            self._reset_per_epoch_activity_stats()
+
+    def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations, output_gradients):
+        """
+        Accumulates activations from each step. Also emits stats, if configured at per-step level.
+        """
+        self._init_activity_stats(activations)
+
+        # accumulate activation data
+        is_accum = (not self.per_step)  # accum over steps in whole epoch, or otherwise just overwrite per step
+        self._accum_activity_stats(activations, is_accum)
+
+        # stats calculations for each step, if configured
+        if self.per_step:
+            self.steps.append(self.params['steps'] * self._epoch + batch)
+            self._collect_activity_stats(1)
+            self._collect_raw_values(activations)
+
+    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations, output_gradients):
+        """
+        Collects gradient stats and raw gradients after each epoch, if configured at per-epoch level.
+        """
+        # stats calculation across entire epoch, if configured
+        # (uses partial stats that were accumulated across the steps in the batch)
+        if not self.per_step:
+            self.epochs.append(epoch)
+            self._collect_activity_stats(self.params['steps'])
+            self._collect_raw_values(activations)
+
+    def _collect_raw_values(self, activations):
+        # TODO do slicing
+        if self._output_values:
+            for l_idx, val_list in enumerate(self._output_values):
+                if val_list is not None:
+                    val_list.append(activations[l_idx])
+
+
 class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin):
     """
     Custom tot.fit() gradient callback that captures statistics across the layer output gradients
@@ -1394,219 +1607,6 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
                         self._gradient_values[l_idx] = None
                     else:
                         val_list.append(gradients[l_idx])
-
-
-class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin,
-                                 ActivityStatsCollectingMixin):
-    """
-    Custom tot.fit() gradient callback function that collects various statistics and/or raw values of
-    layer outputs during training.
-
-    Other properties:
-        epochs: list of int. Epoch numbers correlated to captured gradients/gradient-stats
-            (only populated if verbose == 0)
-        steps: list of int. Step numbers correlated to captured gradients/gradient-stats
-            (only populated if verbose > 0)
-        layer_outputs: list (by layer) of list (by step/epoch) of layer output tensors.
-            Property is None if no layers being captured, otherwise each layer index is represented
-            by the top-level list, with each layer entry being None if that layer is not captured.
-    """
-
-    def __init__(self, per_step=False, magnitudes=False, collection_sets=None, *args, **kwargs):
-        """
-        Args:
-            per_step: bool. Whether to collect per-step stats, or per-epoch otherwise.
-                By default, activity is accumulated per-epoch, and an 'epochs' list is available
-                that tracks the display indices of each sample.
-                If per-step is set, then a `steps` list is available instead, and activity
-                is collected on each update step.
-                The same applies to layer output capture if enabled.
-
-            magnitudes: whether to collect stats on gradient magnitudes (default), or on their raw values.
-
-            activity_stats: bool, default: True.
-                Whether to collect activity stats.
-
-            collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
-              If omitted, this callback collects only stats.
-              See _normalize_collection_sets_for_variables() for format details.
-        """
-
-        super().__init__(*args, **kwargs)
-        self.per_step = per_step
-        self.magnitudes = magnitudes
-        self.collection_sets = collection_sets
-
-        # results variable creation
-        if per_step:
-            self.steps = []
-        else:
-            self.epochs = []
-        self._output_values = None  # initially list (by layer) of list (by step/epoch) of layer output tensors
-
-        # internal tracking
-        self._epoch = 0
-        self._layer_shapes = None
-        self._filtered_value_layer_indices = None
-
-    @property
-    def layer_shapes(self):
-        """
-        None if activity collection is disabled.
-        """
-        return self._layer_shapes
-
-    @property
-    def layer_activity_stats(self):
-        """
-        List (by layer) of dataframes containing activity stats, or None if not enabled.
-        Each layer's list entry is either as pandas dataframe of shape (iterations, stats), with the following
-        stats, or None if stats are not collected for that layer:
-            - activation_rate - mean fraction of units active at any given time
-            - dead_rate - fraction of units/channels that are always zero across batch and spatial dims
-            - spatial_dead_rate - fraction of spatial positions that are always zero across batch and channel dims
-        """
-        return self._activity_stats
-
-    @property
-    def collected_layer_activity_stats(self):
-        """
-        Layer activity stats filtered only on those that have been collected.
-        None if activity collection is disabled.
-        """
-        if self._activity_stats is not None:
-            return [stats for stats in self._activity_stats if stats is not None]
-        else:
-            return None
-
-    # TODO make independent of which stats are collected
-    @property
-    def collected_layer_stats_indices(self):
-        """
-        Indices of layers as returned by collected_layer_stats()
-        None if activity collection is disabled.
-        """
-        if self._activity_stats is not None:
-            return [idx for idx, stats in enumerate(self._activity_stats) if stats is not None]
-        else:
-            return None
-
-    # TODO remove this method
-    @property
-    def collected_layer_stats_names(self):
-        """
-        Names of layers as returned by collected_layer_stats()
-        None if disabled.
-        """
-        return [layer.name for layer in self.model.layers]
-
-    @property
-    def layer_outputs(self):
-        """
-        Gets a list corresponding to all layers, with lists of collected
-        outputs for those being collected and Nones for the rest.
-        The order and size of the returned list corresponds exactly to that returned
-        by model.layers.
-
-        Returns:
-            list (by model.layers) of list (by step/epoch) of layer outputs.
-            None if variable capturing not enabled.
-        """
-        return self._output_values
-
-    @property
-    def collected_layer_outputs(self):
-        """
-        Gets the list of collected layer outputs, containing only those that are collected.
-        The indices of the returned layer outputs relative to the original model can only be
-        determined via collected_layer_output_indices().
-
-        Returns:
-            list (by captured output) of list (by step/epoch) of layer output tensors.
-            None if variable capturing not enabled.
-        """
-        if self._output_values is not None:
-            return [var_list for var_list in self._output_values if var_list is not None]
-        else:
-            return None
-
-    @property
-    def collected_layer_output_indices(self):
-        """
-        Gets the layer indices for outputs returned by collected_layer_outputs() as they
-        were on the original model and returned by model.layers.
-        """
-        if self._output_values is not None:
-            return [l_idx for l_idx, var_list in enumerate(self._output_values) if var_list is not None]
-        else:
-            return None
-
-    def on_train_begin(self):
-        """
-        Validates configuration and partially expands it, now that we have access to the model.
-        """
-        # expand collection_sets and initialise variable storages
-        # (TODO also prepare slicing rules)
-        if self.collection_sets:
-            self.collection_sets = _normalize_collection_sets_for_layers(self.model, self.collection_sets)
-            self._filtered_value_layer_indices = [index for collection_set in self.collection_sets
-                                                  for index in collection_set['layer_indices']]
-            self._output_values = [[] if l_idx in self._filtered_value_layer_indices else None
-                                   for l_idx in range(len(self.model.layers))]
-
-    def on_train_end(self):
-        """
-        Cleans up tracking, and converts some things to numpy arrays for easier consumption.
-        High-level indices and stats are all converted to numpy.
-        Raw values are retained as TF values.
-        """
-        if self.per_step:
-            self.steps = np.array(self.steps)
-        else:
-            self.epochs = np.array(self.epochs)
-        self._finalize_activity_stats()
-
-    def on_epoch_begin(self, epoch, logs=None):
-        """
-        Tracks the current epoch number and resets sums across each epoch
-        """
-        self._epoch = epoch
-        if not self.per_step:
-            self._reset_per_epoch_activity_stats()
-
-    def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations, output_gradients):
-        """
-        Accumulates activations from each step. Also emits stats, if configured at per-step level.
-        """
-        self._init_activity_stats(activations)
-
-        # accumulate activation data
-        is_accum = (not self.per_step)  # accum over steps in whole epoch, or otherwise just overwrite per step
-        self._accum_activity_stats(activations, is_accum)
-
-        # stats calculations for each step, if configured
-        if self.per_step:
-            self.steps.append(self.params['steps'] * self._epoch + batch)
-            self._collect_activity_stats(1)
-            self._collect_raw_values(activations)
-
-    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations, output_gradients):
-        """
-        Collects gradient stats and raw gradients after each epoch, if configured at per-epoch level.
-        """
-        # stats calculation across entire epoch, if configured
-        # (uses partial stats that were accumulated across the steps in the batch)
-        if not self.per_step:
-            self.epochs.append(epoch)
-            self._collect_activity_stats(self.params['steps'])
-            self._collect_raw_values(activations)
-
-    def _collect_raw_values(self, activations):
-        # TODO do slicing
-        if self._output_values:
-            for l_idx, val_list in enumerate(self._output_values):
-                if val_list is not None:
-                    val_list.append(activations[l_idx])
 
 
 class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
