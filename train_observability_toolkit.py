@@ -408,6 +408,25 @@ class _ActivityStatsCollectingMixin:
     """
     Mixin for callback classes the need to measure the activity rates of the items that they capture.
     "Items" are typically something related to layers or variables.
+
+    Assumes the following for the calculation of "activation rates" across layers:
+    * All layers are assumed to produce outputs with shapes of form: `(batch_size, ..spatial_dims.., channels)`.
+    * We focus on the channels dimension as representing a set of output neurons, or "units",
+      each producing a single float output value. The output value may vary across batch and spatial dimensions.
+    * A unit or channel is "active" if it has any non-zero value.
+    * A unit or channel is "dead" if it always has zero values across batch and spatial dimensions.
+    * The activation rate for a unit is the fraction of batch/spatial positions for which that unit is active.
+    * The activation rate for the whole layer is the mean activation rate across all units.
+      Alternatively, this can be seen as the fraction of active outputs across all batch, spatial, and channel
+      dimensions.
+    * The "dead rate" is the fraction of units that are dead.
+    * The "spatial dead rate" uses the concept, but measures across discrete spatial positions.
+        It identifies the fraction of spatial positions that are always dead across the batch and channel dims.
+
+    Assumes the following for the calculation of "activation rates" across variables:
+    * All variables are assumed to have shapes of form: `(..spatial_dims.., channels)`
+    * TODO figure out what to do here
+
     """
     def __init__(self, activity_stats=True, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -431,7 +450,18 @@ class _ActivityStatsCollectingMixin:
     @property
     def model_activity_stats(self):
         """
-        Model activity stats, or None if not enabled
+        Model activity stats, or None if not enabled.
+        A pandas dataframe of shape (iterations, stats), with the following
+        stats:
+            - min_activation_rate - min value of activation_rate across all layers
+            - mean_activation_rate - mean value of activation_rate across all layers
+            - max_activation_rate - max value of activation_rate across all layers
+            - min_dead_rate - min value of dead_rate across all layers
+            - mean_dead_rate - min value of dead_rate across all layers
+            - max_dead_rate - min value of dead_rate across all layers
+            - min_spatial_dead_rate - min value of spatial_dead_rate across all layers
+            - mean_spatial_dead_rate - min value of spatial_dead_rate across all layers
+            - max_spatial_dead_rate - max value of spatial_dead_rate across all layers
         """
         return self._model_activity_stats
 
@@ -1248,38 +1278,17 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, _ValueStatsCollec
                         val_list.append(gradients[l_idx])
 
 
-# TODO rename as LayerOutputHistoryCallback
-class ActivityHistoryCallback(BaseGradientCallback, _ValueStatsCollectingMixin,
-                              _ActivityStatsCollectingMixin):
+class LayerOutputHistoryCallback(BaseGradientCallback, _ValueStatsCollectingMixin,
+                                 _ActivityStatsCollectingMixin):
     """
-    Custom tot.fit() gradient callback function that collects unit activation rates during training.
-    Optionally additionally captures raw layer outputs for selected layers.
-
-    Significantly more efficient and flexible than ActivityRateMeasuringCallback, but can only be used in the
-    custom fit() function.
-
-    Similarly to measure_unit_activity():
-    > All layers are assumed to produce outputs with shapes of form: `(batch_size, ..spatial_dims.., channels)`.
-    > Unit activation rates are recorded per-channel, aggregated across batch and spatial dims, and then stats collected
-    > across the channels.
-    > In other words, each physical unit with its unique set of weights is treated as a single atomic component
-    > that is re-used multiple times across batch and spatial dims. Stats are then collected against that atomic
-    > component in terms of how often it is active (non-zero output) vs inactive (zero output).
+    Custom tot.fit() gradient callback function that collects various statistics and/or raw values of
+    layer outputs during training.
 
     Other properties:
         epochs: list of int. Epoch numbers correlated to captured gradients/gradient-stats
             (only populated if verbose == 0)
         steps: list of int. Step numbers correlated to captured gradients/gradient-stats
             (only populated if verbose > 0)
-        model_stats: dict (by stat key) of np-array (by iteration) of statistics, eg:
-            {
-                'min_activation_rate': np.array() of float,   # one value for each epoch/step
-                'mean_activation_rate': np.array() of float,
-                'max_activation_rate': np.array() of float,
-                'min_dead_rate': np.array() of float,
-                'mean_dead_rate': np.array() of float,
-                'max_dead_rate': np.array() of float
-            }
         layer_stats: list (by layer) of dicts (by stat key) of np-array (by iteration) of statistics, eg:
             [{
                 'activation_rate': np.array() of float,   # one value for each epoch/step
@@ -1333,6 +1342,18 @@ class ActivityHistoryCallback(BaseGradientCallback, _ValueStatsCollectingMixin,
         None if activity collection is disabled.
         """
         return self._layer_shapes
+
+    @property
+    def layer_activity_stats(self):
+        """
+        List (by layer) of dataframes containing activity stats, or None if not enabled.
+        Each layer's list entry is either as pandas dataframe of shape (iterations, stats), with the following
+        stats, or None if stats are not collected for that layer:
+            - activation_rate - mean fraction of units active at any given time
+            - dead_rate - fraction of units/channels that are always zero across batch and spatial dims
+            - spatial_dead_rate - fraction of spatial positions that are always zero across batch and channel dims
+        """
+        return self._activity_stats
 
     @property
     def collected_layer_activity_stats(self):

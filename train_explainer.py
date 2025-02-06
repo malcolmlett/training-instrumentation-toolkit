@@ -8,11 +8,11 @@ import matmul_explainer as me
 
 
 def explain_near_zero_gradients_skeleton(layer_index: int,
-                                gradients: tot.GradientHistoryCallback,
-                                activity: tot.ActivityHistoryCallback,
-                                variables: tot.VariableHistoryCallback,
-                                epoch: None, step: None,
-                                threshold: float = None, threshold_percentile: float = 0.01):
+                                         gradients: tot.GradientHistoryCallback,
+                                         activity: tot.LayerOutputHistoryCallback,
+                                         variables: tot.VariableHistoryCallback,
+                                         epoch: None, step: None,
+                                         threshold: float = None, threshold_percentile: float = 0.01):
     """
     Attempts to identify the explanation for zero and near-zero gradients in a given layer.
 
@@ -153,7 +153,7 @@ def explain_near_zero_gradients(callbacks: list,
     for cb in callbacks:
         if reload_safe_isinstance(cb, tot.VariableHistoryCallback):
             variables = cb
-        elif reload_safe_isinstance(cb, tot.ActivityHistoryCallback):
+        elif reload_safe_isinstance(cb, tot.LayerOutputHistoryCallback):
             activity = cb
         elif reload_safe_isinstance(cb, tot.GradientHistoryCallback):
             gradients = cb
@@ -814,7 +814,7 @@ def _find_layer_by_node(model, node, return_type='layer'):
 # TODO needs to be extended out to cope with different layer types
 def _estimate_backprop_from_layer(model, layer_index, iteration,
                                   gradients: tot.GradientHistoryCallback,
-                                  activity: tot.ActivityHistoryCallback,
+                                  activity: tot.LayerOutputHistoryCallback,
                                   variables: tot.VariableHistoryCallback):
     print(f"[BEGIN] _estimate_backprop_from_layer(layer_index={layer_index})")
 
