@@ -367,8 +367,10 @@ class ValueStatsCollectingMixin:
     def _init_value_stats(self, values):
         """
         Initialisation of tracking once we have a first example of what the values look like.
+        Automatically called on first data collection.
+        Safe to call this every iteration. Only takes effect on the first call.
         """
-        if self.value_stats_enabled:
+        if self.value_stats_enabled and self._value_stats is not None:
             self._value_stats = [[] if value is not None else None for value in values]
             self._magnitude_stats = [[] if value is not None else None for value in values]
 
@@ -383,9 +385,10 @@ class ValueStatsCollectingMixin:
                 self._magnitude_stats, self.value_stats_quantiles)
 
     def _collect_value_stats(self, values):
+        self._init_value_stats(values)
         if self._value_stats is not None:
-            # compute quantile stats for each individual variable
-            stat_pairs = self._compute_value_and_magnitude_percentile_stats(values, self.value_stats_quantiles)
+            # compute value and magnitued percentile stats for each individual variable
+            stat_pairs = self._compute_percentile_stats(values, self.value_stats_quantiles)
 
             # append to stats list
             # (performance note: this loop doesn't seem to cost much)
@@ -396,16 +399,17 @@ class ValueStatsCollectingMixin:
                 if item_magnitude_stats is not None:
                     item_magnitude_stats.append(magnitude_percentiles)
 
+    # This is fairly expensive. It could be worth optionally calculating percentiles, but by default
+    # calculating simpler stats. Just need to find a way to cope with magnitude data that doesn't
+    # work well for std.dev calcualtions.
     @tf.function
-    def _compute_value_and_magnitude_percentile_stats(self, tensors, quantiles):
+    def _compute_percentile_stats(self, tensors, quantiles):
         """
         Computes a set of percentiles across the raw values and magnitudes of each
         provided tensor.
-
         For tensors that commonly have values distributed either side of zero, the median will
         typically be around zero, and the 25th and 75th percentiles represent the respective medians
         in the positive and negative halves.
-
         Args:
             tensors: list of tensors for which percentiles should be calculated, some of which may be None.
             quantiles: list of quantiles to compute values for
@@ -519,7 +523,6 @@ class ActivityStatsCollectingMixin:
         self._model_activity_stats = None
 
         # the following gets initialised only within _init_activity_stats()
-        self._activity_stats_initialised = False
         self._item_shapes = None  # shapes for each item
         self._channel_sizes = None  # for each item: number of channels
         self._spatial_shapes = None  # for each item: subset of shape relating just to spatial dims
@@ -549,13 +552,12 @@ class ActivityStatsCollectingMixin:
         Final initialisation of tracking that has to be deferred until we have our first activation data.
         There seems to be some dynamism in determining the output shape of a Layer object, and we need that
         accurate for this final initialisation.
-
+        Automatically called on first data collection.
         Safe to call this every iteration. Only takes effect on the first call.
-
         Args:
             values: list of tensors of raw tracked values, some of which may be None
         """
-        if self.activity_stats_enabled and not self._activity_stats_initialised:
+        if self.activity_stats_enabled and self._activity_stats is None:
             self._activity_stats = []
 
             # TODO either expose some of these as properties or don't save in fields
@@ -578,7 +580,6 @@ class ActivityStatsCollectingMixin:
             self._spatial_activity_sums = [tf.Variable(tf.zeros(shape, dtype=tf.float32))
                                            if shape is not None else None
                                            for shape in self._spatial_shapes]  # by spatial pos
-            self._activity_stats_initialised = True
 
     def _finalize_activity_stats(self):
         """
@@ -588,7 +589,7 @@ class ActivityStatsCollectingMixin:
         #  saving to a different variable, and invalidating if more data is added
 
         # convert per-item stats
-        if self._activity_stats_initialised:
+        if self._activity_stats is not None:
             def convert(i_idx):
                 if self._activity_stats[0][i_idx] is not None:
                     item_data = [np.stack(iteration_stats[i_idx], axis=-1) for iteration_stats in self._activity_stats]
@@ -598,7 +599,7 @@ class ActivityStatsCollectingMixin:
             self._activity_stats = [convert(i_idx) for i_idx in range(num_items)]
 
         # compute model-whole stats
-        if self._activity_stats_initialised:
+        if self._activity_stats is not None:
             dic = {}
             for key in self._activity_stat_keys():
                 key_stats = [item_stats[key].to_numpy() for item_stats in self._activity_stats
@@ -614,7 +615,8 @@ class ActivityStatsCollectingMixin:
         For example, very much needed when collecting stats across epochs as some
         spatial/channel positions are only active for some batches.
         """
-        if self._activity_stats_initialised:
+        self._init_activity_stats(values)
+        if self._activity_stats is not None:
             self._accum_activity_stats_internal(
                 values, is_accum,
                 self._channel_activity_sums,
@@ -624,7 +626,7 @@ class ActivityStatsCollectingMixin:
         """
         Resets accumulators for collection of data per-epoch.
         """
-        if self._activity_stats_initialised:
+        if self._activity_stats is not None:
             for activity_sum in self._channel_activity_sums:
                 activity_sum.assign(tf.zeros_like(activity_sum))
             for activity_sum in self._spatial_activity_sums:
@@ -637,7 +639,7 @@ class ActivityStatsCollectingMixin:
             num_batches - number of batches that have gone into the accumulated activity sums
                 (usually 1 for per-step collection, and steps_per_epoch for per-epoch collection)
         """
-        if self._activity_stats_initialised:
+        if self._activity_stats is not None:
             iteration_activity_stats = self._compute_activity_stats(
                 self._channel_activity_sums,
                 self._spatial_activity_sums,
@@ -715,9 +717,9 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
     Other properties:
         model: the model captured
         epochs: list of int. Epoch numbers correlated to captured gradients/gradient-stats
-            (only populated if verbose == 0)
+            (only available if per_step is False)
         steps: list of int. Step numbers correlated to captured gradients/gradient-stats
-            (only populated if verbose > 0)
+            (only available if per_step is True)
     """
 
     def __init__(self, per_step=False, before_updates=False, trainable_only=True,
@@ -730,20 +732,22 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
                 If per-step is set, then a `steps` list is available instead, and activity
                 is collected on each update step.
                 The same applies to layer output capture if enabled.
-
             before_updates: bool. Whether to sample variables BEFORE they are updated, or AFTER otherwise.
                 If False, this reflects the notion of capturing the weights and biases as a RESULT of each update step.
                 If True, this reflects the notion of capturing the weights and biases that were used DURING
                 the update step.
-
+            value_stats: bool, default: True.
+                Whether to collect value and magnitude stats.
             activity_stats: bool, default: True.
                 Whether to collect activity stats.
-
-            trainable_only: bool. Whether to only include stats for trainable variables, or all variables otherwise.
-
-            collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
-              If omitted, this callback collects only stats.
-              See _normalize_collection_sets_for_variables() for format details.
+            trainable_only: bool, default: True.
+                Whether to only include stats for trainable variables, or all variables otherwise.
+            value_stats_quantiles: list of percentiles to collect stats for, in range 0 .. 100.
+                Default: [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
+            collection_sets: list of dicts. Enables collection of raw layer outputs
+                and provides fine-grained control over which layer outputs are collected.
+                If omitted, this callback collects only stats.
+                See _normalize_collection_sets_for_variables() for format details.
         """
         # Callback doesn't honour python 3's MRO, so init mixins directly
         ValueStatsCollectingMixin.__init__(self, *args, **kwargs)
@@ -843,11 +847,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
     @property
     def variables(self):
         """
-        Gets a list corresponding to all variables, with lists of collected
-        values for those being collected and Nones for the rest.
-        The order and size of the returned list corresponds exactly to that returned
-        by model.variables.
-
+        Raw captured variable states, if any.
+        None if raw data is not being captured, and each variable entry is None if that variable is not captured.
         Returns:
             list (by model.variable) of list (by step/epoch) of variable tensors.
             None if variable capturing not enabled.
@@ -907,7 +908,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
     def on_train_end(self, logs=None):
         """
         Cleans up tracking, and converts some things to numpy arrays for easier consumption.
-        High-level indices and stats are all converted to numpy.
+        High-level indices and stats are all converted to pandas dataframes.
         Raw values are retained as TF values.
         """
         if self.per_step:
@@ -962,22 +963,22 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
                     val_list.append(tf.identity(value))  # take copy of current state
 
 
-class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin):
+class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, ActivityStatsCollectingMixin):
     """
-    Custom tot.fit() gradient callback that captures statistics across the gradients during training.
-    Optionally also captures selected raw gradients.
+    Custom tot.fit() gradient callback that collects various statistics and/or raw values of the gradients during
+    training.
     Only works for normal gradients of trainable variables.
+    See `LayerOutputGradientHistoryCallback` for gradients w.r.t layer outputs.
 
     Other properties:
+        model: the model captured
         epochs: list of int. Epoch numbers correlated to captured gradients/gradient-stats
-            (only populated if verbose == 0)
+            (only available if per_step is False)
         steps: list of int. Step numbers correlated to captured gradients/gradient-stats
-            (only populated if verbose > 0)
-        model_stats: dict of np-arrays. Keys list out different stats, eg: mean, min, max, std
-        gradient_stats: list of dict of np-arrays. One list item for each gradient.
+            (only available if per_step is True)
     """
 
-    def __init__(self, per_step=False, magnitudes=False, collection_sets=None, **kwargs):
+    def __init__(self, per_step=False, collection_sets=None, **kwargs):
         """
         Args:
             per_step: bool. Whether to collect per-step stats and raw values, or per-epoch otherwise.
@@ -993,9 +994,8 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin):
               If omitted, this callback collects only stats.
               See _normalize_collection_sets_for_variables() for format details.
         """
-        super().__init__()
+        super().__init__(data_format='SC', *args, *kwargs)
         self.per_step = per_step
-        self.magnitudes = magnitudes
         self.collection_sets = collection_sets
 
         # results variable creation
@@ -1003,43 +1003,96 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin):
             self.steps = []
         else:
             self.epochs = []
-        self.model_stats = None
-        self.gradient_stats = []  # initially list (by variable) of list (by iteration) of tensors
         self._gradient_values = None
 
         # internal tracking
         self._epoch = 0
+        self._collected_stats_indices = None
+        self._collected_stats_indices_transpose = None  # from model.variable to model.trainable_variable
         self._filtered_value_variable_indices = None
-        self._trainable_variable_index_by_variable_index = None
-        self._gradient_stats_quantiles = [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
 
     @property
-    def collected_gradient_stats(self):
+    def gradient_value_stats(self):
         """
-        Gets stats against each gradient, omitting any gradient that have no collected stats.
-        Use collected_gradient_stats_indices() to identify which gradients are included.
+        List (by variable) of dataframes containing gradient value stats, or None if not enabled.
+        Each variable's list entry is either as pandas dataframe of shape (iterations, percentiles),
+        or None if stats are not collected for that variable.
         """
-        return [stats for stats in self.gradient_stats if stats is not None]
+        return self._value_stats
+
+    @property
+    def gradient_magnitude_stats(self):
+        """
+        List (by variable) of dataframes containing gradient magnitude stats, or None if not enabled.
+        Each variable's list entry is either as pandas dataframe of shape (iterations, percentiles),
+        or None if stats are not collected for that variable.
+        """
+        return self._magnitude_stats
+
+    @property
+    def gradient_activity_stats(self):
+        """
+        List (by variable) of dataframes containing gradient activity stats, or None if not enabled.
+        Each variable's list entry is either as pandas dataframe of shape (iterations, stats), with the following
+        stats, or None if stats are not collected for that variable:
+            - activation_rate - fraction of non-zero values
+            - dead_rate - fraction of output channels that are all zero across all other dims
+            - spatial_dead_rate - fraction across other dims where all channels are zero
+        """
+        return self._activity_stats
+
+    @property
+    def collected_gradient_value_stats(self):
+        """
+        Gradient value stats filtered only on those that have been collected.
+        None if value stats collection is disabled.
+        Use collected_gradient_stats_indices() to identify which model variables have gradients included.
+        """
+        if self._value_stats is not None:
+            return [stats for stats in self._value_stats if stats is not None]
+        else:
+            return None
+
+    @property
+    def collected_gradient_magnitude_stats(self):
+        """
+        Gradient magnitude stats filtered only on those that have been collected.
+        None if value stats collection is disabled.
+        Use collected_gradient_stats_indices() to identify which model variables have gradients included.
+        """
+        if self._magnitude_stats is not None:
+            return [stats for stats in self._magnitude_stats if stats is not None]
+        else:
+            return None
+
+    @property
+    def collected_gradient_activity_stats(self):
+        """
+        Gradient activity stats filtered only on those that have been collected.
+        None if activity collection is disabled.
+        Use collected_gradient_stats_indices() to identify which model variables have gradients included.
+        """
+        if self._activity_stats is not None:
+            return [stats for stats in self._activity_stats if stats is not None]
+        else:
+            return None
 
     @property
     def collected_gradient_stats_indices(self):
         """
-        Indices of gradients for which stats are returned by collected_gradient_stats.
-        Indices are as per the source variable's position in model.variables.
+        Indices of variables for which value, magnitude, and activity stats are returned.
+        Indices are as per the variable's position in model.variables.
         """
-        return [idx for idx, stats in enumerate(self.gradient_stats) if stats is not None]
+        return self._collected_stats_indices
 
     @property
     def gradients(self):
         """
-        Gets a list corresponding to all gradients, with lists of collected
-        values for those being collected and Nones for the rest.
-        The order and size of the returned list corresponds exactly to that returned
-        by model.variables.
-
+        Raw captured gradient states, if any.
+        None if raw data is not being captured, and each gradient entry is None if that gradient is not captured.
         Returns:
             list (by model.variable) of list (by step/epoch) of gradient tensors.
-            None if variable capturing not enabled.
+            None if gradient capturing not enabled.
         """
         return self._gradient_values
 
@@ -1075,14 +1128,11 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin):
         Initialises tracking, now that we know the model and number of epochs and steps per epoch.
         """
         # pre-compute lookups
+        # - compute independent of data collection mixins because they might be disabled
         v_to_t = [_index_by_identity(self.model.trainable_variables, var) for var in self.model.variables]
-        self._trainable_variable_index_by_variable_index = [idx if idx >= 0 else None for idx in v_to_t]
-
-        # init stats
-        filtered_stats_variable_indices = [_index_by_identity(self.model.variables, var)
-                                           for var in self.model.trainable_variables]
-        self.gradient_stats = [[] if var_idx in filtered_stats_variable_indices
-                               else None for var_idx in range(len(self.model.variables))]
+        self._collected_stats_indices_transpose = [idx if idx >= 0 else None for idx in v_to_t]
+        self._collected_stats_indices =\
+            [_index_by_identity(self.model.variables, var) for var in self.model.trainable_variables]
 
         # expand collection_sets and initialise gradient storages
         # (TODO also prepare slicing rules)
@@ -1104,7 +1154,7 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin):
     def on_train_end(self):
         """
         Cleans up tracking, and converts some things to numpy arrays for easier consumption.
-        High-level indices and stats are all converted to numpy.
+        High-level indices and stats are all converted to pandas dataframes.
         Raw values are retained as TF values.
         """
         if self.per_step:
@@ -1112,19 +1162,11 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin):
         else:
             self.epochs = np.array(self.epochs)
 
-        # convert per-variable stats
-        # - from: list (by var) of list (by iteration) of tensor
-        # - to:   list (by var) of pd-dataframe: iterations x quartiles
-        for var_idx in range(len(self.gradient_stats)):
-            if self.gradient_stats[var_idx] is not None:
-                table = [stats.numpy() for stats in self.gradient_stats[var_idx]]
-                df = pd.DataFrame(table, columns=self._gradient_stats_quantiles)
-                self.gradient_stats[var_idx] = df
+        # convert data structures to output formats
+        self._finalize_value_stats()
+        self._finalize_activity_stats()
 
-        # calculate global model stats
-        self.model_stats = self._compute_scale_distribution_across_stats_list(self.gradient_stats, scale_quantile=75)
-
-    def on_epoch_begin(self, epoch, logs=None):
+    def on_epoch_begin(self, epoch):
         """
         Just tracks the current epoch number
         """
@@ -1136,8 +1178,7 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin):
         """
         if not self.per_step:
             self.epochs.append(epoch)
-            self._collect_stats(loss, gradients, trainable_variables, activations)
-            self._collect_raw_values(gradients)
+            self._do_collection(gradients)
 
     def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations, output_gradients):
         """
@@ -1147,46 +1188,32 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin):
         if self.per_step:
             step = self.params['steps'] * self._epoch + batch
             self.steps.append(step)
-            self._collect_stats(loss, gradients, trainable_variables, activations)
-            self._collect_raw_values(gradients)
+            self._do_collection(gradients)
 
-    def _collect_stats(self, loss, gradients, trainable_variables, activations):
+    def _do_collection(self, gradients):
         # note: gradients list is always relative to model.trainable_variables, but I use
-        # the model.variables list as the internal reference point, so we must convert indices.
-        v_to_t = self._trainable_variable_index_by_variable_index
+        # the model.variables list as the internal reference point, so we must convert the list.
+        v_to_t = self._collected_stats_indices_transpose
+        values = [gradients[v_to_t[v_idx]] if v_to_t[v_idx] is not None else None
+                  for v_idx in range(len(self.model.variables))]
 
-        # compute stats for each individual variable
-        for var_idx, stat_list in enumerate(self.gradient_stats):
-            if stat_list is not None:
-                var = gradients[v_to_t[var_idx]]
-                stats_tensor = _compute_percentile_stats(
-                    var,
-                    quartiles=self._gradient_stats_quantiles,
-                    magnitudes=self.magnitudes)
-                stat_list.append(stats_tensor)
+        # value stats
+        self._collect_value_stats(values)
 
-    def _collect_raw_values(self, gradients):
-        # note: gradients list is always relative to model.trainable_variables, but I use
-        # the model.variables list as the internal reference point, so we must convert indices.
-        v_to_t = self._trainable_variable_index_by_variable_index
+        # activity stats
+        self._accum_activity_stats(values, is_accum=False)
+        self._collect_activity_stats(1)  # always summing over 1 sample
 
+        # raw data capture
+        self._collect_raw_values(values)
+
+    def _collect_raw_values(self, values):
+        # note: assumes 'values' has been converted into a list relative to model.variables.
         # TODO do slicing
         if self._gradient_values:
-            for var_idx, val_list in enumerate(self._gradient_values):
-                if val_list is not None:
-                    val_list.append(gradients[v_to_t[var_idx]])
-
-    def plot(self):
-        """
-        Alias for plot_summary().
-        Determines the default once there are multiple plot methods.
-        """
-
-    def plot_summary(self):
-        """
-        Alias for calling tot.plot_gradient_history(gradient_callback).
-        """
-        plot_gradient_history(self)
+            for var_idx, (val_list, value) in enumerate(zip(self._gradient_values, values)):
+                if value is not None:
+                    val_list.append(value)
 
 
 class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin,
@@ -1196,13 +1223,11 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
     layer outputs during training.
 
     Other properties:
+        model: the model captured
         epochs: list of int. Epoch numbers correlated to captured gradients/gradient-stats
-            (only populated if verbose == 0)
+            (only available if per_step is False)
         steps: list of int. Step numbers correlated to captured gradients/gradient-stats
-            (only populated if verbose > 0)
-        layer_outputs: list (by layer) of list (by step/epoch) of layer output tensors.
-            Property is None if no layers being captured, otherwise each layer index is represented
-            by the top-level list, with each layer entry being None if that layer is not captured.
+            (only available if per_step is True)
     """
 
     def __init__(self, per_step=False, collection_sets=None, *args, **kwargs):
@@ -1214,20 +1239,16 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
                 If per-step is set, then a `steps` list is available instead, and activity
                 is collected on each update step.
                 The same applies to layer output capture if enabled.
-
             value_stats: bool, default: True.
                 Whether to collect value and magnitude stats.
-
             activity_stats: bool, default: True.
                 Whether to collect activity stats.
-
             value_stats_quantiles: list of percentiles to collect stats for, in range 0 .. 100.
                 Default: [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
-
             collection_sets: list of dicts. Enables collection of raw layer outputs
                 and provides fine-grained control over which layer outputs are collected.
-              If omitted, this callback collects only stats.
-              See _normalize_collection_sets_for_layers() for format details.
+                If omitted, this callback collects only stats.
+                See _normalize_collection_sets_for_layers() for format details.
         """
 
         super().__init__(data_format='BSC', *args, **kwargs)
@@ -1335,13 +1356,11 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
     @property
     def layer_outputs(self):
         """
-        List corresponding to all layers, with lists of collected
-        outputs for those being collected and Nones for the rest.
-        The order and size of the returned list corresponds exactly to that returned
-        by model.layers.
-
+        Raw captured layer outputs, if any.
+        None if raw data is not being captured, and each layer entry is None if that
+        layer is not captured.
         Returns:
-            list (by model.layers) of list (by step/epoch) of layer outputs.
+            list (by model.layers) of list (by step/epoch) of layer output tensors.
             None if variable capturing not enabled.
         """
         return self._output_values
@@ -1416,8 +1435,6 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         # initialisation on first access to raw data
         if self._layer_shapes is None:
             self._layer_shapes = [activation.shape for activation in activations]
-        self._init_activity_stats(activations)
-        self._init_value_stats(activations)
 
         # accumulate activation data
         # - always add each batch, regardless of emitting stats per-step or per-epoch
@@ -1428,6 +1445,7 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         # stats calculations for each step, if configured
         if self.per_step:
             self.steps.append(self.params['steps'] * self._epoch + batch)
+            self._collect_value_stats(activations)
             self._collect_activity_stats(1)
             self._collect_raw_values(activations)
 
@@ -1439,6 +1457,7 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         # (uses partial stats that were accumulated across the steps in the batch)
         if not self.per_step:
             self.epochs.append(epoch)
+            self._collect_value_stats(activations)
             self._collect_activity_stats(self.params['steps'])
             self._collect_raw_values(activations)
 
@@ -1459,12 +1478,11 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
     This is a mirror of `GradientHistoryCallback` but for layer outputs.
 
     Other properties:
+        model: the model captured
         epochs: list of int. Epoch numbers correlated to captured gradients/gradient-stats
-            (only populated if verbose == 0)
+            (only available if per_step is False)
         steps: list of int. Step numbers correlated to captured gradients/gradient-stats
-            (only populated if verbose > 0)
-        model_stats: dict of np-arrays. Keys list out different stats, eg: mean, min, max, std
-        gradient_stats: list of dict of np-arrays. One list item for each gradient.
+            (only available if per_step is True)
     """
 
     def __init__(self, per_step=False, magnitudes=False, collection_sets=None, **kwargs):
