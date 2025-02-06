@@ -329,7 +329,12 @@ class BaseGradientCallback:
         """
 
 
-class _ValueStatsCollectingCapability:
+class _ValueStatsCollectingMixin:
+    """
+    Mixin for callback classes the need to measure the value statistics over the items that they capture.
+    "Items" are typically something related to layers or variables.
+    """
+
     @tf.function
     def _compute_value_and_magnitude_percentile_stats(self, tensors, quantiles):
         """
@@ -395,7 +400,7 @@ class _ValueStatsCollectingCapability:
         return pd.DataFrame(stats.numpy(), columns=quantiles)
 
 
-class _ActivityStatsCollectingCapability:
+class _ActivityStatsCollectingMixin:
     """
     Mixin for callback classes the need to measure the activity rates of the items that they capture.
     "Items" are typically something related to layers or variables.
@@ -529,7 +534,7 @@ class _ActivityStatsCollectingCapability:
         return ['activation_rate', 'dead_rate', 'spatial_dead_rate']
 
 
-class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollectingCapability):
+class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollectingMixin):
     """
     Standard model.fit() callback that captures the state of variables during training.
     Variable states may be captured BEFORE or AFTER each update step or epoch, depending on the needs.
@@ -754,7 +759,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollecting
                     val_list.append(state)
 
 
-class GradientHistoryCallback(BaseGradientCallback, _ValueStatsCollectingCapability):
+class GradientHistoryCallback(BaseGradientCallback, _ValueStatsCollectingMixin):
     """
     Custom tot.fit() gradient callback that captures statistics across the gradients during training.
     Optionally also captures selected raw gradients.
@@ -981,7 +986,7 @@ class GradientHistoryCallback(BaseGradientCallback, _ValueStatsCollectingCapabil
         plot_gradient_history(self)
 
 
-class LayerOutputGradientHistoryCallback(BaseGradientCallback, _ValueStatsCollectingCapability):
+class LayerOutputGradientHistoryCallback(BaseGradientCallback, _ValueStatsCollectingMixin):
     """
     Custom tot.fit() gradient callback that captures statistics across the layer output gradients
     during training.
@@ -1215,8 +1220,9 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, _ValueStatsCollec
                         val_list.append(gradients[l_idx])
 
 
-class ActivityHistoryCallback(BaseGradientCallback, _ValueStatsCollectingCapability,
-                              _ActivityStatsCollectingCapability):
+# TODO rename as LayerOutputHistoryCallback
+class ActivityHistoryCallback(BaseGradientCallback, _ValueStatsCollectingMixin,
+                              _ActivityStatsCollectingMixin):
     """
     Custom tot.fit() gradient callback function that collects unit activation rates during training.
     Optionally additionally captures raw layer outputs for selected layers.
@@ -2644,6 +2650,7 @@ def plot_output_gradient_history(gradient_callback: LayerOutputGradientHistoryCa
     plt.show()
 
 
+# TODO change to be agnostic to the callback, so long as it uses the _ActivityStatsCollectingCapability
 def plot_activity_rate_history(activity_callback):
     """
     Plots a high-level summary of unit activity rates across the entire model
