@@ -491,9 +491,21 @@ class _ActivityStatsCollectingMixin:
             values: list of tensors of raw tracked values, some of which may be None
         """
         if self.activity_stats_enabled and not self._initialised:
+            has_batch_dim = 'B' in self.activity_data_format
+
+            # TODO either expose some of these as properties or don't save in fields
             self._item_shapes = [tensor.shape if tensor is not None else None for tensor in values]
-            self._channel_sizes = [tensor.shape[-1] if tensor is not None else None for tensor in values]  # TODO remove
-            self._spatial_shapes = [tensor.shape[1:-1] if tensor is not None and len(tensor.shape) > 2 else () if tensor is not None else None for tensor in values]  # TODO remove
+            self._channel_sizes = [tensor.shape[-1] if tensor is not None else None
+                                   for tensor in values]
+            if has_batch_dim:
+                self._spatial_shapes = [tensor.shape[1:-1] if tensor is not None and len(tensor.shape) > 2
+                                        else () if tensor is not None else None
+                                        for tensor in values]
+            else:
+                self._spatial_shapes = [tensor.shape[:-1] if tensor is not None and len(tensor.shape) > 1
+                                        else () if tensor is not None else None
+                                        for tensor in values]
+
             self._channel_activity_sums =\
                 [tf.Variable(tf.zeros(size, dtype=tf.float32)) if size is not None else None for size in self._channel_sizes]  # by channel
             self._spatial_activity_sums =\
@@ -662,7 +674,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollecting
               If omitted, this callback collects only stats.
               See _normalize_collection_sets_for_variables() for format details.
         """
-        super().__init__(*args, **kwargs)
+        # Callback doesn't honour python 3's MRO, so init mixins directly
+        _ActivityStatsCollectingMixin.__init__(self, data_format='SC', *args, **kwargs)
         self.per_step = per_step
         self.before_updates = before_updates
         self.trainable_only = trainable_only
