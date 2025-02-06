@@ -353,8 +353,8 @@ class ValueStatsCollectingMixin:
         # so needs to be converted to a more usable data structure after training
         # - initially: list (by item) of list (by iteration) of tensors (by quantile)
         # - finally:   list (by item) of pandas dataframes with shape (iterations, stats)
-        self._item_value_stats = None
-        self._item_magnitude_stats = None
+        self._value_stats = None
+        self._magnitude_stats = None
 
     @property
     def model_magnitude_stats(self):
@@ -362,33 +362,36 @@ class ValueStatsCollectingMixin:
         Stats across the general magnitudes of values across the variables.
         Pandas data-frame with shape (iterations, percentiles).
         """
-        return self._compute_scale_distribution_across_stats_list(self._item_magnitude_stats)
+        return self._compute_scale_distribution_across_stats_list(self._magnitude_stats)
 
     def _init_value_stats(self, values):
         """
         Initialisation of tracking once we have a first example of what the values look like.
         """
-        self.variable_value_stats = [[] if value is not None else None for value in values]
-        self.variable_magnitude_stats = [[] if value is not None else None for value in values]
+        if self.value_stats_enabled:
+            self._value_stats = [[] if value is not None else None for value in values]
+            self._magnitude_stats = [[] if value is not None else None for value in values]
 
     def _finalize_value_stats(self):
         # convert data structures
         # - from: list (by item) of list (by iteration) of tensor (by stat)
         # - to:   list (by item) of pd-dataframe: iterations x percentiles
-        self._item_value_stats = self._stats_tensor_list_to_dataframes(
-            self._item_value_stats, self.value_stats_quantiles)
-        self._item_magnitude_stats = self._stats_tensor_list_to_dataframes(
-            self._item_magnitude_stats, self.value_stats_quantiles)
+        if self._value_stats is not None:
+            self._value_stats = self._stats_tensor_list_to_dataframes(
+                self._value_stats, self.value_stats_quantiles)
+            self._magnitude_stats = self._stats_tensor_list_to_dataframes(
+                self._magnitude_stats, self.value_stats_quantiles)
 
     def _collect_value_stats(self, values):
-        # compute quantile stats for each individual variable
-        stat_pairs = self._compute_value_and_magnitude_percentile_stats(values, self.value_stats_quantiles)
+        if self._value_stats is not None:
+            # compute quantile stats for each individual variable
+            stat_pairs = self._compute_value_and_magnitude_percentile_stats(values, self.value_stats_quantiles)
 
-        # append to stats list
-        var_indices = [var_idx for var_idx, stat_list in enumerate(self.variable_value_stats) if stat_list is not None]
-        for var_idx, (value_percentiles, magnitude_percentiles) in zip(var_indices, stat_pairs):
-            self.variable_value_stats[var_idx].append(value_percentiles)
-            self.variable_magnitude_stats[var_idx].append(magnitude_percentiles)
+            # append to stats list
+            var_indices = [var_idx for var_idx, stat_list in enumerate(self._value_stats) if stat_list is not None]
+            for var_idx, (value_percentiles, magnitude_percentiles) in zip(var_indices, stat_pairs):
+                self._value_stats[var_idx].append(value_percentiles)
+                self._magnitude_stats[var_idx].append(magnitude_percentiles)
 
     @tf.function
     def _compute_value_and_magnitude_percentile_stats(self, tensors, quantiles):
@@ -424,8 +427,8 @@ class ValueStatsCollectingMixin:
         item_dataframes = []
         for item_stats in stats_by_item:
             if item_stats is not None:
-                table = [iteration_stats.numpy() for iteration_stats in item_stats]
-                df = pd.DataFrame(table, columns=columns)
+                item_data = [iteration_stats.numpy() for iteration_stats in item_stats]
+                df = pd.DataFrame(item_data, columns=columns)
             else:
                 df = None
             item_dataframes.append(df)
@@ -510,7 +513,7 @@ class ActivityStatsCollectingMixin:
         self._model_activity_stats = None
 
         # the following gets initialised only within _init_activity_stats()
-        self._initialised = False
+        self._activity_stats_initialised = False
         self._item_shapes = None  # shapes for each item
         self._channel_sizes = None  # for each item: number of channels
         self._spatial_shapes = None  # for each item: subset of shape relating just to spatial dims
@@ -546,7 +549,7 @@ class ActivityStatsCollectingMixin:
         Args:
             values: list of tensors of raw tracked values, some of which may be None
         """
-        if self.activity_stats_enabled and not self._initialised:
+        if self.activity_stats_enabled and not self._activity_stats_initialised:
             self._activity_stats = []
 
             # TODO either expose some of these as properties or don't save in fields
@@ -563,11 +566,13 @@ class ActivityStatsCollectingMixin:
                                         else () if tensor is not None else None
                                         for tensor in values]
 
-            self._channel_activity_sums =\
-                [tf.Variable(tf.zeros(size, dtype=tf.float32)) if size is not None else None for size in self._channel_sizes]  # by channel
-            self._spatial_activity_sums =\
-                [tf.Variable(tf.zeros(shape, dtype=tf.float32)) if shape is not None else None for shape in self._spatial_shapes]  # by spatial pos
-            self._initialised = True
+            self._channel_activity_sums = [tf.Variable(tf.zeros(size, dtype=tf.float32))
+                                           if size is not None else None
+                                           for size in self._channel_sizes]  # by channel
+            self._spatial_activity_sums = [tf.Variable(tf.zeros(shape, dtype=tf.float32))
+                                           if shape is not None else None
+                                           for shape in self._spatial_shapes]  # by spatial pos
+            self._activity_stats_initialised = True
 
     def _finalize_activity_stats(self):
         """
@@ -577,7 +582,7 @@ class ActivityStatsCollectingMixin:
         #  saving to a different variable, and invalidating if more data is added
 
         # convert per-item stats
-        if self._initialised:
+        if self._activity_stats_initialised:
             def convert(i_idx):
                 if self._activity_stats[0][i_idx] is not None:
                     item_data = [np.stack(iteration_stats[i_idx], axis=-1) for iteration_stats in self._activity_stats]
@@ -587,7 +592,7 @@ class ActivityStatsCollectingMixin:
             self._activity_stats = [convert(i_idx) for i_idx in range(num_items)]
 
         # compute model-whole stats
-        if self._initialised:
+        if self._activity_stats_initialised:
             dic = {}
             for key in self._activity_stat_keys():
                 key_stats = [item_stats[key].to_numpy() for item_stats in self._activity_stats]
@@ -602,7 +607,7 @@ class ActivityStatsCollectingMixin:
         For example, very much needed when collecting stats across epochs as some
         spatial/channel positions are only active for some batches.
         """
-        if self._initialised:
+        if self._activity_stats_initialised:
             self._accum_activity_stats_internal(values, is_accum, self._channel_activity_sums,
                                                 self._spatial_activity_sums)
 
@@ -610,7 +615,7 @@ class ActivityStatsCollectingMixin:
         """
         Resets accumulators for collection of data per-epoch.
         """
-        if self._initialised:
+        if self._activity_stats_initialised:
             for activity_sum in self._channel_activity_sums:
                 activity_sum.assign(tf.zeros_like(activity_sum))
 
@@ -621,7 +626,7 @@ class ActivityStatsCollectingMixin:
             num_batches - number of batches that have gone into the accumulated activity sums
                 (usually 1 for per-step collection, and steps_per_epoch for per-epoch collection)
         """
-        if self._initialised:
+        if self._activity_stats_initialised:
             iteration_activity_stats = self._compute_activity_stats(
                self._channel_activity_sums, self._spatial_activity_sums, num_batches)
             self._activity_stats.append(iteration_activity_stats)
@@ -752,7 +757,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
         Each variable's list entry is either as pandas dataframe of shape (iterations, percentiles),
         or None if stats are not collected for that variable.
         """
-        return self._item_value_stats
+        return self._value_stats
 
     @property
     def variable_magnitude_stats(self):
@@ -761,7 +766,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
         Each variable's list entry is either as pandas dataframe of shape (iterations, percentiles),
         or None if stats are not collected for that variable.
         """
-        return self._item_magnitude_stats
+        return self._magnitude_stats
 
     @property
     def variable_activity_stats(self):
@@ -782,8 +787,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
         None if value stats collection is disabled.
         Use collected_variable_stats_indices() to identify which model variables are included.
         """
-        if self._item_value_stats is not None:
-            return [stats for stats in self._item_value_stats if stats is not None]
+        if self._value_stats is not None:
+            return [stats for stats in self._value_stats if stats is not None]
         else:
             return None
 
@@ -794,8 +799,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
         None if value stats collection is disabled.
         Use collected_variable_stats_indices() to identify which model variables are included.
         """
-        if self._item_magnitude_stats is not None:
-            return [stats for stats in self._item_magnitude_stats if stats is not None]
+        if self._magnitude_stats is not None:
+            return [stats for stats in self._magnitude_stats if stats is not None]
         else:
             return None
 
@@ -1178,7 +1183,7 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
             by the top-level list, with each layer entry being None if that layer is not captured.
     """
 
-    def __init__(self, per_step=False, magnitudes=False, collection_sets=None, *args, **kwargs):
+    def __init__(self, per_step=False, collection_sets=None, *args, **kwargs):
         """
         Args:
             per_step: bool. Whether to collect per-step stats, or per-epoch otherwise.
@@ -1188,10 +1193,14 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
                 is collected on each update step.
                 The same applies to layer output capture if enabled.
 
-            magnitudes: whether to collect stats on gradient magnitudes (default), or on their raw values.
+            value_stats: bool, default: True.
+                Whether to collect value and magnitude stats.
 
             activity_stats: bool, default: True.
                 Whether to collect activity stats.
+
+            value_stats_quantiles: list of percentiles to collect stats for, in range 0 .. 100.
+                Default: [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
 
             collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
               If omitted, this callback collects only stats.
@@ -1200,7 +1209,6 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
 
         super().__init__(*args, **kwargs)
         self.per_step = per_step
-        self.magnitudes = magnitudes
         self.collection_sets = collection_sets
 
         # results variable creation
@@ -1223,6 +1231,24 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         return self._layer_shapes
 
     @property
+    def layer_value_stats(self):
+        """
+        List (by layer) of dataframes containing value stats, or None if not enabled.
+        Each layer's list entry is either as pandas dataframe of shape (iterations, percentiles),
+        or None if stats are not collected for that layer.
+        """
+        return self._value_stats
+
+    @property
+    def layer_magnitude_stats(self):
+        """
+        List (by layer) of dataframes containing value magnitude stats, or None if not enabled.
+        Each layer's list entry is either as pandas dataframe of shape (iterations, percentiles),
+        or None if stats are not collected for that layer.
+        """
+        return self._magnitude_stats
+
+    @property
     def layer_activity_stats(self):
         """
         List (by layer) of dataframes containing activity stats, or None if not enabled.
@@ -1233,6 +1259,33 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
             - spatial_dead_rate - fraction of spatial positions that are always zero across batch and channel dims
         """
         return self._activity_stats
+
+    @property
+    def collected_layer_value_stats(self):
+        """
+        Layer output value stats filtered only on those that have been collected.
+        None if value stats collection is disabled.
+        Use collected_layer_stats_indices() to identify which model layers are included.
+
+        Note: currently, all layers are always included. This flexibility is included for consistency with the other
+        callbacks in this suite, and for the flexibility to pick and choose the layers in the future
+        """
+        if self._value_stats is not None:
+            return [stats for stats in self._value_stats if stats is not None]
+        else:
+            return None
+
+    @property
+    def collected_variable_magnitude_stats(self):
+        """
+        Layer output magnitude stats filtered only on those that have been collected.
+        None if value stats collection is disabled.
+        Use collected_layer_stats_indices() to identify which model layers are included.
+        """
+        if self._magnitude_stats is not None:
+            return [stats for stats in self._magnitude_stats if stats is not None]
+        else:
+            return None
 
     @property
     def collected_layer_activity_stats(self):
