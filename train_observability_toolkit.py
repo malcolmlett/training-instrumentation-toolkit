@@ -233,8 +233,8 @@ class BaseGradientCallback:
     This implementation does nothing, and is suitable for use as a no-op.
     """
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
         self.params = None
         self._model = None
 
@@ -336,8 +336,8 @@ class _ValueStatsCollectingMixin:
     "Items" are typically something related to layers or variables.
     """
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
     @tf.function
     def _compute_value_and_magnitude_percentile_stats(self, tensors, quantiles):
@@ -409,14 +409,16 @@ class _ActivityStatsCollectingMixin:
     Mixin for callback classes the need to measure the activity rates of the items that they capture.
     "Items" are typically something related to layers or variables.
     """
-    def __init__(self):
-        super().__init__()
+    def __init__(self, activity_stats=True, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+        self.activity_stats_enabled = activity_stats
 
         # shape of data structure is optimised for speed of accumulation during training
         # so needs to be converted to a more usable data structure after training
         # - initially: list (by iteration) of list (by item) of tuples (by stat)
         # - finally:   list (by item) of pandas dataframes with shape (iterations, stats)
-        self._activity_stats = []
+        self._activity_stats = [] if self.activity_stats_enabled else None
         self._model_activity_stats = None
 
         # the following gets initialised only within _init_activity_stats()
@@ -428,6 +430,9 @@ class _ActivityStatsCollectingMixin:
 
     @property
     def model_activity_stats(self):
+        """
+        Model activity stats, or None if not enabled
+        """
         return self._model_activity_stats
 
     def _init_activity_stats(self, values):
@@ -438,7 +443,7 @@ class _ActivityStatsCollectingMixin:
         Args:
             values: list of tensors of raw tracked values, some of which may be None
         """
-        if not self._initialised:
+        if self.activity_stats_enabled and not self._initialised:
             self._item_shapes = [tensor.shape if tensor is not None else None for tensor in values]
             self._channel_sizes = [tensor.shape[-1] if tensor is not None else None for tensor in values]  # TODO remove
             self._spatial_shapes = [tensor.shape[1:-1] if tensor is not None and len(tensor.shape) > 2 else () if tensor is not None else None for tensor in values]  # TODO remove
@@ -456,33 +461,59 @@ class _ActivityStatsCollectingMixin:
         #  saving to a different variable, and invalidating if more data is added
 
         # convert per-item stats
-        def convert(i_idx):
-            if self._activity_stats[0][i_idx] is not None:
-                item_data = [np.stack(iteration_stats[i_idx], axis=-1) for iteration_stats in self._activity_stats]
-                return pd.DataFrame(item_data, columns=self._activity_stat_keys())
-            return None
-        num_items = len(self._activity_stats[0])
-        self._activity_stats = [convert(i_idx) for i_idx in range(num_items)]
+        if self._initialised:
+            def convert(i_idx):
+                if self._activity_stats[0][i_idx] is not None:
+                    item_data = [np.stack(iteration_stats[i_idx], axis=-1) for iteration_stats in self._activity_stats]
+                    return pd.DataFrame(item_data, columns=self._activity_stat_keys())
+                return None
+            num_items = len(self._activity_stats[0])
+            self._activity_stats = [convert(i_idx) for i_idx in range(num_items)]
 
         # compute model-whole stats
-        dic = {}
-        for key in self._activity_stat_keys():
-            key_stats = [item_stats[key].to_numpy() for item_stats in self._activity_stats]
-            dic[f"min_{key}"] = np.min(key_stats, axis=0)
-            dic[f"max_{key}"] = np.max(key_stats, axis=0)
-            dic[f"mean_{key}"] = np.mean(key_stats, axis=0)
-        self._model_activity_stats = pd.DataFrame(dic)
+        if self._initialised:
+            dic = {}
+            for key in self._activity_stat_keys():
+                key_stats = [item_stats[key].to_numpy() for item_stats in self._activity_stats]
+                dic[f"min_{key}"] = np.min(key_stats, axis=0)
+                dic[f"max_{key}"] = np.max(key_stats, axis=0)
+                dic[f"mean_{key}"] = np.mean(key_stats, axis=0)
+            self._model_activity_stats = pd.DataFrame(dic)
 
-    def _reset_per_epoch_stats(self):
+    def _reset_per_epoch_activity_stats(self):
         """
-        Resets accumulators for colection of data per-epoch.
+        Resets accumulators for collection of data per-epoch.
         """
         if self._initialised:
             for activity_sum in self._item_channel_activity_sums:
                 activity_sum.assign(tf.zeros_like(activity_sum))
 
-    @tf.function
     def _accum_activity_stats(self, values, is_accum, outs_by_channel, outs_by_spatial):
+        if self._initialised:
+            self._accum_activity_stats_internal(values, is_accum, outs_by_channel, outs_by_spatial)
+
+    # TODO to support live-monitoring, should also compute and append model stats
+    def _collect_activity_stats(self, num_batches):
+        """
+        Args:
+            num_batches - number of batches that have gone into the accumulated activity sums
+                (usually 1 for per-step collection, and steps_per_epoch for per-epoch collection)
+        """
+        if self._initialised:
+            iteration_activity_stats = self._compute_activity_stats(
+               self._item_channel_activity_sums, self._item_spatial_activity_sums, num_batches)
+            self._activity_stats.append(iteration_activity_stats)
+
+    @staticmethod
+    def _activity_stat_keys():
+        """
+        Gets the list of stats that will be computed.
+        Currently static but may be computed based on configuration in the future.
+        """
+        return ['activation_rate', 'dead_rate', 'spatial_dead_rate']
+
+    @tf.function
+    def _accum_activity_stats_internal(self, values, is_accum, outs_by_channel, outs_by_spatial):
         """
         Auto-graphed function that accumulates partially computed stats each step, in preparation
         for calculating target stats either each step or each epoch.
@@ -500,17 +531,6 @@ class _ActivityStatsCollectingMixin:
                 else:
                     outs_by_channel[i_idx].assign(rate_by_channel)
                     outs_by_spatial[i_idx].assign(rate_by_spatial)
-
-    # TODO to support live-monitoring, should also compute and append model stats
-    def _collect_activity_stats(self, num_batches):
-        """
-        Args:
-            num_batches - number of batches that have gone into the accumulated activity sums
-                (usually 1 for per-step collection, and steps_per_epoch for per-epoch collection)
-        """
-        iteration_activity_stats = self._compute_activity_stats(
-           self._item_channel_activity_sums, self._item_spatial_activity_sums, num_batches)
-        self._activity_stats.append(iteration_activity_stats)
 
     @tf.function
     def _compute_activity_stats(self, channel_activity_sums, spatial_activity_sums, num_batches):
@@ -540,14 +560,6 @@ class _ActivityStatsCollectingMixin:
                 if channel_activity_sum is not None else None
                 for channel_activity_sum, spatial_activity_sum
                 in zip(channel_activity_sums, spatial_activity_sums)]
-
-    @staticmethod
-    def _activity_stat_keys():
-        """
-        Gets the list of stats that will be computed.
-        Currently static but may be computed based on configuration in the future.
-        """
-        return ['activation_rate', 'dead_rate', 'spatial_dead_rate']
 
 
 class VariableHistoryCallback(tf.keras.callbacks.Callback, _ValueStatsCollectingMixin):
@@ -1278,7 +1290,7 @@ class ActivityHistoryCallback(BaseGradientCallback, _ValueStatsCollectingMixin,
             by the top-level list, with each layer entry being None if that layer is not captured.
     """
 
-    def __init__(self, per_step=False, magnitudes=False, collection_sets=None, **kwargs):
+    def __init__(self, per_step=False, magnitudes=False, collection_sets=None, *args, **kwargs):
         """
         Args:
             per_step: bool. Whether to collect per-step stats, or per-epoch otherwise.
@@ -1290,11 +1302,15 @@ class ActivityHistoryCallback(BaseGradientCallback, _ValueStatsCollectingMixin,
 
             magnitudes: whether to collect stats on gradient magnitudes (default), or on their raw values.
 
+            activity_stats: bool, default: True.
+                Whether to collect activity stats.
+
             collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
               If omitted, this callback collects only stats.
               See _normalize_collection_sets_for_variables() for format details.
         """
-        super().__init__()
+
+        super().__init__(*args, **kwargs)
         self.per_step = per_step
         self.magnitudes = magnitudes
         self.collection_sets = collection_sets
@@ -1313,28 +1329,40 @@ class ActivityHistoryCallback(BaseGradientCallback, _ValueStatsCollectingMixin,
 
     @property
     def layer_shapes(self):
+        """
+        None if activity collection is disabled.
+        """
         return self._layer_shapes
 
     @property
-    def collected_layer_stats(self):
+    def collected_layer_activity_stats(self):
         """
-        Same as layer_shapes, because all layers always have outputs, but included for consistency with
-        other callbacks in this suite and in case of changes in the future.
+        Layer activity stats filtered only on those that have been collected.
+        None if activity collection is disabled.
         """
-        return self._activity_stats
+        if self._activity_stats is not None:
+            return [stats for stats in self._activity_stats if stats is not None]
+        else:
+            return None
 
+    # TODO make independent of which stats are collected
     @property
     def collected_layer_stats_indices(self):
         """
         Indices of layers as returned by collected_layer_stats()
+        None if activity collection is disabled.
         """
-        return [idx for idx, stats in enumerate(self._activity_stats) if stats is not None]
+        if self._activity_stats is not None:
+            return [idx for idx, stats in enumerate(self._activity_stats) if stats is not None]
+        else:
+            return None
 
     # TODO remove this method
     @property
     def collected_layer_stats_names(self):
         """
         Names of layers as returned by collected_layer_stats()
+        None if disabled.
         """
         return [layer.name for layer in self.model.layers]
 
@@ -1410,7 +1438,7 @@ class ActivityHistoryCallback(BaseGradientCallback, _ValueStatsCollectingMixin,
         """
         self._epoch = epoch
         if not self.per_step:
-            self._reset_per_epoch_stats()
+            self._reset_per_epoch_activity_stats()
 
     def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations, output_gradients):
         """
