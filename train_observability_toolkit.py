@@ -835,8 +835,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
     @property
     def collected_variable_stats_indices(self):
         """
-        Indices of variables for which stats are returned by collected_variable_value_stats and
-        collected_variable_magnitude_stats. Indices are as per the variable's position in model.variables.
+        Indices of variables for which value, magnitude, and activity stats are returned.
+        Indices are as per the variable's position in model.variables.
         """
         return self._collected_stats_indices
 
@@ -1224,12 +1224,13 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
             value_stats_quantiles: list of percentiles to collect stats for, in range 0 .. 100.
                 Default: [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
 
-            collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
+            collection_sets: list of dicts. Enables collection of raw layer outputs
+                and provides fine-grained control over which layer outputs are collected.
               If omitted, this callback collects only stats.
-              See _normalize_collection_sets_for_variables() for format details.
+              See _normalize_collection_sets_for_layers() for format details.
         """
 
-        super().__init__(*args, **kwargs)
+        super().__init__(data_format='BSC', *args, **kwargs)
         self.per_step = per_step
         self.collection_sets = collection_sets
 
@@ -1243,12 +1244,15 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         # internal tracking
         self._epoch = 0
         self._layer_shapes = None
+        self._collected_stats_indices = None
         self._filtered_value_layer_indices = None
 
     @property
     def layer_shapes(self):
         """
-        None if activity collection is disabled.
+        List of shapes of each layer, regardless of what's being collected.
+        Provided for convenience when displaying results and doing other analysis,
+        because this information is hard to obtain directly from the model.
         """
         return self._layer_shapes
 
@@ -1320,31 +1324,18 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         else:
             return None
 
-    # TODO make independent of which stats are collected
     @property
     def collected_layer_stats_indices(self):
         """
-        Indices of layers as returned by collected_layer_stats()
-        None if activity collection is disabled.
+        Indices of layers for which value, magnitude, and activity stats are returned.
+        Indices are as per the layer's position in model.layers.
         """
-        if self._activity_stats is not None:
-            return [idx for idx, stats in enumerate(self._activity_stats) if stats is not None]
-        else:
-            return None
-
-    # TODO remove this method
-    @property
-    def collected_layer_stats_names(self):
-        """
-        Names of layers as returned by collected_layer_stats()
-        None if disabled.
-        """
-        return [layer.name for layer in self.model.layers]
+        return self._collected_stats_indices
 
     @property
     def layer_outputs(self):
         """
-        Gets a list corresponding to all layers, with lists of collected
+        List corresponding to all layers, with lists of collected
         outputs for those being collected and Nones for the rest.
         The order and size of the returned list corresponds exactly to that returned
         by model.layers.
@@ -1386,6 +1377,9 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         """
         Validates configuration and partially expands it, now that we have access to the model.
         """
+        # precompute _collected_stats_indices independent of data collection mixins because they might be disabled
+        self._collected_stats_indices = list(range(len(self.model.layers)))
+
         # expand collection_sets and initialise variable storages
         # (TODO also prepare slicing rules)
         if self.collection_sets:
@@ -1419,10 +1413,16 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         """
         Accumulates activations from each step. Also emits stats, if configured at per-step level.
         """
+        # initialisation on first access to raw data
+        if self._layer_shapes is None:
+            self._layer_shapes = [activation.shape for activation in activations]
         self._init_activity_stats(activations)
+        self._init_value_stats(activations)
 
         # accumulate activation data
-        is_accum = (not self.per_step)  # accum over steps in whole epoch, or otherwise just overwrite per step
+        # - always add each batch, regardless of emitting stats per-step or per-epoch
+        # - accum when per-epoch, overwrite when per-step
+        is_accum = (not self.per_step)
         self._accum_activity_stats(activations, is_accum)
 
         # stats calculations for each step, if configured
