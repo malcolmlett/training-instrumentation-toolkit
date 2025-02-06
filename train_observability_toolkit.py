@@ -388,10 +388,13 @@ class ValueStatsCollectingMixin:
             stat_pairs = self._compute_value_and_magnitude_percentile_stats(values, self.value_stats_quantiles)
 
             # append to stats list
-            var_indices = [var_idx for var_idx, stat_list in enumerate(self._value_stats) if stat_list is not None]
-            for var_idx, (value_percentiles, magnitude_percentiles) in zip(var_indices, stat_pairs):
-                self._value_stats[var_idx].append(value_percentiles)
-                self._magnitude_stats[var_idx].append(magnitude_percentiles)
+            # (performance note: this loop doesn't seem to cost much)
+            for item_value_stats, item_magnitude_stats, (value_percentiles, magnitude_percentiles) \
+                    in zip(self._value_stats, self._magnitude_stats, stat_pairs):
+                if item_value_stats is not None:
+                    item_value_stats.append(value_percentiles)
+                if item_magnitude_stats is not None:
+                    item_magnitude_stats.append(magnitude_percentiles)
 
     @tf.function
     def _compute_value_and_magnitude_percentile_stats(self, tensors, quantiles):
@@ -404,15 +407,18 @@ class ValueStatsCollectingMixin:
         in the positive and negative halves.
 
         Args:
-            tensors: list of tensors for which percentiles should be calculated. Must not contain any Nones.
+            tensors: list of tensors for which percentiles should be calculated, some of which may be None.
             quantiles: list of quantiles to compute values for
         Returns:
-            - value_percentiles - tensor of percentile values across the tensor values
-            - magnitude_percentile - tensor of percentile values across the tensor magnitudes
+            - value_percentiles - tensor of percentile values across the tensor values, None for None tensors
+            - magnitude_percentile - tensor of percentile values across the tensor magnitudes, None for None tensors
         """
         def computation(tensor):
-            value_percentiles = tfp.stats.percentile(tensor, quantiles, interpolation='linear')
-            magnitude_percentiles = tfp.stats.percentile(tf.abs(tensor), quantiles, interpolation='linear')
+            if tensor is not None:
+                value_percentiles = tfp.stats.percentile(tensor, quantiles, interpolation='linear')
+                magnitude_percentiles = tfp.stats.percentile(tf.abs(tensor), quantiles, interpolation='linear')
+            else:
+                value_percentiles, magnitude_percentiles = None, None
             return value_percentiles, magnitude_percentiles
         return [computation(tensor) for tensor in tensors]
 
@@ -595,7 +601,8 @@ class ActivityStatsCollectingMixin:
         if self._activity_stats_initialised:
             dic = {}
             for key in self._activity_stat_keys():
-                key_stats = [item_stats[key].to_numpy() for item_stats in self._activity_stats]
+                key_stats = [item_stats[key].to_numpy() for item_stats in self._activity_stats
+                             if item_stats is not None]
                 dic[f"min_{key}"] = np.min(key_stats, axis=0)
                 dic[f"max_{key}"] = np.max(key_stats, axis=0)
                 dic[f"mean_{key}"] = np.mean(key_stats, axis=0)
