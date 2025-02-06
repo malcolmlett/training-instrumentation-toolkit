@@ -518,9 +518,10 @@ class _ActivityStatsCollectingMixin:
             for activity_sum in self._item_channel_activity_sums:
                 activity_sum.assign(tf.zeros_like(activity_sum))
 
-    def _accum_activity_stats(self, values, is_accum, outs_by_channel, outs_by_spatial):
+    def _accum_activity_stats(self, values, is_accum):
         if self._initialised:
-            self._accum_activity_stats_internal(values, is_accum, outs_by_channel, outs_by_spatial)
+            self._accum_activity_stats_internal(values, is_accum, self._item_channel_activity_sums,
+                                                self._item_spatial_activity_sums)
 
     # TODO to support live-monitoring, should also compute and append model stats
     def _collect_activity_stats(self, num_batches):
@@ -1469,7 +1470,7 @@ class LayerOutputHistoryCallback(BaseGradientCallback, _ValueStatsCollectingMixi
 
         # accumulate activation data
         is_accum = (not self.per_step)  # accum over steps in whole epoch, or otherwise just overwrite per step
-        self._accum_activity_stats(activations, is_accum, self._item_channel_activity_sums, self._item_spatial_activity_sums)
+        self._accum_activity_stats(activations, is_accum)
 
         # stats calculations for each step, if configured
         if self.per_step:
