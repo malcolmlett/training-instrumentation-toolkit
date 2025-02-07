@@ -2636,7 +2636,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
     iterations = callback.epochs if hasattr(callback, 'epochs') else callback.steps
     iteration_name = 'epoch' if hasattr(callback, 'epochs') else 'step'
     model = callback.model
-    model_stats = callback._model_magnitude_stats
+    model_stats = callback.model_magnitude_stats
     if callback._magnitude_stats is None:
         raise ValueError(f"{type(callback).__name__} did not collect value magnitude stats")
     collected_item_magnitude_stats = [item_stats for item_stats in callback._magnitude_stats if item_stats is not None]
@@ -2716,7 +2716,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
     # layer contributions - high-level summary
     # - for easier visual display in variables mode, uses only the largest variable from each layer
     if item_mode == 'layers':
-        filtered_layer_names = [model.layers[l_idx] for l_idx in collected_item_indices]
+        filtered_layer_names = [model.layers[l_idx].name for l_idx in collected_item_indices]
         filtered_stats = collected_item_magnitude_stats
     else:
         # tuples of: (v_idx of biggest variable, size of biggest variable)
@@ -2729,8 +2729,8 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
             if biggest_size is None or tf.size(variable) > biggest_size:
                 layer_metas[l_idx] = v_idx, tf.size(variable)
         filtered_layer_names =\
-            [model.layers[l_idx] for l_idx, (v_idx, _) in enumerate(layer_metas) if v_idx is not None]
-        filtered_stats = [collected_item_magnitude_stats[v_idx] for v_idx, _ in layer_metas if v_idx is not None]
+            [model.layers[l_idx].name for l_idx, (v_idx, _) in enumerate(layer_metas) if v_idx is not None]
+        filtered_stats = [callback._magnitude_stats[v_idx] for v_idx, _ in layer_metas if v_idx is not None]
     scales = get_scales_across_stats_list(filtered_stats, scale_quantile=50)
     band_log_scales = _log_normalize(scales, axis=-1)
 
