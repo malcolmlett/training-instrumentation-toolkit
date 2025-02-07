@@ -359,7 +359,10 @@ class ValueStatsCollectingMixin:
         Stats across the general magnitudes of values across the variables.
         Pandas data-frame with shape (iterations, percentiles).
         """
-        return self._compute_scale_distribution_across_stats_list(self._magnitude_stats)
+        if self._magnitude_stats is not None:
+            return self._compute_scale_distribution_across_stats_list(self._magnitude_stats)
+        else:
+            return None
 
     def _init_value_stats(self, values):
         """
@@ -367,7 +370,7 @@ class ValueStatsCollectingMixin:
         Automatically called on first data collection.
         Safe to call this every iteration. Only takes effect on the first call.
         """
-        if self.value_stats_enabled and self._value_stats is not None:
+        if self.value_stats_enabled and self._value_stats is None:
             self._value_stats = [[] if value is not None else None for value in values]
             self._magnitude_stats = [[] if value is not None else None for value in values]
 
@@ -719,8 +722,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
             (only available if per_step is True)
     """
 
-    def __init__(self, per_step=False, before_updates=False, trainable_only=True,
-                 collection_sets=None, *args, **kwargs):
+    def __init__(self, per_step=False, before_updates=False, trainable_only=True, value_stats_quantiles=None,
+                 value_stats=True, activity_stats=True, collection_sets=None):
         """
         Args:
             per_step: bool. Whether to collect per-step stats and raw values, or per-epoch otherwise.
@@ -747,8 +750,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
                 See _normalize_collection_sets_for_variables() for format details.
         """
         # Callback doesn't honour python 3's MRO, so init mixins directly
-        ValueStatsCollectingMixin.__init__(self, *args, **kwargs)
-        ActivityStatsCollectingMixin.__init__(self, data_format='SC', *args, **kwargs)
+        ValueStatsCollectingMixin.__init__(self, value_stats=value_stats, value_stats_quantiles=value_stats_quantiles)
+        ActivityStatsCollectingMixin.__init__(self, data_format='SC', activity_stats=activity_stats)
         super().__init__()
         self.per_step = per_step
         self.before_updates = before_updates
@@ -976,7 +979,8 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
             (only available if per_step is True)
     """
 
-    def __init__(self, per_step=False, collection_sets=None, *args, **kwargs):
+    def __init__(self, per_step=False, value_stats_quantiles=None, value_stats=True, activity_stats=True,
+                 collection_sets=None):
         """
         Args:
             per_step: bool. Whether to collect per-step stats and raw values, or per-epoch otherwise.
@@ -985,14 +989,20 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
                 If per-step is set, then a `steps` list is available instead, and activity
                 is collected on each update step.
                 The same applies to layer output capture if enabled.
-
-            magnitudes: whether to collect stats on gradient magnitudes, or on their raw values (default).
-
+            value_stats: bool, default: True.
+                Whether to collect value and magnitude stats.
+            activity_stats: bool, default: True.
+                Whether to collect activity stats.
+            value_stats_quantiles: list of percentiles to collect stats for, in range 0 .. 100.
+                Default: [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
             collection_sets: list of dicts. Fine-grained control over how data is collected across the variables.
               If omitted, this callback collects only stats.
               See _normalize_collection_sets_for_variables() for format details.
         """
-        super().__init__(data_format='SC', *args, *kwargs)
+        # Callback doesn't honour python 3's MRO, so init mixins directly
+        ValueStatsCollectingMixin.__init__(self, value_stats=value_stats, value_stats_quantiles=value_stats_quantiles)
+        ActivityStatsCollectingMixin.__init__(self, data_format='SC', activity_stats=activity_stats)
+        super().__init__()
         self.per_step = per_step
         self.collection_sets = collection_sets
 
@@ -1689,14 +1699,14 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
         """
         # initialisation on first access to raw data
         if self._layer_shapes is None:
-            self._layer_shapes = [output.shape for output in output_gradients]
+            self._layer_shapes = [output.shape if output is not None else None for output in output_gradients]
             self._collected_stats_indices = [idx for idx, value in enumerate(output_gradients) if value is not None]
 
         # accumulate activation data
         # - always add each batch, regardless of emitting stats per-step or per-epoch
         # - accum when per-epoch, overwrite when per-step
         is_accum = (not self.per_step)
-        self._accum_activity_stats(activations, is_accum)
+        self._accum_activity_stats(output_gradients, is_accum)
 
         # stats calculations for each step, if configured
         if self.per_step:
