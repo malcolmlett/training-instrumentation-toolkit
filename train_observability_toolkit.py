@@ -6,6 +6,7 @@ import numpy as np
 from numpy.polynomial.polynomial import Polynomial
 import pandas as pd
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import tqdm
 from enum import Enum
 
@@ -2041,6 +2042,7 @@ def pos_neg_balance(stats, quantiles=None):
         else:
             # find point closest to zero
             mid_col_idx = np.argmin(np.abs(row))
+            mid_q = quantiles[mid_col_idx]
 
             # fit curve to nearby points
             if mid_col_idx == 0:
@@ -2057,7 +2059,7 @@ def pos_neg_balance(stats, quantiles=None):
             # extrapolate accurate zero-point quantile
             # - gives a floating point value in range 0 to 100
             roots = p.roots()
-            root_idx = np.argmin(np.abs(roots - mid_col_idx))  # pick root closest to mid-point
+            root_idx = np.argmin(np.abs(roots - mid_q))  # pick root closest to mid-point
             zero_q = roots[root_idx]
 
             # convert to balance
@@ -2764,6 +2766,8 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
         raise ValueError(f"Callback collects unsupported item type: {item_type}")
     if callback._magnitude_stats is None:
         raise ValueError(f"{type(callback).__name__} did not collect value magnitude stats")
+    if callback._value_stats is None:
+        raise ValueError(f"{type(callback).__name__} did not collect value stats")
 
     # collect data
     iterations = callback.epochs if hasattr(callback, 'epochs') else callback.steps
@@ -2771,28 +2775,21 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
     model = callback.model
     model_stats = callback.model_magnitude_stats
     item_type = callback.item_type
+    collected_item_value_stats = [item_stats for item_stats in callback._value_stats
+                                  if item_stats is not None]
     collected_item_magnitude_stats = [item_stats for item_stats in callback._magnitude_stats
                                       if item_stats is not None]
-    if magnitudes:
-        collected_item_stats = [item_stats for item_stats in callback._magnitude_stats
-                                if item_stats is not None]
-        collected_item_indices = [i_idx for i_idx, item_stats in enumerate(callback._magnitude_stats)
-                                  if item_stats is not None]
-    else:
-        if callback._value_stats is None:
-            raise ValueError(f"{type(callback).__name__} did not collect value stats")
-        collected_item_stats = [item_stats for item_stats in callback._value_stats if item_stats is not None]
-        collected_item_indices = [i_idx for i_idx, item_stats in enumerate(callback._value_stats)
-                                  if item_stats is not None]
-    num_item_stats = len(collected_item_stats)
+    collected_item_indices = [i_idx for i_idx, item_stats in enumerate(callback._value_stats)
+                              if item_stats is not None]
+    num_item_stats = len(collected_item_value_stats)
 
     # Deal with callback differences
     item_name = callback.item_name.lower()
     item_name_upper = callback.item_name
     title = f"All model {item_name}"
     if hasattr(callback, 'trainable_only'):
-        title = f"All model trainable {item_name}" if callback.trainable_only else \
-            f"All model {item_name} (incl. non-trainable)"
+        title = f"All model trainable {item_name}s" if callback.trainable_only else \
+            f"All model {item_name}s (incl. non-trainable)"
     if hasattr(callback, 'before_updates'):
         title += ("\n(before updates)" if callback.before_updates else "\n(after updates)")
 
@@ -2869,13 +2866,26 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
         r = 2 + i_idx // grid_width
         c = i_idx % grid_width
         plt.subplot2grid((grid_height, grid_width), (r, c))
-        data = collected_item_stats[i_idx]
+        data = collected_item_magnitude_stats[i_idx] if magnitudes else collected_item_value_stats[i_idx]
+        plt.title(item_display_names[i_idx])
         _plot_add_quantiles(iterations, data)
         plt.margins(0)
         plt.yscale('log' if magnitudes else 'linear')
         if c == 0:
             plt.ylabel('log-magnitude' if magnitudes else 'value')
-        plt.title(item_display_names[i_idx])
+
+        # add "pos/neg balance" information
+        if magnitudes:
+            balances = pos_neg_balance(collected_item_value_stats[i_idx])
+            ax1 = plt.gca()
+            ax2 = ax1.twinx()
+            ax2.set_ylim([-1.0, +1.0])
+            ax2.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
+            ax2.plot(balances, color="tab:orange", linewidth=1, alpha=0.3)
+            #ax2.fill_between(iterations, balances, 0, where=(balances > 0), color="tab:orange", alpha=0.1)
+            #ax2.fill_between(iterations, balances, 0, where=(balances < 0), color="tab:orange", alpha=0.1)
+            if c == (grid_width-1):
+              ax2.set_ylabel('Pos/neg balance', color="tab:orange")
 
         # text overlay
         plot_width = np.max(iterations)
