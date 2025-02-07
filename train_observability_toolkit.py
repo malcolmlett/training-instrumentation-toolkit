@@ -2315,23 +2315,17 @@ def get_scales_across_stats_list(stats_dataframes, scale_quantile=50):
     Returns:
         np-array with shape (iterations, variables)
     """
-    scales = []
-    for variable_stat in stats_dataframes:
-        if variable_stat is not None:
-            # estimate the overall magnitude scale at the target quantile
-            # - assumes that the original dataset was either raw values centered around
-            #   zero, or was magnitude values.
-            pos_mean = variable_stat[scale_quantile].to_numpy()
-            neg_mean = variable_stat[100-scale_quantile].to_numpy()
-            if np.any(neg_mean < 0):
-                # assume source dataset falls either side of zero
-                # - scale is average of the positive and negative mean magnitudes
-                scale = (pos_mean + abs(neg_mean)) * 0.5
-            else:
-                # assume source dataset is positive-only
-                # - scale is just the target quantile alone
-                scale = pos_mean
-            scales.append(scale)  # shape: variables x iterations
+    # Implementation note:
+    # - previously I'd done things like picking the 50th percentile, or assumed that the 25th and 75th
+    #   were either side of zero. But they all run into problems.
+    #   For example, taking the 50th even on magnitude data can be a problem if slightly > 50% of the
+    #   values are zero. In the end, estimating the mean from the percentiles just seems like the best approach.
+    #
+    # TODO assume a normal distribution and use that to downplay the weight for the outer percentiles
+
+    scales = [np.mean(np.abs(variable_stat.to_numpy()), axis=1)
+              for variable_stat in stats_dataframes
+              if variable_stat is not None]
     return np.stack(scales, axis=-1)  # shape: iterations x variables
 
 
