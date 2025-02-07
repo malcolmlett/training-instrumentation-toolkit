@@ -3,6 +3,7 @@ import tensorflow_probability as tfp
 import keras
 import math
 import numpy as np
+from numpy.polynomial.polynomial import Polynomial
 import pandas as pd
 import matplotlib.pyplot as plt
 import tqdm
@@ -1955,6 +1956,14 @@ class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
         plot_activity_rate_history(self)
 
 
+class ItemType(Enum):
+    """
+    Broad categorisation of item data collected by a given callback.
+    """
+    LAYER = 1,
+    VARIABLE = 2
+
+
 def _log_normalize(arr, axis=None):
     """
     Normalises all values in the array or along the given axis so that they sum to 1.0,
@@ -1997,12 +2006,67 @@ def _log_normalize(arr, axis=None):
     return scaled
 
 
-class ItemType(Enum):
+def pos_neg_balance(stats, quantiles=None):
     """
-    Broad categorisation of item data collected by a given callback.
+    Calculates the "balance" of positive and negative values, based on value percentile information.
+    Estimates the percentile of the zero line and returns values in range -1.0 to 1.0 indicating the relative
+    fraction of values that fall on either side of the zero line. For example, -1.0 means that 100% of values
+    are negative, 0.0 means that the values are evenly split between negative and positive, and +1.0 means that 100%
+    of values are positive.
+    Args:
+        stats: pandas dataframe with shape (rows, percentiles) and column names identifying the percentile in
+            range 0..100, or an array of the same where percentiles are evenly distributed from 0 to 100.
+        quantiles: list of quantiles for each column.
+            Usually the quantiles can be directly extracted from the column names of the dataframe, or
+            inferred from the shape of the stats assuming evenly distributed percentiles from 0 to 100%.
+            If not, quantiles can be explicitly provided. Must be values in range 0 to 100, but can be floats.
+    Returns:
+        np-array with shape (rows,) and values in range -1.0 to 1.0
     """
-    LAYER = 1,
-    VARIABLE = 2
+    # parse arguments
+    if isinstance(stats, pd.DataFrame):
+        values = stats.to_numpy()
+        if quantiles is None:
+            quantiles = pd.to_numeric(stats.columns, errors='raise').to_numpy()
+    else:
+        values = np.array(stats)
+        if quantiles is None:
+            quantiles = np.linspace(0, 100, num=values.shape[1], endpoint=True)
+
+    balances = []
+    for row_idx, row in enumerate(values):
+        # trivial cases - all positive or all negative
+        if np.all(row >= 0):
+            balance = 1.0
+        elif np.all(row <= 0):
+            balance = -1.0
+        else:
+            # find point closest to zero
+            mid_col_idx = np.argmin(np.abs(row))
+
+            # fit curve to nearby points
+            if mid_col_idx == 0:
+                # left edge: fit line to first two
+                p = Polynomial.fit(x=quantiles[:2], y=row[:2], deg=1)
+            elif mid_col_idx == len(row) - 1:
+                # right edge: fit line to last two
+                p = Polynomial.fit(x=quantiles[-2:], y=row[-2:], deg=1)
+            else:
+                # in middle: fit curve to middle three
+                p = Polynomial.fit(x=quantiles[mid_col_idx - 1:mid_col_idx + 2],
+                                   y=row[mid_col_idx - 1:mid_col_idx + 2], deg=2)
+
+            # extrapolate accurate zero-point quantile
+            # - gives a floating point value in range 0 to 100
+            roots = p.roots()
+            root_idx = np.argmin(np.abs(roots - mid_col_idx))  # pick root closest to mid-point
+            zero_q = roots[root_idx]
+
+            # convert to balance
+            frac_pos = (100 - zero_q) / 100
+            balance = 2 * frac_pos - 1
+        balances.append(balance)
+    return np.array(balances)
 
 
 def _compute_common_stats_keys():
