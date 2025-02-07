@@ -2790,8 +2790,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
     # Prepare for layer mode
     item_display_names = []
     if item_type.value == ItemType.LAYER.value:  # reload-safe
-        layer_shapes = callback.layer_shapes
-        item_shapes = [layer_shapes[i_idx] for i_idx in collected_item_indices]
+        item_shapes = [callback.layer_shapes[i_idx] for i_idx in collected_item_indices]
         for l_idx in collected_item_indices:
             layer_name = model.layers[l_idx].name
             item_display_names.append(f"layer {l_idx}:\n{layer_name}")
@@ -2849,9 +2848,9 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
     plt.xlabel(iteration_name)
     plt.ylabel(f"{item_name_upper} scale log-proportion")
     # layer labels placed on mid-height of layer band on left-hand side
-    x_loc = round(band_log_scales.shape[0] / 100)
-    placement = band_log_scales[x_loc, :] * 0.5
-    placement[1:] += np.cumsum(band_log_scales[0, :])[0:-1]
+    sample_len = max(1, math.ceil(band_log_scales.shape[0] / 5))
+    band_mid_points = np.cumsum(band_log_scales, axis=1) - band_log_scales*0.5
+    placement = np.mean(band_mid_points[:sample_len, :], axis=0)
     for f_idx, layer_name in enumerate(filtered_layer_names):
         plt.text(len(iterations) / 100, placement[f_idx], layer_name, ha="left")
 
@@ -2869,9 +2868,9 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
             plt.ylabel('log-magnitude' if magnitudes else 'value')
 
         # add "pos/neg balance" information
+        ax1 = plt.gca()
         if magnitudes:
             balances = pos_neg_balance(collected_item_value_stats[i_idx])
-            ax1 = plt.gca()
             ax2 = ax1.twinx()
             ax2.set_ylim([-1.0, +1.0])
             ax2.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
@@ -2884,7 +2883,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
 
         # text overlay
         plot_width = np.max(iterations)
-        plot_range = np.array(plt.gca().get_ylim())
+        plot_range = np.array(ax1.get_ylim())
         plot_mid = np.exp(np.mean(np.log(plot_range))) if magnitudes else np.mean(plot_range)
         if item_shapes:
             plt.text(plot_width * 0.5, plot_mid,
