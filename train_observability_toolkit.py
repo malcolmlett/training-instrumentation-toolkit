@@ -14,60 +14,6 @@ from enum import Enum
 #  model.layers[l].compute_output_shape(model.layers[l].input.shape)
 
 
-class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
-    """
-    Progress logger for when running models that train via thousands of very short epochs.
-    By default, automatically logs progress 10 times during training.
-
-    Use as:
-    >>> model.fit(...., verbose=0, callbacks=[LessVerboseProgressLogger()])
-    """
-
-    def __init__(self, display_interval=None, display_total=10):
-        super().__init__()
-        self.display_interval = display_interval
-        self.display_total = display_total
-        self.epoch_count = None
-        self.group_start_time = None
-        self.group_start_epoch = None
-        self.epoch_start = None
-
-    def set_params(self, params):
-        self.epoch_count = params['epochs']
-        self.group_start_epoch = -1
-        self.group_start_time = tf.timestamp()
-        if self.display_interval is None:
-            self.display_interval = math.floor(self.epoch_count / self.display_total)
-
-    def on_epoch_begin(self, epoch, logs=None):
-        self.epoch_start = tf.timestamp()
-
-    def on_epoch_end(self, epoch, logs=None):
-        if self.display_interval == 0 or ((epoch + 1) % self.display_interval == 0) or epoch == self.epoch_count - 1:
-            now = tf.timestamp()
-            group_dur = now - self.group_start_time
-            rate = group_dur / (epoch - self.group_start_epoch)
-            self.group_start_time = now
-            self.group_start_epoch = epoch
-
-            print(f'Epoch {epoch + 1:5d} - {self._format_duration(rate)}/epoch:', end=' ')
-            for key, value in logs.items():
-                print(f'{key}: {value:.4f}', end='  ')
-            print()
-
-    @staticmethod
-    def _format_duration(seconds):
-        if seconds < 1e-3:
-            return f"{seconds * 1e6:.2f}µs"
-        elif seconds < 1:
-            return f"{seconds * 1e3:.2f}ms"
-        elif seconds < 60:
-            return f"{seconds:.2f}s"
-        else:
-            mins, secs = divmod(seconds, 60)
-            return f"{int(mins)}m {secs:.2f}s"
-
-
 # Tries to replicate keras.backend.tensorflow.TensorFlowTrainer.fit() (trainer.py, keras 3.5.0)
 # as much as possible.
 def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
@@ -224,6 +170,124 @@ def _gradient_returning_train_step(model, monitoring_model, x, y, sample_weight,
     metrics = model.compute_metrics(x=x, y=y, y_pred=y_pred, sample_weight=sample_weight)
 
     return reported_loss, metrics, trainable_grads, output_grads, layer_outputs
+
+
+class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
+    """
+    Progress logger for when running models that train via thousands of very short epochs.
+    By default, automatically logs progress 10 times during training.
+
+    Use as:
+    >>> model.fit(...., verbose=0, callbacks=[LessVerboseProgressLogger()])
+    """
+
+    def __init__(self, display_interval=None, display_total=10):
+        super().__init__()
+        self.display_interval = display_interval
+        self.display_total = display_total
+        self.epoch_count = None
+        self.group_start_time = None
+        self.group_start_epoch = None
+        self.epoch_start = None
+
+    def set_params(self, params):
+        self.epoch_count = params['epochs']
+        self.group_start_epoch = -1
+        self.group_start_time = tf.timestamp()
+        if self.display_interval is None:
+            self.display_interval = math.floor(self.epoch_count / self.display_total)
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self.epoch_start = tf.timestamp()
+
+    def on_epoch_end(self, epoch, logs=None):
+        if self.display_interval == 0 or ((epoch + 1) % self.display_interval == 0) or epoch == self.epoch_count - 1:
+            now = tf.timestamp()
+            group_dur = now - self.group_start_time
+            rate = group_dur / (epoch - self.group_start_epoch)
+            self.group_start_time = now
+            self.group_start_epoch = epoch
+
+            print(f'Epoch {epoch + 1:5d} - {self._format_duration(rate)}/epoch:', end=' ')
+            for key, value in logs.items():
+                print(f'{key}: {value:.4f}', end='  ')
+            print()
+
+    @staticmethod
+    def _format_duration(seconds):
+        if seconds < 1e-3:
+            return f"{seconds * 1e6:.2f}µs"
+        elif seconds < 1:
+            return f"{seconds * 1e3:.2f}ms"
+        elif seconds < 60:
+            return f"{seconds:.2f}s"
+        else:
+            mins, secs = divmod(seconds, 60)
+            return f"{int(mins)}m {secs:.2f}s"
+
+
+class HistoryStats(tf.keras.callbacks.History):
+    """
+    Extended version of the History callback that collects stats of the loss and metric values
+    over the course of each epoch, rather than only recording the value of the loss at the end
+    the epoch. This allows for more quickly identifying training problems.
+
+    Example:
+    >>> model = tf.keras.models.Sequential([tf.keras.layers.Dense(10)])
+    >>> model.compile(tf.keras.optimizers.SGD(), loss='mse')
+    >>> history = model.fit(np.arange(100).reshape(5, 20), np.zeros(5),
+    ...                     epochs=10, verbose=1, callbacks=[HistoryStats()])
+    >>> print(history.params)
+    {'verbose': 1, 'epochs': 10, 'steps': 1}
+    >>> # check the keys of history object
+    >>> print(history.history.keys())
+    dict_keys(['loss'])
+    >>> print(history.stats.keys())
+    dict_keys(['loss'])
+    """
+
+    def __init__(self, ):
+        super().__init__()
+        self._stats = {}
+        self._raw_stats = {}
+        self.quantiles = [0, 25, 50, 75, 100]
+
+        # temporary storage
+        self._this_epoch_history = None
+
+    @property
+    def stats(self):
+        """
+        Mirrors the built-in `history` property, but contains a dict of pandas dataframes
+        containing percentile data of the loss and metrics each epoch.
+        """
+        # convert and cache
+        # - from: dict (by loss/metric) of list (by epoch) of TF tensors (by percentile)
+        # - to: dict (by loss/metric) of dataframes with shape (epochs, percentiles)
+        if self._stats is None:
+            self._stats = {}
+            for k, tensor_list in self._raw_stats.items():
+                table = np.stack(tensor_list, axis=0)
+                self._stats[k] = pd.DataFrame(table, columns=self.quantiles)
+        return self._stats
+
+    def on_epoch_begin(self, epoch, logs=None):
+        super().on_epoch_begin(epoch, logs)
+        self._this_epoch_history = {}
+
+    def on_train_step_end(self, step, logs=None):
+        super().on_train_step_end(step, logs)
+        logs = logs or {}
+        for k, v in logs.items():
+            self._this_epoch_history.setdefault(k, []).append(v)
+
+    def on_epoch_end(self, epoch, logs=None):
+        super().on_epoch_end(epoch, logs)
+        # compute stats over the epoch
+        for k, values in self._this_epoch_history.items():
+            percentiles = tfp.stats.percentile(values, self.quantiles)
+            self._raw_stats.setdefault(k, []).append(percentiles)
+            self._stats = None  # invalidate cache
 
 
 class BaseGradientCallback:
@@ -709,6 +773,60 @@ class ActivityStatsCollectingMixin:
                 if channel_activity_sum is not None else None
                 for channel_activity_sum, spatial_activity_sum
                 in zip(channel_activity_sums, spatial_activity_sums)]
+
+
+class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
+    """
+    Progress logger for when running models that train via thousands of very short epochs.
+    By default, automatically logs progress 10 times during training.
+
+    Use as:
+    >>> model.fit(...., verbose=0, callbacks=[LessVerboseProgressLogger()])
+    """
+
+    def __init__(self, display_interval=None, display_total=10):
+        super().__init__()
+        self.display_interval = display_interval
+        self.display_total = display_total
+        self.epoch_count = None
+        self.group_start_time = None
+        self.group_start_epoch = None
+        self.epoch_start = None
+
+    def set_params(self, params):
+        self.epoch_count = params['epochs']
+        self.group_start_epoch = -1
+        self.group_start_time = tf.timestamp()
+        if self.display_interval is None:
+            self.display_interval = math.floor(self.epoch_count / self.display_total)
+
+    def on_epoch_begin(self, epoch, logs=None):
+        self.epoch_start = tf.timestamp()
+
+    def on_epoch_end(self, epoch, logs=None):
+        if self.display_interval == 0 or ((epoch + 1) % self.display_interval == 0) or epoch == self.epoch_count - 1:
+            now = tf.timestamp()
+            group_dur = now - self.group_start_time
+            rate = group_dur / (epoch - self.group_start_epoch)
+            self.group_start_time = now
+            self.group_start_epoch = epoch
+
+            print(f'Epoch {epoch + 1:5d} - {self._format_duration(rate)}/epoch:', end=' ')
+            for key, value in logs.items():
+                print(f'{key}: {value:.4f}', end='  ')
+            print()
+
+    @staticmethod
+    def _format_duration(seconds):
+        if seconds < 1e-3:
+            return f"{seconds * 1e6:.2f}µs"
+        elif seconds < 1:
+            return f"{seconds * 1e3:.2f}ms"
+        elif seconds < 60:
+            return f"{seconds:.2f}s"
+        else:
+            mins, secs = divmod(seconds, 60)
+            return f"{int(mins)}m {secs:.2f}s"
 
 
 class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingMixin, ActivityStatsCollectingMixin):
