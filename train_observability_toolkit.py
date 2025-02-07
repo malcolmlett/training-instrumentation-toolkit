@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import tqdm
+from enum import Enum
 
 # tip: to get output shape of a layer:
 #  model.layers[l].compute_output_shape(model.layers[l].input.shape)
@@ -772,6 +773,20 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
         self._filtered_value_variable_indices = None
 
     @property
+    def item_name(self):
+        """
+        Used in plot functions.
+        """
+        return "Variable"
+
+    @property
+    def item_type(self):
+        """
+        Used in plot functions.
+        """
+        return ItemType.VARIABLE
+
+    @property
     def variable_value_stats(self):
         """
         List (by variable) of dataframes containing value stats, or None if not enabled.
@@ -1018,6 +1033,20 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
         self._collected_stats_indices = None
         self._collected_stats_indices_transpose = None  # from model.variable to model.trainable_variable
         self._filtered_value_variable_indices = None
+
+    @property
+    def item_name(self):
+        """
+        Used in plot functions.
+        """
+        return "Gradient"
+
+    @property
+    def item_type(self):
+        """
+        Used in plot functions.
+        """
+        return ItemType.VARIABLE
 
     @property
     def gradient_value_stats(self):
@@ -1277,6 +1306,20 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         self._filtered_value_layer_indices = None
 
     @property
+    def item_name(self):
+        """
+        Used in plot functions.
+        """
+        return "Layer output"
+
+    @property
+    def item_type(self):
+        """
+        Used in plot functions.
+        """
+        return ItemType.LAYER
+
+    @property
     def layer_shapes(self):
         """
         List of shapes of each layer, regardless of what's being collected.
@@ -1529,6 +1572,20 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
         self._layer_shapes = None
         self._collected_stats_indices = None
         self._filtered_value_layer_indices = None
+
+    @property
+    def item_name(self):
+        """
+        Used in plot functions.
+        """
+        return "Output gradient"
+
+    @property
+    def item_type(self):
+        """
+        Used in plot functions.
+        """
+        return ItemType.LAYER
 
     @property
     def needs_output_gradients(self):
@@ -1938,6 +1995,14 @@ def _log_normalize(arr, axis=None):
     tots[tots == 0.0] = 1.0  # avoid divide-by-zero
     scaled = scaled / tots
     return scaled
+
+
+class ItemType(Enum):
+    """
+    Broad categorisation of item data collected by a given callback.
+    """
+    LAYER = 1,
+    VARIABLE = 2
 
 
 def _compute_common_stats_keys():
@@ -2631,57 +2696,47 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
         magnitudes: whether to plot stats for value magnitudes (default),
             or for raw values otherwise.
     """
+    # sanity checks
+    item_type = callback.item_type if hasattr(callback, 'item_type') else None
+    if item_type is None or item_type not in (ItemType.VARIABLE.value, ItemType.LAYER.value):  # reload-safe
+        raise ValueError(f"Callback collects unsupported item type: {item_type}")
+    if callback._magnitude_stats is None:
+        raise ValueError(f"{type(callback).__name__} did not collect value magnitude stats")
 
     # collect data
     iterations = callback.epochs if hasattr(callback, 'epochs') else callback.steps
     iteration_name = 'epoch' if hasattr(callback, 'epochs') else 'step'
     model = callback.model
     model_stats = callback.model_magnitude_stats
-    if callback._magnitude_stats is None:
-        raise ValueError(f"{type(callback).__name__} did not collect value magnitude stats")
-    collected_item_magnitude_stats = [item_stats for item_stats in callback._magnitude_stats if item_stats is not None]
+    item_type = callback.item_type
+    collected_item_magnitude_stats = [item_stats for item_stats in callback._magnitude_stats
+                                      if item_stats is not None]
     if magnitudes:
-        collected_item_stats = [item_stats for item_stats in callback._magnitude_stats if item_stats is not None]
-        collected_item_indices = [i_idx for i_idx, item_stats in enumerate(callback._magnitude_stats) if item_stats is not None]
+        collected_item_stats = [item_stats for item_stats in callback._magnitude_stats
+                                if item_stats is not None]
+        collected_item_indices = [i_idx for i_idx, item_stats in enumerate(callback._magnitude_stats)
+                                  if item_stats is not None]
     else:
         if callback._value_stats is None:
             raise ValueError(f"{type(callback).__name__} did not collect value stats")
         collected_item_stats = [item_stats for item_stats in callback._value_stats if item_stats is not None]
-        collected_item_indices = [i_idx for i_idx, item_stats in enumerate(callback._value_stats) if item_stats is not None]
+        collected_item_indices = [i_idx for i_idx, item_stats in enumerate(callback._value_stats)
+                                  if item_stats is not None]
     num_item_stats = len(collected_item_stats)
 
     # Deal with callback differences
-    title = None
-    item_mode = None
-    item_name = None
-    item_name_upper = None
-    if isinstance(callback, VariableHistoryCallback):
-        item_mode = 'variables'
-        item_name = "variable"
-        item_name_upper = "Variable"
-        trainable_only = callback.trainable_only
-        before_updates = callback.before_updates
-        title = f"All model trainable variables" if trainable_only else "All model variables (incl. non-trainable)"
-        title += ("\n(before updates)" if before_updates else "\n(after updates)")
-    elif isinstance(callback, GradientHistoryCallback):
-        item_mode = 'variables'
-        item_name = "gradient"
-        item_name_upper = "Gradient"
-        title = "All model gradients"
-    elif isinstance(callback, LayerOutputHistoryCallback):
-        item_mode = 'layers'
-        item_name = "output"
-        item_name_upper = "Output"
-        title = "All model outputs"
-    elif isinstance(callback, LayerOutputGradientHistoryCallback):
-        item_mode = 'layers'
-        item_name = "output gradient"
-        item_name_upper = "Output gradient"
-        title = "Al model output gradients"
+    item_name = callback.item_name.lower()
+    item_name_upper = callback.item_name
+    title = f"All model {item_name}"
+    if hasattr(callback, 'trainable_only'):
+        title = f"All model trainable {item_name}" if callback.trainable_only else \
+            f"All model {item_name} (incl. non-trainable)"
+    if hasattr(callback, 'before_updates'):
+        title += ("\n(before updates)" if callback.before_updates else "\n(after updates)")
 
     # Prepare for layer mode
     item_display_names = []
-    if item_mode == 'layers':
+    if item_type.value == ItemType.LAYER.value:  # reload-safe
         layer_shapes = callback.layer_shapes
         item_shapes = [layer_shapes[i_idx] for i_idx in collected_item_indices]
         for l_idx in collected_item_indices:
@@ -2715,7 +2770,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
 
     # layer contributions - high-level summary
     # - for easier visual display in variables mode, uses only the largest variable from each layer
-    if item_mode == 'layers':
+    if item_type.value == ItemType.LAYER.value:  # reload-safe
         filtered_layer_names = [model.layers[l_idx].name for l_idx in collected_item_indices]
         filtered_stats = collected_item_magnitude_stats
     else:
