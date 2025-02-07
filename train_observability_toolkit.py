@@ -3126,23 +3126,27 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin):
         r = 2 + i_idx // grid_width
         c = i_idx % grid_width
         plt.subplot2grid((grid_height, grid_width), (r, c))
-        activation_rates = collected_activity_stats[i_idx]['activation_rate']
-        dead_rates = collected_activity_stats[i_idx]['dead_rate']
-        spatial_dead_rates = collected_activity_stats[i_idx]['spatial_dead_rate']  # TODO only show if there's spatial dims
+        activation_rates = collected_activity_stats[i_idx]['activation_rate'].to_numpy()
+        dead_rates = collected_activity_stats[i_idx]['dead_rate'].to_numpy()
+        spatial_dead_rates = collected_activity_stats[i_idx]['spatial_dead_rate'].to_numpy()
         plt.plot(iterations, activation_rates, label='activation rates', color='tab:blue')
         plt.fill_between(iterations, 0, activation_rates, color='tab:blue', alpha=0.2)
         plt.plot(iterations, dead_rates, label='dead units', color='tab:red')
         plt.fill_between(iterations, 0, dead_rates, color='tab:red', alpha=0.2)
-        plt.plot(iterations, spatial_dead_rates, label='spatial dead units', color='tab:orange', alpha=0.8)
+        plt.plot(iterations, spatial_dead_rates, label='spatial dead units', color='tab:orange', alpha=0.8) # TODO only show if there's spatial dims
         plt.ylim([0.0, 1.0])
         plt.margins(0)
         plt.title(item_display_names[i_idx])
 
         # text overlay
+        # TODO if including spatial, then mention as:
+        #  60% dead channels
+        #  70% dead spatial
+        #  otherwise only as "60% dead"
         plot_width = np.max(iterations)
         final_dead_rate = dead_rates[-1]
         plt.text(plot_width * 0.5, 0.5,
-                 f"{channel_sizes[i_idx]} units\n"
+                 f"{item_shapes[i_idx]}\n"
                  f"{final_dead_rate * 100:.1f}% dead",
                  horizontalalignment='center', verticalalignment='center')
 
