@@ -2775,7 +2775,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
                                       if item_stats is not None]
     collected_item_indices = [i_idx for i_idx, item_stats in enumerate(callback._value_stats)
                               if item_stats is not None]
-    num_item_stats = len(collected_item_value_stats)
+    num_items = len(collected_item_value_stats)
 
     # Deal with callback differences
     item_name = callback.item_name.lower()
@@ -2806,8 +2806,8 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
     # start figure
     # - at least 4 layer plots wide
     # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_item_stats) / 2) * 2)  # nearest even number >= 4
-    grid_height = 2 + math.ceil(num_item_stats / grid_width)
+    grid_width = max(4, round(math.sqrt(num_items) / 2) * 2)  # nearest even number >= 4
+    grid_height = 2 + math.ceil(num_items / grid_width)
     plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
 
     # all-model high-level summary
@@ -2855,7 +2855,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
         plt.text(len(iterations) / 100, placement[f_idx], layer_name, ha="left")
 
     # individual layers or variables
-    for i_idx in range(num_item_stats):
+    for i_idx in range(num_items):
         r = 2 + i_idx // grid_width
         c = i_idx % grid_width
         plt.subplot2grid((grid_height, grid_width), (r, c))
@@ -2893,224 +2893,13 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
     plt.show()
 
 
-def plot_gradient_history(gradient_callback: GradientHistoryCallback, magnitudes=False):
-    """
-    Generates a figure containing a number of plots to visualise gradient stats
-    from a GradientHistoryCallback object.
-
-    Args:
-        gradient_callback: callback populated with gradient stats from training.
-        magnitudes: whether to show raw values or estimate stats for magnitudes.
-            When showing magnitudes, automatically switches to a log plot for easier
-            comparison across differing scales.
-            Forced when the original callback collected magnitude data.
-    """
-    # collect data
-    iterations = gradient_callback.epochs if hasattr(gradient_callback, 'epochs') else gradient_callback.steps
-    iteration_name = 'epoch' if hasattr(gradient_callback, 'epochs') else 'step'
-    needs_conversion_to_magnitudes = magnitudes
-    if gradient_callback.magnitudes:
-        magnitudes = True  # forced
-        needs_conversion_to_magnitudes = False
-    model_stats = gradient_callback.model_stats
-
-    model = gradient_callback.model
-    gradient_stats = gradient_callback.collected_gradient_stats
-    variable_ids = gradient_callback.collected_gradient_stats_indices
-    num_gradient_stats = len(gradient_stats)
-    layer_id_lookup = layer_indices_by_variable(model)
-    variable_shapes = [model.variables[v_idx].shape for v_idx in variable_ids]
-
-    variable_display_names = []
-    for v_idx in variable_ids:
-        layer_id = layer_id_lookup[v_idx]
-        layer_name = model.layers[layer_id].name
-        variable_name = model.variables[v_idx].name
-        variable_display_names.append(f"{layer_name}(#{layer_id})/{variable_name}")
-
-    # start figure
-    # - at least 4 layer plots wide
-    # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_gradient_stats) / 2) * 2)  # nearest even number >= 4
-    grid_height = 2 + math.ceil(num_gradient_stats / grid_width)
-    plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
-
-    # all-model high-level summary
-    plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
-    _plot_add_quantiles(iterations, model_stats)
-    plt.margins(0)
-    plt.yscale('log')
-    plt.title('All model gradients')
-    plt.xlabel(iteration_name)
-    plt.ylabel('mean scale of gradient magnitudes')
-    plt.legend()
-
-    # layer contributions - high-level summary
-    # - for easier visual display uses only the largest variable from each layer
-    # - also only includes trainable layers
-    filtered_layer_metas = []  # list of tuples: (l_idx, layer, var_idx)
-    for l_idx, layer in enumerate(model.layers):
-        biggest_var = None
-        if layer.trainable:
-            for var in layer.variables:
-                if biggest_var is None or tf.size(var) > tf.size(biggest_var):
-                    biggest_var = var
-        if biggest_var is not None:
-            var_idx = _index_by_identity(model.trainable_variables, biggest_var)
-            filtered_layer_metas.append((l_idx, layer, var_idx))
-    filtered_gradients = [gradient_stats[v_idx] for l_idx, layer, v_idx in filtered_layer_metas]
-    scales = get_scales_across_stats_list(filtered_gradients, scale_quantile=75)
-    band_log_scales = _log_normalize(scales, axis=-1)
-
-    plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
-    plt.stackplot(iterations, band_log_scales.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
-    plt.margins(0)
-    plt.title('Layer comparison')
-    plt.xlabel(iteration_name)
-    plt.ylabel('Gradient scale log-proportion')
-    # layer labels placed on centre of layer band on left-hand side
-    x_loc = round(band_log_scales.shape[0] / 100)
-    placement = band_log_scales[x_loc, :] * 0.5
-    placement[1:] += np.cumsum(band_log_scales[0, :])[0:-1]
-    for f_idx in range(len(filtered_layer_metas)):
-        l_idx, layer, v_idx = filtered_layer_metas[f_idx]
-        plt.text(len(iterations) / 100, placement[f_idx], layer.name, ha="left")
-
-    # individual layers
-    for v_idx in range(num_gradient_stats):
-        r = 2 + v_idx // grid_width
-        c = v_idx % grid_width
-        plt.subplot2grid((grid_height, grid_width), (r, c))
-        data = gradient_stats[v_idx]
-        if needs_conversion_to_magnitudes:
-            # approximate stats over magnitudes
-            data = np.abs(data.to_numpy())
-            data = np.sort(data, axis=-1)
-            data = pd.DataFrame(data, columns=gradient_stats[v_idx].columns)
-        _plot_add_quantiles(iterations, data)
-        plt.margins(0)
-        plt.yscale('log' if magnitudes else 'linear')
-        if c == 0:
-            plt.ylabel('log-magnitude' if magnitudes else 'value')
-        plt.title(variable_display_names[v_idx])
-
-        # text overlay
-        plot_min = np.min(data.to_numpy())
-        plot_max = np.max(data.to_numpy())
-        plot_width = np.max(iterations)
-        plot_mid = (plot_min + plot_max) * 0.5
-        if variable_shapes:
-            plt.text(plot_width * 0.5, plot_mid,
-                     f"{variable_shapes[v_idx]}",
-                     horizontalalignment='center', verticalalignment='center')
-
-    plt.show()
-
-
-def plot_output_gradient_history(gradient_callback: LayerOutputGradientHistoryCallback, magnitudes=False):
-    """
-    Generates a figure containing a number of plots to visualise layer output gradient stats
-    from a LayerOutputGradientHistoryCallback object.
-
-    Args:
-        gradient_callback: callback populated with gradient stats from training.
-        magnitudes: whether to show raw values or estimate stats for magnitudes.
-            When showing magnitudes, automatically switches to a log plot for easier
-            comparison across differing scales.
-            Forced when the original callback collected magnitude data.
-    """
-    # collect data
-    iterations = gradient_callback.epochs if hasattr(gradient_callback, 'epochs') else gradient_callback.steps
-    iteration_name = 'epoch' if hasattr(gradient_callback, 'epochs') else 'step'
-    needs_conversion_to_magnitudes = magnitudes
-    if gradient_callback.magnitudes:
-        magnitudes = True  # forced
-        needs_conversion_to_magnitudes = False
-    model = gradient_callback.model
-    model_stats = gradient_callback.model_stats
-    layer_stats = gradient_callback.collected_layer_stats
-    layer_ids = gradient_callback.collected_layer_stats_indices
-    layer_names = [model.layers[l_idx].name for l_idx in layer_ids]
-    layer_shapes = gradient_callback.layer_shapes
-
-    num_layer_stats = len(layer_stats)
-
-    # start figure
-    # - at least 4 layer plots wide
-    # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_layer_stats) / 2) * 2)  # nearest even number >= 4
-    grid_height = 2 + math.ceil(num_layer_stats / grid_width)
-    plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
-
-    # all-model high-level summary
-    plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
-    _plot_add_quantiles(iterations, model_stats)
-    plt.margins(0)
-    plt.yscale('log')
-    plt.title('All model output gradients')
-    plt.xlabel(iteration_name)
-    plt.ylabel('mean scale of gradient magnitudes')
-    plt.legend()
-
-    # layer contributions - high-level summary
-    scales = get_scales_across_stats_list(layer_stats, scale_quantile=75)
-    band_log_scales = _log_normalize(scales, axis=-1)
-
-    plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
-    plt.stackplot(iterations, band_log_scales.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
-    plt.margins(0)
-    plt.title('Layer comparison')
-    plt.xlabel(iteration_name)
-    plt.ylabel('Gradient scale log-proportion')
-    # layer labels placed on centre of layer band on left-hand side
-    x_loc = round(band_log_scales.shape[0] / 100)
-    placement = band_log_scales[x_loc, :] * 0.5
-    placement[1:] += np.cumsum(band_log_scales[0, :])[0:-1]
-    for s_idx in range(len(layer_stats)):
-        l_idx = layer_ids[s_idx]
-        layer = model.layers[l_idx]
-        plt.text(len(iterations) / 100, placement[s_idx], layer.name, ha="left")
-
-    # individual layers
-    for s_idx in range(num_layer_stats):
-        r = 2 + s_idx // grid_width
-        c = s_idx % grid_width
-        plt.subplot2grid((grid_height, grid_width), (r, c))
-        data = layer_stats[s_idx]
-        if needs_conversion_to_magnitudes:
-            # approximate stats over magnitudes
-            data = np.abs(data.to_numpy())
-            data = np.sort(data, axis=-1)
-            data = pd.DataFrame(data, columns=layer_stats[s_idx].columns)
-        _plot_add_quantiles(iterations, data)
-        plt.margins(0)
-        plt.yscale('log' if magnitudes else 'linear')
-        if c == 0:
-            plt.ylabel('log-magnitude' if magnitudes else 'value')
-        plt.title(layer_names[s_idx])
-        plt.title(f"layer {layer_ids[s_idx]}:\n{layer_names[s_idx]}")
-
-        # text overlay
-        plot_min = np.min(data.to_numpy())
-        plot_max = np.max(data.to_numpy())
-        plot_width = np.max(iterations)
-        plot_mid = (plot_min + plot_max) * 0.5
-        if layer_shapes:
-            plt.text(plot_width * 0.5, plot_mid,
-                     f"{layer_shapes[s_idx]}",
-                     horizontalalignment='center', verticalalignment='center')
-
-    plt.show()
-
-
-# TODO change to be agnostic to the callback, so long as it uses the _ActivityStatsCollectingCapability
-def plot_activity_rate_history(activity_callback):
+def plot_activity_history(callback: ActivityStatsCollectingMixin):
     """
     Plots a high-level summary of unit activity rates across the entire model
     and across each layer.
 
     Args:
-        activity_callback: instance of ActivityHistoryCollback or ActivityRateMeasuringCallback after training.
+        callback: any of "activity stats collecting" callbacks in this module
 
     Generated figure is of form:
     - top row (two columns):
@@ -3119,21 +2908,54 @@ def plot_activity_rate_history(activity_callback):
     - remaining rows (arranged approximately as a square grid)
         - per-layer unit activation rates
     """
+    # sanity checks
+    item_type = callback.item_type if hasattr(callback, 'item_type') else None
+    if item_type is None or item_type.value not in (ItemType.VARIABLE.value, ItemType.LAYER.value):  # reload-safe
+        raise ValueError(f"Callback collects unsupported item type: {item_type}")
+    if callback._magnitude_stats is None:
+        raise ValueError(f"{type(callback).__name__} did not collect value magnitude stats")
+    if callback._value_stats is None:
+        raise ValueError(f"{type(callback).__name__} did not collect value stats")
+
     # collect data
-    iterations = activity_callback.epochs if hasattr(activity_callback, 'epochs') else activity_callback.steps
-    iteration_name = 'epoch' if hasattr(activity_callback, 'epochs') else 'step'
-    num_layers = len(activity_callback.layer_stats)
-    model = activity_callback.model
-    model_stats = activity_callback.model_stats
-    layer_stats = activity_callback.layer_stats
-    layer_names = [layer.name for layer in model.layers]
-    channel_sizes = [shape[-1] for shape in activity_callback.layer_shapes]
+    iterations = callback.epochs if hasattr(callback, 'epochs') else callback.steps
+    iteration_name = 'epoch' if hasattr(callback, 'epochs') else 'step'
+
+    model = callback.model
+    model_stats = callback.model_activity_stats
+    collected_activity_stats = callback._activity_stats
+    collected_item_indices = [i_idx for i_idx, item_stats in enumerate(callback._activity_stats)
+                              if item_stats is not None]
+    num_items = len(collected_activity_stats)
+
+    # Deal with callback differences
+    item_name = callback.item_name.lower()
+    item_name_upper = callback.item_name
+    item_type_name = 'layers' if item_type.value == ItemType.LAYER.value else 'variables'
+    title = f"{item_name_upper} unit activation rates across {item_type_name}"
+
+    # Prepare for layer mode
+    item_display_names = []
+    if item_type.value == ItemType.LAYER.value:  # reload-safe
+        item_shapes = [callback.layer_shapes[i_idx] for i_idx in collected_item_indices]
+        for l_idx in collected_item_indices:
+            layer_name = model.layers[l_idx].name
+            item_display_names.append(f"layer {l_idx}:\n{layer_name}")
+    else:
+        item_shapes = [model.variables[v_idx].shape for v_idx in collected_item_indices]
+        layer_id_lookup = layer_indices_by_variable(model)
+        for v_idx in collected_item_indices:
+            l_idx = layer_id_lookup[v_idx]
+            layer_name = model.layers[l_idx].name
+            variable_name = model.variables[v_idx].name
+            item_display_names.append(f"{layer_name}(#{l_idx})/{variable_name}")
+    channel_sizes = [shape[-1] for shape in item_shapes]
 
     # start figure
     # - at least 4 layer plots wide
     # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_layers) / 2) * 2)  # nearest even number >= 4
-    grid_height = 2 + math.ceil(num_layers / grid_width)
+    grid_width = max(4, round(math.sqrt(num_items) / 2) * 2)  # nearest even number >= 4
+    grid_height = 2 + math.ceil(num_items / grid_width)
     plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
 
     # all-model high-level summary
@@ -3144,11 +2966,12 @@ def plot_activity_rate_history(activity_callback):
                      model_stats['max_activation_rate'], color='tab:blue', alpha=0.2,
                      label='min/max range')
     plt.ylim([0.0, 1.1])
-    plt.title("Unit activation rates across layers")
+    plt.title(title)
     plt.xlabel(iteration_name)
     plt.ylabel('fraction of units')
     plt.legend()
 
+    # Death rate plot
     plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
     plt.plot(iterations, model_stats['mean_dead_rate'], label='mean dead rate', color='tab:red')
     plt.fill_between(iterations, model_stats['min_dead_rate'], model_stats['max_dead_rate'],
@@ -3159,30 +2982,32 @@ def plot_activity_rate_history(activity_callback):
     plt.ylabel('fraction of units')
     plt.legend()
 
-    # individual layers
-    for l_idx in range(num_layers):
-        r = 2 + l_idx // grid_width
-        c = l_idx % grid_width
+    # individual items
+    for i_idx in range(num_items):
+        r = 2 + i_idx // grid_width
+        c = i_idx % grid_width
         plt.subplot2grid((grid_height, grid_width), (r, c))
-        dead_rates = layer_stats[l_idx]['dead_rate']
-        activation_rates = layer_stats[l_idx]['activation_rate']
+        activation_rates = collected_activity_stats[i_idx]['activation_rate']
+        dead_rates = collected_activity_stats[i_idx]['dead_rate']
+        spatial_dead_rates = collected_activity_stats[i_idx]['spatial_dead_rate']  # TODO only show if there's spatial dims
         plt.plot(iterations, activation_rates, label='activation rates', color='tab:blue')
         plt.fill_between(iterations, 0, activation_rates, color='tab:blue', alpha=0.2)
         plt.plot(iterations, dead_rates, label='dead units', color='tab:red')
         plt.fill_between(iterations, 0, dead_rates, color='tab:red', alpha=0.2)
+        plt.plot(iterations, spatial_dead_rates, label='spatial dead units', color='tab:orange', alpha=0.8)
         plt.ylim([0.0, 1.0])
         plt.margins(0)
-        plt.title(f"layer {l_idx}:\n{layer_names[l_idx]}" if model is not None else f"layer {l_idx}")
+        plt.title(item_display_names[i_idx])
 
         # text overlay
         plot_width = np.max(iterations)
         final_dead_rate = dead_rates[-1]
         plt.text(plot_width * 0.5, 0.5,
-                 f"{channel_sizes[l_idx]} units\n"
+                 f"{channel_sizes[i_idx]} units\n"
                  f"{final_dead_rate * 100:.1f}% dead",
                  horizontalalignment='center', verticalalignment='center')
 
-        if l_idx == 0:
+        if i_idx == 0:
             plt.legend()
 
     plt.show()
