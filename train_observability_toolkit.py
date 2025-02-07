@@ -2760,7 +2760,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
     """
     # sanity checks
     item_type = callback.item_type if hasattr(callback, 'item_type') else None
-    if item_type is None or item_type not in (ItemType.VARIABLE.value, ItemType.LAYER.value):  # reload-safe
+    if item_type is None or item_type.value not in (ItemType.VARIABLE.value, ItemType.LAYER.value):  # reload-safe
         raise ValueError(f"Callback collects unsupported item type: {item_type}")
     if callback._magnitude_stats is None:
         raise ValueError(f"{type(callback).__name__} did not collect value magnitude stats")
@@ -2878,10 +2878,9 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
         plt.title(item_display_names[i_idx])
 
         # text overlay
-        plot_min = np.min(data.to_numpy())
-        plot_max = np.max(data.to_numpy())
         plot_width = np.max(iterations)
-        plot_mid = (plot_min + plot_max) * 0.5
+        plot_range = np.array(plt.gca().get_ylim())
+        plot_mid = np.exp(np.mean(np.log(plot_range))) if magnitudes else np.mean(plot_range)
         if item_shapes:
             plt.text(plot_width * 0.5, plot_mid,
                      f"{item_shapes[i_idx]}",
