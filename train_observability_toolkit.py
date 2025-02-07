@@ -2619,48 +2619,88 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
     return res
 
 
-def plot_variable_history(variable_callback: VariableHistoryCallback, magnitudes=False):
+def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
     """
-    Generates a figure containing a number of plots to visualise variable stats
-    from a VariableHistoryCallback object.
+    Generates a figure containing a number of plots to visualise value or magnitude stats collected
+    by one of the callbacks in this module.
+
+    Uses a log plot for magnitudes, and a linear plot for raw values.
 
     Args:
-        variable_callback: callback populated with variable stats from training.
-        magnitudes: whether to show raw values or estimate stats for magnitudes.
-            When showing magnitudes, automatically switches to a log plot for easier
-            comparison across differing scales.
-            Forced when the original callback collected magnitude data.
+        callback: any of "value stats collecting" callbacks in this module
+        magnitudes: whether to plot stats for value magnitudes (default),
+            or for raw values otherwise.
     """
 
     # collect data
-    iterations = variable_callback.epochs if hasattr(variable_callback, 'epochs') else variable_callback.steps
-    iteration_name = 'epoch' if hasattr(variable_callback, 'epochs') else 'step'
-    trainable_only = variable_callback.trainable_only
-    needs_conversion_to_magnitudes = magnitudes
-    if variable_callback.magnitudes:
-        magnitudes = True  # forced
-        needs_conversion_to_magnitudes = False
-    model_stats = variable_callback.model_stats
+    iterations = callback.epochs if hasattr(callback, 'epochs') else callback.steps
+    iteration_name = 'epoch' if hasattr(callback, 'epochs') else 'step'
+    model = callback.model
+    model_stats = callback._model_magnitude_stats
+    if callback._magnitude_stats is None:
+        raise ValueError(f"{type(callback).__name__} did not collect value magnitude stats")
+    collected_item_magnitude_stats = [item_stats for item_stats in callback._magnitude_stats if item_stats is not None]
+    if magnitudes:
+        collected_item_stats = [item_stats for item_stats in callback._magnitude_stats if item_stats is not None]
+        collected_item_indices = [i_idx for i_idx, item_stats in enumerate(callback._magnitude_stats) if item_stats is not None]
+    else:
+        if callback._value_stats is None:
+            raise ValueError(f"{type(callback).__name__} did not collect value stats")
+        collected_item_stats = [item_stats for item_stats in callback._value_stats if item_stats is not None]
+        collected_item_indices = [i_idx for i_idx, item_stats in enumerate(callback._value_stats) if item_stats is not None]
+    num_item_stats = len(collected_item_stats)
 
-    model = variable_callback.model
-    variable_stats = variable_callback.collected_variable_value_stats
-    variable_ids = variable_callback.collected_variable_stats_indices
-    num_variable_stats = len(variable_stats)
-    layer_id_lookup = layer_indices_by_variable(model)
-    variable_shapes = [model.variables[v_idx].shape for v_idx in variable_ids]
+    # Deal with callback differences
+    title = None
+    item_mode = None
+    item_name = None
+    item_name_upper = None
+    if isinstance(callback, VariableHistoryCallback):
+        item_mode = 'variables'
+        item_name = "variable"
+        item_name_upper = "Variable"
+        trainable_only = callback.trainable_only
+        before_updates = callback.before_updates
+        title = f"All model trainable variables" if trainable_only else "All model variables (incl. non-trainable)"
+        title += ("\n(before updates)" if before_updates else "\n(after updates)")
+    elif isinstance(callback, GradientHistoryCallback):
+        item_mode = 'variables'
+        item_name = "gradient"
+        item_name_upper = "Gradient"
+        title = "All model gradients"
+    elif isinstance(callback, LayerOutputHistoryCallback):
+        item_mode = 'layers'
+        item_name = "output"
+        item_name_upper = "Output"
+        title = "All model outputs"
+    elif isinstance(callback, LayerOutputGradientHistoryCallback):
+        item_mode = 'layers'
+        item_name = "output gradient"
+        item_name_upper = "Output gradient"
+        title = "Al model output gradients"
 
-    variable_display_names = []
-    for v_idx in variable_ids:
-        layer_id = layer_id_lookup[v_idx]
-        layer_name = model.layers[layer_id].name
-        variable_name = model.variables[v_idx].name
-        variable_display_names.append(f"{layer_name}(#{layer_id})/{variable_name}")
+    # Prepare for layer mode
+    item_display_names = []
+    if item_mode == 'layers':
+        layer_shapes = callback.layer_shapes
+        item_shapes = [layer_shapes[i_idx] for i_idx in collected_item_indices]
+        for l_idx in collected_item_indices:
+            layer_name = model.layers[l_idx].name
+            item_display_names.append(f"layer {l_idx}:\n{layer_name}")
+    else:
+        item_shapes = [model.variables[v_idx].shape for v_idx in collected_item_indices]
+        layer_id_lookup = layer_indices_by_variable(model)
+        for v_idx in collected_item_indices:
+            l_idx = layer_id_lookup[v_idx]
+            layer_name = model.layers[l_idx].name
+            variable_name = model.variables[v_idx].name
+            item_display_names.append(f"{layer_name}(#{l_idx})/{variable_name}")
 
     # start figure
     # - at least 4 layer plots wide
     # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_variable_stats) / 2) * 2)  # nearest even number >= 4
-    grid_height = 2 + math.ceil(num_variable_stats / grid_width)
+    grid_width = max(4, round(math.sqrt(num_item_stats) / 2) * 2)  # nearest even number >= 4
+    grid_height = 2 + math.ceil(num_item_stats / grid_width)
     plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
 
     # all-model high-level summary
@@ -2668,27 +2708,30 @@ def plot_variable_history(variable_callback: VariableHistoryCallback, magnitudes
     _plot_add_quantiles(iterations, model_stats)
     plt.margins(0)
     plt.yscale('log')
-    plt.title(('All model trainable variables' if trainable_only else 'All model variables (incl. non-trainable)') +
-              ('\n(before updates)' if 'before_updates' else '\n(after updates)'))
+    plt.title(title)
     plt.xlabel(iteration_name)
-    plt.ylabel('mean scale of variable magnitudes')
+    plt.ylabel(f"mean scale of {item_name} magnitudes")
     plt.legend()
 
     # layer contributions - high-level summary
-    # - for easier visual display uses only the largest variable from each layer
-    # - also only includes trainable layers
-    filtered_layer_metas = []  # list of tuples: (l_idx, layer, var_idx)
-    for l_idx, layer in enumerate(model.layers):
-        biggest_var = None
-        if layer.trainable:
-            for var in layer.variables:
-                if biggest_var is None or tf.size(var) > tf.size(biggest_var):
-                    biggest_var = var
-        if biggest_var is not None:
-            var_idx = _index_by_identity(model.trainable_variables, biggest_var)
-            filtered_layer_metas.append((l_idx, layer, var_idx))
-    filtered_variables = [variable_stats[v_idx] for l_idx, layer, v_idx in filtered_layer_metas]
-    scales = get_scales_across_stats_list(filtered_variables, scale_quantile=75)
+    # - for easier visual display in variables mode, uses only the largest variable from each layer
+    if item_mode == 'layers':
+        filtered_layer_names = [model.layers[l_idx] for l_idx in collected_item_indices]
+        filtered_stats = collected_item_magnitude_stats
+    else:
+        # tuples of: (v_idx of biggest variable, size of biggest variable)
+        layer_metas = [(None, None)] * len(model.layers)
+        layer_id_lookup = layer_indices_by_variable(model)
+        for v_idx in collected_item_indices:
+            l_idx = layer_id_lookup[v_idx]
+            variable = model.variables[v_idx]
+            biggest_v_idx, biggest_size = layer_metas[l_idx]
+            if biggest_size is None or tf.size(variable) > biggest_size:
+                layer_metas[l_idx] = v_idx, tf.size(variable)
+        filtered_layer_names =\
+            [model.layers[l_idx] for l_idx, (v_idx, _) in enumerate(layer_metas) if v_idx is not None]
+        filtered_stats = [collected_item_magnitude_stats[v_idx] for v_idx, _ in layer_metas if v_idx is not None]
+    scales = get_scales_across_stats_list(filtered_stats, scale_quantile=50)
     band_log_scales = _log_normalize(scales, axis=-1)
 
     plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
@@ -2696,41 +2739,35 @@ def plot_variable_history(variable_callback: VariableHistoryCallback, magnitudes
     plt.margins(0)
     plt.title('Layer comparison')
     plt.xlabel(iteration_name)
-    plt.ylabel('Variable scale log-proportion')
-    # layer labels placed on centre of layer band on left-hand side
+    plt.ylabel(f"{item_name_upper} scale log-proportion")
+    # layer labels placed on mid-height of layer band on left-hand side
     x_loc = round(band_log_scales.shape[0] / 100)
     placement = band_log_scales[x_loc, :] * 0.5
     placement[1:] += np.cumsum(band_log_scales[0, :])[0:-1]
-    for f_idx in range(len(filtered_layer_metas)):
-        l_idx, layer, v_idx = filtered_layer_metas[f_idx]
-        plt.text(len(iterations) / 100, placement[f_idx], layer.name, ha="left")
+    for f_idx, layer_name in enumerate(filtered_layer_names):
+        plt.text(len(iterations) / 100, placement[f_idx], layer_name, ha="left")
 
     # individual layers or variables
-    for v_idx in range(num_variable_stats):
-        r = 2 + v_idx // grid_width
-        c = v_idx % grid_width
+    for i_idx in range(num_item_stats):
+        r = 2 + i_idx // grid_width
+        c = i_idx % grid_width
         plt.subplot2grid((grid_height, grid_width), (r, c))
-        data = variable_stats[v_idx]
-        if needs_conversion_to_magnitudes:
-            # approximate stats over magnitudes
-            data = np.abs(data.to_numpy())
-            data = np.sort(data, axis=-1)
-            data = pd.DataFrame(data, columns=variable_stats[v_idx].columns)
+        data = collected_item_stats[i_idx]
         _plot_add_quantiles(iterations, data)
         plt.margins(0)
         plt.yscale('log' if magnitudes else 'linear')
         if c == 0:
             plt.ylabel('log-magnitude' if magnitudes else 'value')
-        plt.title(variable_display_names[v_idx])
+        plt.title(item_display_names[i_idx])
 
         # text overlay
         plot_min = np.min(data.to_numpy())
         plot_max = np.max(data.to_numpy())
         plot_width = np.max(iterations)
         plot_mid = (plot_min + plot_max) * 0.5
-        if variable_shapes:
+        if item_shapes:
             plt.text(plot_width * 0.5, plot_mid,
-                     f"{variable_shapes[v_idx]}",
+                     f"{item_shapes[i_idx]}",
                      horizontalalignment='center', verticalalignment='center')
 
     plt.show()
