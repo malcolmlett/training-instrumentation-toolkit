@@ -751,10 +751,12 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
                 If omitted, this callback collects only stats.
                 See _normalize_collection_sets_for_variables() for format details.
         """
-        # Callback doesn't honour python 3's MRO, so init mixins directly
-        ValueStatsCollectingMixin.__init__(self, value_stats=value_stats, value_stats_quantiles=value_stats_quantiles)
-        ActivityStatsCollectingMixin.__init__(self, data_format='SC', activity_stats=activity_stats)
-        super().__init__()
+        # Callback doesn't honour python 3's MRO, but the mixins do, do call first mixin directly and
+        # it'll call all the rest. Also, init base Callback class via python 2 syntax to prevent regressions
+        # if Callback updated to honour MRO.
+        ValueStatsCollectingMixin.__init__(self, value_stats=value_stats, value_stats_quantiles=value_stats_quantiles,
+                                           data_format='SC', activity_stats=activity_stats)
+        tf.keras.callbacks.Callback.__init__(self)
         self.per_step = per_step
         self.before_updates = before_updates
         self.trainable_only = trainable_only
@@ -995,8 +997,7 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
             (only available if per_step is True)
     """
 
-    def __init__(self, per_step=False, value_stats_quantiles=None, value_stats=True, activity_stats=True,
-                 collection_sets=None):
+    def __init__(self, per_step=False, collection_sets=None, *args, **kwargs):
         """
         Args:
             per_step: bool. Whether to collect per-step stats and raw values, or per-epoch otherwise.
@@ -1016,9 +1017,7 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
               See _normalize_collection_sets_for_variables() for format details.
         """
         # Callback doesn't honour python 3's MRO, so init mixins directly
-        ValueStatsCollectingMixin.__init__(self, value_stats=value_stats, value_stats_quantiles=value_stats_quantiles)
-        ActivityStatsCollectingMixin.__init__(self, data_format='SC', activity_stats=activity_stats)
-        super().__init__()
+        super().__init__(data_format='SC', *args, **kwargs)
         self.per_step = per_step
         self.collection_sets = collection_sets
 
@@ -1288,7 +1287,6 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
                 If omitted, this callback collects only stats.
                 See _normalize_collection_sets_for_layers() for format details.
         """
-
         super().__init__(data_format='BSC', *args, **kwargs)
         self.per_step = per_step
         self.collection_sets = collection_sets
