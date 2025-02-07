@@ -232,6 +232,10 @@ class HistoryStats(tf.keras.callbacks.History):
     over the course of each epoch, rather than only recording the value of the loss at the end
     the epoch. This allows for more quickly identifying training problems.
 
+    Other properties:
+        - step: list of step numbers corresponding to results from step_history
+        - step_history: like `history` but added to for each step
+
     Example:
     >>> model = tf.keras.models.Sequential([tf.keras.layers.Dense(10)])
     >>> model.compile(tf.keras.optimizers.SGD(), loss='mse')
@@ -246,13 +250,28 @@ class HistoryStats(tf.keras.callbacks.History):
     dict_keys(['loss'])
     """
 
-    def __init__(self, ):
+    def __init__(self, keep_per_step=False, quantiles=None):
+        """
+        Args:
+            keep_per_step: bool.
+                Whether to additionally keep raw metrics on a per_step basis.
+            quantiles: list of int/float.
+                List of quantiles to collect percentile data for, in range 0 .. 100.
+                Default: [0, 25, 50, 75, 100]
+        """
         super().__init__()
-        self._stats = {}
-        self._raw_stats = {}
-        self.quantiles = [0, 25, 50, 75, 100]
+        self.keep_per_step = keep_per_step
+        self.quantiles = quantiles or [0, 25, 50, 75, 100]
+        self._stats = None
+        if keep_per_step:
+            self.step = []
+            self.step_history = {}
+        else:
+            self.step = None
+            self.step_history = None
 
         # temporary storage
+        self._raw_stats = {}
         self._this_epoch_history = None
 
     @property
@@ -280,6 +299,8 @@ class HistoryStats(tf.keras.callbacks.History):
         logs = logs or {}
         for k, v in logs.items():
             self._this_epoch_history.setdefault(k, []).append(v)
+            if self.step_history is not None:
+                self.step_history.setdefault(k, []).append(v)
 
     def on_epoch_end(self, epoch, logs=None):
         super().on_epoch_end(epoch, logs)
