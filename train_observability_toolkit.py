@@ -2882,10 +2882,11 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
             ax2.set_ylim([-1.0, +1.0])
             ax2.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1))
             ax2.plot(balances, color="tab:orange", linewidth=1, alpha=0.3)
-            #ax2.fill_between(iterations, balances, 0, where=(balances > 0), color="tab:orange", alpha=0.1)
-            #ax2.fill_between(iterations, balances, 0, where=(balances < 0), color="tab:orange", alpha=0.1)
+            # cool but too distracting:
+            #  - ax2.fill_between(iterations, balances, 0, where=(balances > 0), color="tab:orange", alpha=0.1)
+            #  - ax2.fill_between(iterations, balances, 0, where=(balances < 0), color="tab:orange", alpha=0.1)
             if c == (grid_width-1):
-              ax2.set_ylabel('Pos/neg balance', color="tab:orange")
+                ax2.set_ylabel('pos/neg balance', color="tab:orange")
 
         # text overlay
         plot_width = np.max(iterations)
