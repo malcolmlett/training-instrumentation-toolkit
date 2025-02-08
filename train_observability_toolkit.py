@@ -716,9 +716,11 @@ class ActivityStatsCollectingMixin:
         """
         if self._activity_stats is not None:
             for activity_sum in self._channel_activity_sums:
-                activity_sum.assign(tf.zeros_like(activity_sum))
+                if activity_sum is not None:
+                    activity_sum.assign(tf.zeros_like(activity_sum))
             for activity_sum in self._spatial_activity_sums:
-                activity_sum.assign(tf.zeros_like(activity_sum))
+                if activity_sum is not None:
+                    activity_sum.assign(tf.zeros_like(activity_sum))
 
     # TODO to support live-monitoring, should also compute and append model stats
     def _collect_activity_stats(self, num_batches):
@@ -2918,7 +2920,6 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
 
     # Deal with callback differences
     item_name = callback.item_name.lower()
-    item_name_upper = callback.item_name
     title = f"All model {item_name}s"
     if hasattr(callback, 'trainable_only'):
         title = f"All model trainable {item_name}s" if callback.trainable_only else \
@@ -3071,10 +3072,8 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin):
     num_items = len(collected_activity_stats)
 
     # Deal with callback differences
-    item_name = callback.item_name.lower()
     item_name_upper = callback.item_name
     item_type_name = 'layers' if item_type.value == ItemType.LAYER.value else 'variables'
-    title = f"{item_name_upper} unit activation rates across {item_type_name}"
 
     # Prepare for layer mode
     item_display_names = []
@@ -3110,21 +3109,25 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin):
                      model_stats['max_activation_rate'], color='tab:blue', alpha=0.2,
                      label='min/max range')
     plt.ylim([0.0, 1.1])
-    plt.title(title)
+    plt.title(f"{item_name_upper} unit activation rates over all {item_type_name}")
     plt.xlabel(iteration_name)
     plt.ylabel('fraction of units')
     plt.legend()
 
     # Death rate plot
     plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
+    plt.title(f"Dead unit rates over all {item_type_name}")
+    plt.xlabel(iteration_name)
+    plt.ylabel('fraction of units')
+    plt.ylim([0.0, 1.1])
+    plt.legend()
     plt.plot(iterations, model_stats['mean_dead_rate'], label='mean dead rate', color='tab:red')
     plt.fill_between(iterations, model_stats['min_dead_rate'], model_stats['max_dead_rate'],
                      color='tab:red', alpha=0.2, label='min/max range')
-    plt.ylim([0.0, 1.1])
-    plt.title("Dead unit rates across layers")
-    plt.xlabel(iteration_name)
-    plt.ylabel('fraction of units')
-    plt.legend()
+    if has_spatial_shapes:
+        plt.plot(iterations, model_stats['mean_spatial_dead_rate'], label='mean spatial dead rate', color='tab:orange')
+        plt.fill_between(iterations, model_stats['min_spatial_dead_rate'], model_stats['max_spatial_dead_rate'],
+                         color='tab:orange', alpha=0.2, label='min/max range')
 
     # individual items
     for i_idx in range(num_items):
