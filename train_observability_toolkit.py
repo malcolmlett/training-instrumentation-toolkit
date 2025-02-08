@@ -3077,18 +3077,20 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin):
     item_display_names = []
     if item_type.value == ItemType.LAYER.value:  # reload-safe
         item_shapes = [callback.layer_shapes[i_idx] for i_idx in collected_item_indices]
+        spatial_shapes = [shape[1:-1] for shape in item_shapes]  # assume: (batch, ..spatial_dims.., channels)
         for l_idx in collected_item_indices:
             layer_name = model.layers[l_idx].name
             item_display_names.append(f"layer {l_idx}:\n{layer_name}")
     else:
         item_shapes = [model.variables[v_idx].shape for v_idx in collected_item_indices]
+        spatial_shapes = [shape[0:-1] for shape in item_shapes]  # assume: (..spatial_dims.., channels)
         layer_id_lookup = layer_indices_by_variable(model)
         for v_idx in collected_item_indices:
             l_idx = layer_id_lookup[v_idx]
             layer_name = model.layers[l_idx].name
             variable_name = model.variables[v_idx].name
             item_display_names.append(f"{layer_name}(#{l_idx})/{variable_name}")
-    channel_sizes = [shape[-1] for shape in item_shapes]
+    has_spatial_shapes = any([len(shape) > 0 for shape in spatial_shapes])
 
     # start figure
     # - at least 4 layer plots wide
@@ -3123,35 +3125,42 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin):
 
     # individual items
     for i_idx in range(num_items):
-        r = 2 + i_idx // grid_width
-        c = i_idx % grid_width
-        plt.subplot2grid((grid_height, grid_width), (r, c))
         activation_rates = collected_activity_stats[i_idx]['activation_rate'].to_numpy()
         dead_rates = collected_activity_stats[i_idx]['dead_rate'].to_numpy()
         spatial_dead_rates = collected_activity_stats[i_idx]['spatial_dead_rate'].to_numpy()
+        final_dead_rate = dead_rates[-1]
+        final_spatial_dead_rate = spatial_dead_rates[-1]
+
+        r = 2 + i_idx // grid_width
+        c = i_idx % grid_width
+        plt.subplot2grid((grid_height, grid_width), (r, c))
         plt.plot(iterations, activation_rates, label='activation rates', color='tab:blue')
         plt.fill_between(iterations, 0, activation_rates, color='tab:blue', alpha=0.2)
         plt.plot(iterations, dead_rates, label='dead units', color='tab:red')
         plt.fill_between(iterations, 0, dead_rates, color='tab:red', alpha=0.2)
-        plt.plot(iterations, spatial_dead_rates, label='spatial dead units', color='tab:orange', alpha=0.8) # TODO only show if there's spatial dims
+        if len(spatial_shapes[i_idx]) > 0 or (i_idx == 0 and has_spatial_shapes):
+            # only include if the layer has spatial dims,
+            # and include in first plot because it's the only one with a legend
+            plt.plot(iterations, spatial_dead_rates, label='spatial dead units', color='tab:orange', alpha=0.8)
         plt.ylim([0.0, 1.0])
         plt.margins(0)
         plt.title(item_display_names[i_idx])
-
-        # text overlay
-        # TODO if including spatial, then mention as:
-        #  60% dead channels
-        #  70% dead spatial
-        #  otherwise only as "60% dead"
-        plot_width = np.max(iterations)
-        final_dead_rate = dead_rates[-1]
-        plt.text(plot_width * 0.5, 0.5,
-                 f"{item_shapes[i_idx]}\n"
-                 f"{final_dead_rate * 100:.1f}% dead",
-                 horizontalalignment='center', verticalalignment='center')
-
         if i_idx == 0:
             plt.legend()
+
+        # text overlay
+        plot_width = np.max(iterations)
+        if len(spatial_shapes[i_idx]) > 0:
+            plt.text(plot_width * 0.5, 0.5,
+                     f"{item_shapes[i_idx]}\n"
+                     f"{final_dead_rate * 100:.1f}% dead channels\n"
+                     f"{final_spatial_dead_rate * 100:.1f}% dead spatial\n",
+                     horizontalalignment='center', verticalalignment='center')
+        else:
+            plt.text(plot_width * 0.5, 0.5,
+                     f"{item_shapes[i_idx]}\n"
+                     f"{final_dead_rate * 100:.1f}% dead units",
+                     horizontalalignment='center', verticalalignment='center')
 
     plt.show()
 
