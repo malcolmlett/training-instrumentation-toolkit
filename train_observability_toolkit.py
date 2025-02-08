@@ -272,6 +272,7 @@ class HistoryStats(tf.keras.callbacks.History):
             self.step_history = None
 
         # internal
+        self._epoch_start_step = 0
         self._raw_epoch_stats = {}
         self._converted_epoch_stats = None
         self._this_epoch_history = None
@@ -295,13 +296,13 @@ class HistoryStats(tf.keras.callbacks.History):
     def on_epoch_begin(self, epoch, logs=None):
         super().on_epoch_begin(epoch, logs)
         self._this_epoch_history = {}
+        self._epoch_start_step = (self.steps[-1] + 1) if len(self.steps) > 0 else 0
 
     def on_train_batch_end(self, step, logs=None):
         super().on_train_batch_end(step, logs)
         if self.steps is not None:
             # step starts from zero each epoch, so add to existing
-            last_step = (self.steps[-1] + 1) if len(self.steps) > 0 else 0
-            self.steps.append(last_step + step)
+            self.steps.append(self._epoch_start_step + step)
         logs = logs or {}
         for k, v in logs.items():
             self._this_epoch_history.setdefault(k, []).append(v)
@@ -2889,6 +2890,72 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
     return res
 
 
+def plot_train_history(callback: HistoryStats, per_step=False, show_loss_percentiles=True, show_metric_percentiles=True):
+    """
+    Plots the loss and metric curves from a training run as collected by `HistoryStats`.
+    Works with aggregate histories that have been built up over multiple model.fit() calls.
+
+    Flexibly supports different losses and metrics.
+    Applies some heuristics to group the losses together onto a log plot, and the other metrics
+    on a linear plot.
+
+    Args:
+        callback: a history stats callback populated with data from training.
+        per_step: whether to plot data from callback.step_history instead of callback.epoch_stats.
+        show_loss_percentiles: whether to include full percentile information for losses and loss-like metrics,
+          or just a single value otherwise. Disabling percentile plotting can be necessary if there are
+          many loss-like metrics.
+        show_metric_percentiles: whether to include full percentile information for metrics,
+          or just a single value otherwise. Disabling percentile plotting can be necessary if there are
+          many metrics.
+    """
+    # sanity checks
+    if per_step and callback.step_history is None:
+        raise ValueError("HistoryStats callback did not collect per_step data")
+
+    # identify "losses" vs other metrics
+    # - the main distinction needed here is between those that need to be on a log scale because they get progressively
+    #   closer to zero, and those that tend to remain within the scale of 0.0 to 1.0.
+    def is_loss(key):
+        return 'loss' in key or 'entropy' in key
+    loss_keys = [k for k in callback.epoch_stats.keys() if is_loss(k)]
+    metric_keys = [k for k in callback.epoch_stats.keys() if not is_loss(k)]
+
+    # prepare
+    iterations = callback.steps if per_step else callback.epoch
+
+    # do plots
+    plt.figure(figsize=(11, 3))
+    if len(loss_keys) > 0:
+        plt.subplot(1, 2, 1)
+        plt.title("Loss")
+        for s_idx, key in enumerate(loss_keys):
+            if per_step:
+                plt.plot(iterations, callback.step_history[key], label=key)
+            elif show_loss_percentiles:
+                _plot_add_quantiles(iterations, callback.epoch_stats[key], color=s_idx, label=key, show_percentile_labels=False, single_series=False)
+            else:
+                plt.plot(iterations, callback.history[key], label=key)
+        plt.legend()
+        plt.yscale('log')
+        plt.xlabel('Step' if per_step else 'Epoch')
+
+    if len(metric_keys) > 0:
+        plt.subplot(1, 2, 2)
+        plt.title("Metrics")
+        for s_idx, key in enumerate(metric_keys):
+            if per_step:
+                plt.plot(iterations, callback.step_history[key], label=key)
+            elif show_loss_percentiles:
+                _plot_add_quantiles(iterations, callback.epoch_stats[key], color=s_idx, label=key, show_percentile_labels=False, single_series=False)
+            else:
+                plt.plot(iterations, callback.history[key], label=key)
+        plt.legend()
+        plt.xlabel('Step' if per_step else 'Epoch')
+
+    plt.show()
+
+
 def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
     """
     Generates a figure containing a number of plots to visualise value or magnitude stats collected
@@ -3318,35 +3385,50 @@ def plot_spatial_stats(layer_spatial_activity, model=None):
     plt.show()
 
 
-def _plot_add_quantiles(x, data):
+def _plot_add_quantiles(x, data, label=None, color="tab:blue", show_percentile_labels=True, single_series=True):
     """
     Adds multi-quantile data to an existing plot.
     Useful for displaying stats returned by the history callbacks.
     Args:
         x: list-like. X-axis values.
         data: pandas Dataframe with columns corresponding to quantiles, labeled in range 0 to 100.
+        color: int or string.
+          Series color. Provide a normal color string. Or, provide an int and it'll pick that indexed color from the normal
+          color list.
+        label: data series name, or None to show only percentile labels (if any)
+        show_percentile_labels: whether to show percentile information in labels
+        single_series: whether to enable visual optimisations that only work for single series. Including:
+            - min/max are shown in grey instead of a faint version of the colour
     """
+    # handle arguments
+    label_prefix = f"{label} " if label else ""
+    if isinstance(color, int):
+        color = plt.rcParams['axes.prop_cycle'].by_key()['color'][color]
+
     def _label(q1, q2):
         if q2 is None:
-            return "median" if q1 == 50 else f"{q1}%"
+            if show_percentile_labels:
+                return f"{label_prefix}median" if q1 == 50 else f"{label_prefix}{q1}%"
+            else:
+                return label
         elif q1 == 0 and q2 == 100:
-            return "min/max"
+            return f"{label_prefix}min/max" if show_percentile_labels else None
         elif 100 - q1 == q2:
-            return f"±{q1}%"
+            return f"{label_prefix}±{q1}%" if show_percentile_labels else None
         else:
-            return f"{q1}% to {q2}%"
+            return f"{label_prefix}{q1}% to {q2}%" if show_percentile_labels else None
 
     quantiles = data.columns
     quantile_len = len(quantiles)
     bot, top = 0, quantile_len - 1
     while bot < top:
-        color = 'tab:grey' if quantiles[bot] == 0 and quantiles[top] == 100 else 'tab:blue'
+        display_color = 'tab:grey' if single_series and quantiles[bot] == 0 and quantiles[top] == 100 else color
         plt.fill_between(x, data[quantiles[bot]], data[quantiles[top]],
-                         alpha=0.2, color=color, linewidth=0,
+                         alpha=0.2, color=display_color, linewidth=0,
                          label=_label(quantiles[bot], quantiles[top]))
         bot += 1
         top -= 1
     if bot == top:
         plt.plot(x, data[quantiles[bot]],
-                 color='tab:blue',
+                 color=color,
                  label=_label(quantiles[bot], None))
