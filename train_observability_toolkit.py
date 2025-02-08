@@ -233,8 +233,10 @@ class HistoryStats(tf.keras.callbacks.History):
     the epoch. This allows for more quickly identifying training problems.
 
     Other properties:
-        - step: list of step numbers corresponding to results from step_history
-        - step_history: like `history` but added to for each step
+        - steps: list of step numbers corresponding to results from step_history,
+            or None if per_step is False
+        - step_history: like `history` but added to each step,
+            or None if per_step is False
 
     Example:
     >>> model = tf.keras.models.Sequential([tf.keras.layers.Dense(10)])
@@ -250,32 +252,32 @@ class HistoryStats(tf.keras.callbacks.History):
     dict_keys(['loss'])
     """
 
-    def __init__(self, keep_per_step=False, quantiles=None):
+    def __init__(self, per_step=False, quantiles=None):
         """
         Args:
-            keep_per_step: bool.
+            per_step: bool.
                 Whether to additionally keep raw metrics on a per_step basis.
             quantiles: list of int/float.
                 List of quantiles to collect percentile data for, in range 0 .. 100.
                 Default: [0, 25, 50, 75, 100]
         """
         super().__init__()
-        self.keep_per_step = keep_per_step
+        self.per_step = per_step
         self.quantiles = quantiles or [0, 25, 50, 75, 100]
-        self._stats = None
-        if keep_per_step:
-            self.step = []
+        if per_step:
+            self.steps = []
             self.step_history = {}
         else:
-            self.step = None
+            self.steps = None
             self.step_history = None
 
-        # temporary storage
-        self._raw_stats = {}
+        # internal
+        self._raw_epoch_stats = {}
+        self._converted_epoch_stats = None
         self._this_epoch_history = None
 
     @property
-    def stats(self):
+    def epoch_stats(self):
         """
         Mirrors the built-in `history` property, but contains a dict of pandas dataframes
         containing percentile data of the loss and metrics each epoch.
@@ -283,19 +285,23 @@ class HistoryStats(tf.keras.callbacks.History):
         # convert and cache
         # - from: dict (by loss/metric) of list (by epoch) of TF tensors (by percentile)
         # - to: dict (by loss/metric) of dataframes with shape (epochs, percentiles)
-        if self._stats is None:
-            self._stats = {}
-            for k, tensor_list in self._raw_stats.items():
+        if self._converted_epoch_stats is None:
+            self._converted_epoch_stats = {}
+            for k, tensor_list in self._raw_epoch_stats.items():
                 table = np.stack(tensor_list, axis=0)
-                self._stats[k] = pd.DataFrame(table, columns=self.quantiles)
-        return self._stats
+                self._converted_epoch_stats[k] = pd.DataFrame(table, columns=self.quantiles)
+        return self._converted_epoch_stats
 
     def on_epoch_begin(self, epoch, logs=None):
         super().on_epoch_begin(epoch, logs)
         self._this_epoch_history = {}
 
-    def on_train_step_end(self, step, logs=None):
-        super().on_train_step_end(step, logs)
+    def on_train_batch_end(self, step, logs=None):
+        super().on_train_batch_end(step, logs)
+        if self.steps is not None:
+            # step starts from zero each epoch, so add to existing
+            last_step = (self.steps[-1] + 1) if len(self.steps) > 0 else 0
+            self.steps.append(last_step + step)
         logs = logs or {}
         for k, v in logs.items():
             self._this_epoch_history.setdefault(k, []).append(v)
@@ -307,8 +313,8 @@ class HistoryStats(tf.keras.callbacks.History):
         # compute stats over the epoch
         for k, values in self._this_epoch_history.items():
             percentiles = tfp.stats.percentile(values, self.quantiles)
-            self._raw_stats.setdefault(k, []).append(percentiles)
-            self._stats = None  # invalidate cache
+            self._raw_epoch_stats.setdefault(k, []).append(percentiles)
+            self._converted_epoch_stats = None  # invalidate cache
 
 
 class BaseGradientCallback:
