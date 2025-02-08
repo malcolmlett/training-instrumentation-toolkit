@@ -2919,7 +2919,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
     # Deal with callback differences
     item_name = callback.item_name.lower()
     item_name_upper = callback.item_name
-    title = f"All model {item_name}"
+    title = f"All model {item_name}s"
     if hasattr(callback, 'trainable_only'):
         title = f"All model trainable {item_name}s" if callback.trainable_only else \
             f"All model {item_name}s (incl. non-trainable)"
@@ -2956,7 +2956,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
     plt.yscale('log')
     plt.title(title)
     plt.xlabel(iteration_name)
-    plt.ylabel(f"mean scale of {item_name} magnitudes")
+    plt.ylabel(f"mean scale of magnitudes")
     plt.legend()
 
     # layer contributions - high-level summary
@@ -2981,11 +2981,12 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
     band_log_scales = _log_normalize(scales, axis=-1)
 
     plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
-    plt.stackplot(iterations, band_log_scales.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
     plt.margins(0)
     plt.title('Layer comparison')
     plt.xlabel(iteration_name)
-    plt.ylabel(f"{item_name_upper} scale log-proportion")
+    plt.ylabel(f"relative log of mean magnitude scale")
+    plt.gca().set_yticks([])
+    plt.stackplot(iterations, band_log_scales.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
     # layer labels placed on mid-height of layer band on left-hand side
     sample_len = max(1, math.ceil(band_log_scales.shape[0] / 5))
     band_mid_points = np.cumsum(band_log_scales, axis=1) - band_log_scales*0.5
@@ -3019,6 +3020,8 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
             #  - ax2.fill_between(iterations, balances, 0, where=(balances < 0), color="tab:orange", alpha=0.1)
             if c == (grid_width-1):
                 ax2.set_ylabel('pos/neg balance', color="tab:orange")
+            else:
+                ax2.yaxis.set_visible(False)
 
         # text overlay
         plot_width = np.max(iterations)
@@ -3062,7 +3065,7 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin):
 
     model = callback.model
     model_stats = callback.model_activity_stats
-    collected_activity_stats = callback._activity_stats
+    collected_activity_stats = [item_stats for item_stats in callback._activity_stats if item_stats is not None]
     collected_item_indices = [i_idx for i_idx, item_stats in enumerate(callback._activity_stats)
                               if item_stats is not None]
     num_items = len(collected_activity_stats)
@@ -3159,7 +3162,7 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin):
         else:
             plt.text(plot_width * 0.5, 0.5,
                      f"{item_shapes[i_idx]}\n"
-                     f"{final_dead_rate * 100:.1f}% dead units",
+                     f"{final_dead_rate * 100:.1f}% dead",
                      horizontalalignment='center', verticalalignment='center')
 
     plt.show()
