@@ -3034,39 +3034,8 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
     plt.legend()
 
     # layer contributions - high-level summary
-    # - for easier visual display in variables mode, uses only the largest variable from each layer
-    if item_type.value == ItemType.LAYER.value:  # reload-safe
-        filtered_layer_names = [model.layers[l_idx].name for l_idx in collected_item_indices]
-        filtered_stats = collected_item_magnitude_stats
-    else:
-        # tuples of: (v_idx of biggest variable, size of biggest variable)
-        layer_metas = [(None, None)] * len(model.layers)
-        layer_id_lookup = layer_indices_by_variable(model)
-        for v_idx in collected_item_indices:
-            l_idx = layer_id_lookup[v_idx]
-            variable = model.variables[v_idx]
-            biggest_v_idx, biggest_size = layer_metas[l_idx]
-            if biggest_size is None or tf.size(variable) > biggest_size:
-                layer_metas[l_idx] = v_idx, tf.size(variable)
-        filtered_layer_names =\
-            [model.layers[l_idx].name for l_idx, (v_idx, _) in enumerate(layer_metas) if v_idx is not None]
-        filtered_stats = [callback._magnitude_stats[v_idx] for v_idx, _ in layer_metas if v_idx is not None]
-    scales = get_scales_across_stats_list(filtered_stats, scale_quantile=50)
-    band_log_scales = _log_normalize(scales, axis=-1)
-
     plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
-    plt.margins(0)
-    plt.title('Layer comparison')
-    plt.xlabel(iteration_name)
-    plt.ylabel(f"relative log of mean magnitude scale")
-    plt.gca().set_yticks([])
-    plt.stackplot(iterations, band_log_scales.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
-    # layer labels placed on mid-height of layer band on left-hand side
-    sample_len = max(1, math.ceil(band_log_scales.shape[0] / 5))
-    band_mid_points = np.cumsum(band_log_scales, axis=1) - band_log_scales*0.5
-    placement = np.mean(band_mid_points[:sample_len, :], axis=0)
-    for f_idx, layer_name in enumerate(filtered_layer_names):
-        plt.text(len(iterations) / 100, placement[f_idx], layer_name, ha="left")
+    _plot_layer_scale_comparison(model, item_type, collected_item_magnitude_stats, collected_item_indices, iterations)
 
     # individual layers or variables
     for i_idx in range(num_items):
@@ -3432,3 +3401,74 @@ def _plot_add_quantiles(x, data, label=None, color="tab:blue", show_percentile_l
         plt.plot(x, data[quantiles[bot]],
                  color=color,
                  label=_label(quantiles[bot], None))
+
+
+def _plot_layer_scale_comparison(model, item_type, item_magnitude_stats, item_indices,
+                                 iterations,
+                                 title="Layer comparison",
+                                 xlabel="Iteration",
+                                 ylabel="relative log of mean magnitude scale"):
+    """
+    Adds a "layer comparison" chart to an existing figure.
+    For easier visual display in variables mode, uses only the largest variable from each layer.
+    Args:
+        model: the model
+        item_type: layer or variable
+        item_magnitude_stats: list of stats dataframes
+        item_indices: layer or variable indices
+        iterations: x-axis values
+    """
+    if item_type.value == ItemType.LAYER.value:  # reload-safe
+        filtered_layer_names = [model.layers[l_idx].name for l_idx in item_indices]
+        filtered_stats = item_magnitude_stats
+    else:
+        filtered_stats, filtered_layers, _ = _pick_layer_data_from_variables(
+            item_magnitude_stats, item_indices, model)
+        filtered_layer_names = [layer.name for layer in filtered_layers]
+    scales = get_scales_across_stats_list(filtered_stats, scale_quantile=50)
+    band_log_scales = _log_normalize(scales, axis=-1)
+
+    plt.margins(0)
+    plt.title(title)
+    plt.xlabel(xlabel)
+    plt.ylabel(ylabel)
+    plt.gca().set_yticks([])
+    plt.stackplot(iterations, band_log_scales.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
+    # layer labels placed on mid-height of layer band on left-hand side
+    sample_len = max(1, math.ceil(band_log_scales.shape[0] / 5))
+    band_mid_points = np.cumsum(band_log_scales, axis=1) - band_log_scales*0.5
+    placement = np.mean(band_mid_points[:sample_len, :], axis=0)
+    for f_idx, layer_name in enumerate(filtered_layer_names):
+        plt.text(len(iterations) / 100, placement[f_idx], layer_name, ha="left")
+
+
+def _pick_layer_data_from_variables(variable_data, variable_indices, model):
+    """
+    Used to simplify display of many variables by focusing on the single
+    biggest variable for each layer.
+    Args:
+        variable_data: data of any type associated with a collection of model variables
+        variable_indices: indices of the variables relative to model.variables
+        model: the model from which the variables and layers are collected
+    Returns:
+        - filtered_data - variable_data filtered to one per layer
+        - filtered_layers - the model layer for each filtered data
+        - filtered_layer_indices - indices relative to model.layers of layers represented
+    """
+    # tuples of: (i_idx of biggest variable, size of biggest variable)
+    # where: i_idx is "item index" that indexes into variable_indices
+    layer_metas = [(None, None)] * len(model.layers)
+    layer_id_lookup = layer_indices_by_variable(model)
+
+    # pick largest variable for each layer
+    for i_idx, v_idx in enumerate(variable_indices):
+        l_idx = layer_id_lookup[v_idx]
+        variable = model.variables[v_idx]
+        biggest_v_idx, biggest_size = layer_metas[l_idx]
+        if biggest_size is None or tf.size(variable) > biggest_size:
+            layer_metas[l_idx] = i_idx, tf.size(variable)
+
+    filtered_stats = [variable_data[i_idx] for i_idx, _ in layer_metas if i_idx is not None]
+    filtered_layers = [model.layers[l_idx] for l_idx, (i_idx, _) in enumerate(layer_metas) if i_idx is not None]
+    filtered_layer_indices = [l_idx for l_idx, (i_idx, _) in enumerate(layer_metas) if i_idx is not None]
+    return filtered_stats, filtered_layers, filtered_layer_indices
