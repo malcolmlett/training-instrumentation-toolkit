@@ -2756,7 +2756,6 @@ def plot_history_overview(callbacks: list):
                 plt.title(f"All model {item_name}s")
                 _plot_add_quantiles(iterations, cb.model_magnitude_stats)
                 plt.margins(0)
-                plt.ylim([0.0, 1.1])
                 plt.yscale('log')
                 plt.xlabel(iteration_name)
                 plt.ylabel('magnitude')
