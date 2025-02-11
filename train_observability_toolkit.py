@@ -2614,6 +2614,105 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
     return res
 
 
+def plot_history_overview(callbacks: list):
+    """
+    Uber-plotting function that selecst the most salient attributes of the other
+    plot_xxx_history() functions so that a single plot can highlight areas that need further
+    investigation.
+
+    Args:
+        callbacks: list of callbacks with any or all of:
+            - History
+            - HistoryStats
+            - VariableStatsCallback
+            - GradientHistoryCallback
+            - LayerOutputHistoryCallback
+            - LayerOutputGradientHistoryCallback
+    """
+
+    # parse arguments - extract individual callbacks by type
+    history = None
+    history_stats = None
+    variables = None
+    gradients = None
+    activity = None
+    output_gradients = None
+    for cb in callbacks:
+        if reload_safe_isinstance(cb, tf.keras.callbacks.History):
+            history = cb
+        elif reload_safe_isinstance(cb, HistoryStats):
+            history_stats = cb
+        elif reload_safe_isinstance(cb, VariableHistoryCallback):
+            variables = cb
+        elif reload_safe_isinstance(cb, LayerOutputHistoryCallback):
+            activity = cb
+        elif reload_safe_isinstance(cb, GradientHistoryCallback):
+            gradients = cb
+        elif reload_safe_isinstance(cb, LayerOutputGradientHistoryCallback):
+            output_gradients = cb
+
+    # sanity check
+    per_steps = [cb.per_step for cb in [variables, gradients, activity, output_gradients] if cb is not None]
+    per_steps = set(per_steps)
+    if len(per_steps) == 0:
+        per_step = False
+    elif len(per_steps) == 1:
+        per_step = per_steps[0]
+    else:
+        raise ValueError("Cannot plot a mixture of per-epoch and per-step data")
+
+    if per_step and history_stats is not None and history_stats.step_history is None:
+        raise ValueError("HistoryStats callback did not collect per_step data")
+
+    # determine plot size
+    # - two plots across top, 3-grid-cols each
+    # - three plots on each subsequent row, 2 grid-cols each
+    # - total 6 grid-cols
+    plot_rows = 1
+    has_history = history is not None or history_stats is not None
+    has_activity_stats = False
+    for cb in [variables, gradients, activity, output_gradients]:
+        if cb is not None:
+            plot_rows += 1
+        if cb is not None and cb._activity_stats is not None:
+            has_activity_stats = True
+
+    # prepare
+    if history_stats:
+        iterations = history_stats.steps if per_step else history_stats.epoch
+    elif history:
+        iterations = history.epoch
+    else:
+        len = None
+        for cb in [variables, gradients, activity, output_gradients]:
+            if cb.collected_value_stats is not None:
+                len = cb.collected_value_stats[0]  # TODO add this property
+                break
+            elif cb.collected_activity_stats is not None:
+                len = cb.collected_activity_stats[0]  # TODO add this property
+                break
+        if not len:
+            raise ValueError("None of the callbacks seem to have iteration information")
+        iterations = list(range(len))
+
+    # Main plot - Loss
+    # TODO [WIP] continue
+    if history_stats or history:
+        plt.subplot(1, 2, 1)
+        plt.title("Loss and Metrics")
+        for s_idx, key in enumerate(loss_keys):
+            if per_step:
+                plt.plot(iterations, callback.step_history[key], label=key)
+            elif show_loss_percentiles:
+                _plot_add_quantiles(iterations, callback.epoch_stats[key], color=s_idx, label=key, show_percentile_labels=False, single_series=False)
+            else:
+                plt.plot(iterations, callback.history[key], label=key)
+        plt.legend()
+        plt.yscale('log')
+        plt.xlabel('Step' if per_step else 'Epoch')
+
+
+
 def plot_train_history(callback: HistoryStats, per_step=False, show_loss_percentiles=True,
                        show_metric_percentiles=True):
     """
@@ -3193,3 +3292,14 @@ def _pick_layer_data_from_variables(variable_data, variable_indices, model):
     filtered_layers = [model.layers[l_idx] for l_idx, (i_idx, _) in enumerate(layer_metas) if i_idx is not None]
     filtered_layer_indices = [l_idx for l_idx, (i_idx, _) in enumerate(layer_metas) if i_idx is not None]
     return filtered_stats, filtered_layers, filtered_layer_indices
+
+
+def reload_safe_isinstance(obj, cls):
+    """
+    Because I do a lot of `reload(module)` during development, `isinstance` tests become unreliable.
+    """
+    if isinstance(obj, cls):
+        return True
+    obj_cls_fqn = f"{type(obj).__module__}.{type(obj).__name__}"
+    cls_fqn = f"{cls.__module__}.{cls.__name__}"
+    return obj_cls_fqn == cls_fqn
