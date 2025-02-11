@@ -2651,17 +2651,48 @@ def plot_history_overview(callbacks: list):
             output_gradients = cb
 
     # sanity check
+    # - note: don't care if history is collected at a different rate to the rest
     per_steps = [cb.per_step for cb in [variables, gradients, activity, output_gradients] if cb is not None]
     per_steps = set(per_steps)
     if len(per_steps) == 0:
         per_step = False
     elif len(per_steps) == 1:
-        per_step = per_steps[0]
+        per_step = next(iter(per_steps))
     else:
         raise ValueError("Cannot plot a mixture of per-epoch and per-step data")
 
-    if per_step and history_stats is not None and history_stats.step_history is None:
-        raise ValueError("HistoryStats callback did not collect per_step data")
+    # prepare - identify model
+    model = None
+    for cb in [variables, gradients, activity, output_gradients]:
+        if cb.model is not None:
+            model = cb.model
+    if model is None:
+        raise ValueError("None of the callbacks have a model set")
+
+    # prepare - iteration list
+    # - must be right length for main callbacks
+    # - but prefer list from history_stats if present
+    iteration_name = 'step' if per_step else 'epoch'
+    it_len = None
+    for cb in [variables, gradients, activity, output_gradients]:
+        if cb.collected_value_stats is not None:
+            it_len = len(cb.collected_value_stats[0])
+            break
+        elif cb.collected_activity_stats is not None:
+            it_len = len(cb.collected_activity_stats[0])
+            break
+    if not len:
+        raise ValueError("None of the callbacks seem to have iteration information")
+
+    iterations = None
+    if per_step and history_stats and history_stats.steps is not None:
+        iterations = history_stats.steps
+    elif not per_step and history_stats:
+        iterations = history_stats.epoch
+    elif not per_step and history:
+        iterations = history.epoch
+    if iterations is None or len(iterations) != it_len:
+        iterations = list(range(it_len))
 
     # determine plot size
     # - two plots across top, 3-grid-cols each
@@ -2678,62 +2709,41 @@ def plot_history_overview(callbacks: list):
     grid_height = 2 + (plot_rows - 1)
     plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
 
-    # prepare
-    model = None
-    iteration_name = 'step' if per_step else 'epoch'
-    if history_stats:
-        iterations = history_stats.steps if per_step else history_stats.epoch
-    elif history:
-        iterations = history.epoch
-    else:
-        it_len = None
-        for cb in [variables, gradients, activity, output_gradients]:
-            if cb.collected_value_stats is not None:
-                it_len = cb.collected_value_stats[0]
-                break
-            elif cb.collected_activity_stats is not None:
-                it_len = cb.collected_activity_stats[0]
-                break
-        if not len:
-            raise ValueError("None of the callbacks seem to have iteration information")
-        iterations = list(range(it_len))
-    for cb in [variables, gradients, activity, output_gradients]:
-        if cb.model is not None:
-            model = None
-    if model is None:
-        raise ValueError("None of the callbacks have a model set")
-
     # Main plot - Loss
+    # - uses per_step as a guide, but only plots what's available
     if history_stats or history:
         plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
         plt.title("Loss and Metrics")
         keys = history_stats.history.keys() if history_stats else history.history.keys()
+        hist_per_step = per_step and history_stats and history_stats.step_history
         for s_idx, key in enumerate(keys):
-            if per_step:
-                plt.plot(iterations, history_stats.step_history[key], label=key)
+            if hist_per_step:
+                plt.plot(history_stats.steps, history_stats.step_history[key], label=key)
             elif key == 'loss' and history_stats:
-                _plot_add_quantiles(iterations, history_stats.epoch_stats[key],
+                _plot_add_quantiles(history_stats.epoch, history_stats.epoch_stats[key],
                                     label=key, show_percentile_labels=False, single_series=False)
+            elif history_stats:
+                plt.plot(history_stats.epoch, history_stats.history[key], label=key)
             else:
-                data = history_stats.history[key] if history_stats else history.history[key]
-                plt.plot(iterations, data, label=key)
+                plt.plot(history.epoch, history.history[key], label=key)
         plt.legend()
         plt.yscale('log')
-        plt.xlabel(iteration_name)
+        plt.xlabel('step' if hist_per_step else 'epoch')
 
     # Main plot - Alarms
     if has_activity_stats:
         plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
         plt.title("Warnings")
-        plt.margins(0)
-        plt.legend()
-        plt.xlabel(iteration_name)
         for cb in [variables, gradients, activity, output_gradients]:
             if cb is not None and cb.model_activity_stats is not None:
                 item_name = cb.item_name
                 plt.plot(iterations, cb.model_activity_stats['max_dead_rate'],
-                         label=f"Worst {item_name} dead rate")
-                
+                         label=f"Worst {item_name.lower()} dead rate")
+        plt.margins(0)
+        plt.ylim([0.0, 1.1])
+        plt.legend()
+        plt.xlabel(iteration_name)
+
     # Per-callback plot rows
     for cb_idx, cb in enumerate([variables, gradients, activity, output_gradients]):
         if cb is not None:
@@ -2742,37 +2752,37 @@ def plot_history_overview(callbacks: list):
             
             # Column plot - Value range
             if cb.model_magnitude_stats is not None:
-                plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 0))
+                plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 0), colspan=2)
                 plt.title(f"All model {item_name}s")
                 _plot_add_quantiles(iterations, cb.model_magnitude_stats)
                 plt.margins(0)
+                plt.ylim([0.0, 1.1])
                 plt.yscale('log')
                 plt.xlabel(iteration_name)
-                plt.ylabel(f"mean scale of magnitudes")
+                plt.ylabel('magnitude')
                 plt.legend()
 
             # Column plot - Layer comparison
             if cb.magnitude_stats is not None:
-                plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 1))
+                plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 2), colspan=2)
                 _plot_layer_scale_comparison(
-                    model, item_type, cb.collected_magnitude_stats, cb.collected_value_stat_indices,
-                    iterations, xlabel=iteration_name)
+                    model, item_type, cb.collected_magnitude_stats, cb.collected_value_stats_indices, iterations,
+                    xlabel=iteration_name, ylabel="log-magnitude")
 
             # Column plot - Activity rates
             if cb.activity_stats is not None:
-
-                plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 2))
-                plt.title(f"Non-zero {item_name} activities")
+                plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 4), colspan=2)
+                plt.title(f"{item_name} activation rates")
                 plt.plot(iterations,
                          cb.model_activity_stats['mean_activation_rate'],
-                         label='mean activation rate', color='tab:blue')
+                         color='tab:blue', label='mean activation rate')
                 plt.fill_between(iterations,
                                  cb.model_activity_stats['min_activation_rate'],
                                  cb.model_activity_stats['max_activation_rate'],
                                  color='tab:blue', alpha=0.2, label='min/max activation range')
                 plt.plot(iterations,
                          cb.model_activity_stats['max_dead_rate'],
-                         label='worst dead rate', color='tab:red')
+                         color='tab:red', label='worst dead rate')
                 plt.ylim([0.0, 1.1])
                 plt.xlabel(iteration_name)
                 plt.ylabel("fraction of units")
