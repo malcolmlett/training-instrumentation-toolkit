@@ -2637,10 +2637,10 @@ def plot_history_overview(callbacks: list):
     activity = None
     output_gradients = None
     for cb in callbacks:
-        if reload_safe_isinstance(cb, tf.keras.callbacks.History):
-            history = cb
-        elif reload_safe_isinstance(cb, HistoryStats):
+        if reload_safe_isinstance(cb, HistoryStats):
             history_stats = cb
+        elif reload_safe_isinstance(cb, tf.keras.callbacks.History):
+            history = cb
         elif reload_safe_isinstance(cb, VariableHistoryCallback):
             variables = cb
         elif reload_safe_isinstance(cb, LayerOutputHistoryCallback):
@@ -2715,7 +2715,7 @@ def plot_history_overview(callbacks: list):
         plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
         plt.title("Loss and Metrics")
         keys = history_stats.history.keys() if history_stats else history.history.keys()
-        hist_per_step = per_step and history_stats and history_stats.step_history
+        hist_per_step = per_step and history_stats is not None and history_stats.step_history is not None
         for s_idx, key in enumerate(keys):
             if hist_per_step:
                 plt.plot(history_stats.steps, history_stats.step_history[key], label=key)
@@ -2726,11 +2726,12 @@ def plot_history_overview(callbacks: list):
                 plt.plot(history_stats.epoch, history_stats.history[key], label=key)
             else:
                 plt.plot(history.epoch, history.history[key], label=key)
+        plt.margins(0)
         plt.legend()
         plt.yscale('log')
         plt.xlabel('step' if hist_per_step else 'epoch')
 
-    # Main plot - Alarms
+    # Main plot - Warnings
     if has_activity_stats:
         plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
         plt.title("Warnings")
@@ -2753,7 +2754,7 @@ def plot_history_overview(callbacks: list):
             # Column plot - Value range
             if cb.model_magnitude_stats is not None:
                 plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 0), colspan=2)
-                plt.title(f"All model {item_name}s")
+                plt.title(f"All model {item_name.lower()}s")
                 _plot_add_quantiles(iterations, cb.model_magnitude_stats)
                 plt.margins(0)
                 plt.yscale('log')
@@ -2774,14 +2775,15 @@ def plot_history_overview(callbacks: list):
                 plt.title(f"{item_name} activation rates")
                 plt.plot(iterations,
                          cb.model_activity_stats['mean_activation_rate'],
-                         color='tab:blue', label='mean activation rate')
+                         color='tab:blue', label='mean')
                 plt.fill_between(iterations,
                                  cb.model_activity_stats['min_activation_rate'],
                                  cb.model_activity_stats['max_activation_rate'],
-                                 color='tab:blue', alpha=0.2, label='min/max activation range')
+                                 color='tab:blue', alpha=0.2)
                 plt.plot(iterations,
                          cb.model_activity_stats['max_dead_rate'],
                          color='tab:red', label='worst dead rate')
+                plt.margins(0)
                 plt.ylim([0.0, 1.1])
                 plt.xlabel(iteration_name)
                 plt.ylabel("fraction of units")
