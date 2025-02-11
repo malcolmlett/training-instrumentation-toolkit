@@ -2669,48 +2669,115 @@ def plot_history_overview(callbacks: list):
     # - three plots on each subsequent row, 2 grid-cols each
     # - total 6 grid-cols
     plot_rows = 1
-    has_history = history is not None or history_stats is not None
     has_activity_stats = False
     for cb in [variables, gradients, activity, output_gradients]:
         if cb is not None:
             plot_rows += 1
-        if cb is not None and cb._activity_stats is not None:
+        if cb is not None and cb.activity_stats is not None:
             has_activity_stats = True
+    grid_width = 6
+    grid_height = 2 + (plot_rows - 1)
+    plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
 
     # prepare
+    model = None
+    iteration_name = 'step' if per_step else 'epoch'
     if history_stats:
         iterations = history_stats.steps if per_step else history_stats.epoch
     elif history:
         iterations = history.epoch
     else:
-        len = None
+        it_len = None
         for cb in [variables, gradients, activity, output_gradients]:
             if cb.collected_value_stats is not None:
-                len = cb.collected_value_stats[0]  # TODO add this property
+                it_len = cb.collected_value_stats[0]
                 break
             elif cb.collected_activity_stats is not None:
-                len = cb.collected_activity_stats[0]  # TODO add this property
+                it_len = cb.collected_activity_stats[0]
                 break
         if not len:
             raise ValueError("None of the callbacks seem to have iteration information")
-        iterations = list(range(len))
+        iterations = list(range(it_len))
+    for cb in [variables, gradients, activity, output_gradients]:
+        if cb.model is not None:
+            model = None
+    if model is None:
+        raise ValueError("None of the callbacks have a model set")
 
     # Main plot - Loss
-    # TODO [WIP] continue
     if history_stats or history:
-        plt.subplot(1, 2, 1)
+        plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
         plt.title("Loss and Metrics")
-        for s_idx, key in enumerate(loss_keys):
+        keys = history_stats.history.keys() if history_stats else history.history.keys()
+        for s_idx, key in enumerate(keys):
             if per_step:
-                plt.plot(iterations, callback.step_history[key], label=key)
-            elif show_loss_percentiles:
-                _plot_add_quantiles(iterations, callback.epoch_stats[key], color=s_idx, label=key, show_percentile_labels=False, single_series=False)
+                plt.plot(iterations, history_stats.step_history[key], label=key)
+            elif key == 'loss' and history_stats:
+                _plot_add_quantiles(iterations, history_stats.epoch_stats[key],
+                                    label=key, show_percentile_labels=False, single_series=False)
             else:
-                plt.plot(iterations, callback.history[key], label=key)
+                data = history_stats.history[key] if history_stats else history.history[key]
+                plt.plot(iterations, data, label=key)
         plt.legend()
         plt.yscale('log')
-        plt.xlabel('Step' if per_step else 'Epoch')
+        plt.xlabel(iteration_name)
 
+    # Main plot - Alarms
+    if has_activity_stats:
+        plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
+        plt.title("Warnings")
+        plt.margins(0)
+        plt.legend()
+        plt.xlabel(iteration_name)
+        for cb in [variables, gradients, activity, output_gradients]:
+            if cb is not None and cb.model_activity_stats is not None:
+                item_name = cb.item_name
+                plt.plot(iterations, cb.model_activity_stats['max_dead_rate'],
+                         label=f"Worst {item_name} dead rate")
+                
+    # Per-callback plot rows
+    for cb_idx, cb in enumerate([variables, gradients, activity, output_gradients]):
+        if cb is not None:
+            item_type = cb.item_type
+            item_name = cb.item_name
+            
+            # Column plot - Value range
+            if cb.model_magnitude_stats is not None:
+                plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 0))
+                plt.title(f"All model {item_name}s")
+                _plot_add_quantiles(iterations, cb.model_magnitude_stats)
+                plt.margins(0)
+                plt.yscale('log')
+                plt.xlabel(iteration_name)
+                plt.ylabel(f"mean scale of magnitudes")
+                plt.legend()
+
+            # Column plot - Layer comparison
+            if cb.magnitude_stats is not None:
+                plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 1))
+                _plot_layer_scale_comparison(
+                    model, item_type, cb.collected_magnitude_stats, cb.collected_value_stat_indices,
+                    iterations, xlabel=iteration_name)
+
+            # Column plot - Activity rates
+            if cb.activity_stats is not None:
+
+                plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 2))
+                plt.title(f"Non-zero {item_name} activities")
+                plt.plot(iterations,
+                         cb.model_activity_stats['mean_activation_rate'],
+                         label='mean activation rate', color='tab:blue')
+                plt.fill_between(iterations,
+                                 cb.model_activity_stats['min_activation_rate'],
+                                 cb.model_activity_stats['max_activation_rate'],
+                                 color='tab:blue', alpha=0.2, label='min/max activation range')
+                plt.plot(iterations,
+                         cb.model_activity_stats['max_dead_rate'],
+                         label='worst dead rate', color='tab:red')
+                plt.ylim([0.0, 1.1])
+                plt.xlabel(iteration_name)
+                plt.ylabel("fraction of units")
+                plt.legend()
 
 
 def plot_train_history(callback: HistoryStats, per_step=False, show_loss_percentiles=True,
