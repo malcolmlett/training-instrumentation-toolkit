@@ -9,7 +9,6 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import tqdm
 from enum import Enum
-from warnings import deprecated
 
 # tip: to get output shape of a layer:
 #  model.layers[l].compute_output_shape(model.layers[l].input.shape)
@@ -1667,7 +1666,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
                         val_list.append(gradients[l_idx])
 
 
-@deprecated("hasn't been maintained")
+# DEPRECATED - hasn't been maintained
 class ActivityRateMeasuringCallback(tf.keras.callbacks.Callback):
     """
     Standard model.fit() callback that intermittently computes unit activation rates during training,
