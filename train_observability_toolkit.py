@@ -98,11 +98,9 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
             for gradient_callback in gradient_callbacks:
                 gradient_callback.on_train_batch_begin(step)
 
-            loss, metrics, trainable_gradients, output_gradients, activations = train_step_fn(
+            logs, trainable_gradients, output_gradients, activations = train_step_fn(
                 model, monitoring_model, x, y, sample_weight, needs_output_gradients)
 
-            logs = metrics
-            logs['loss'] = loss.numpy()
             callbacks.on_train_batch_end(step, logs)
             for gradient_callback in gradient_callbacks:
                 gradient_callback.on_train_batch_end(
@@ -137,8 +135,7 @@ def _gradient_returning_train_step(model, monitoring_model, x, y, sample_weight,
     This method is programmatically converted via auto-graph.
 
     Returns:
-        - loss - float. Loss returned by loss function (before optimizer scaling).
-        - metrics - dict. Metrics returned by model (note: also includes a 'loss' value but it's always zero)
+        - metrics - dict. Metrics returned by model, including loss
         - trainable_variable_gradients - list. Gradients tensor for each trainable variable.
         - output_gradients - list. Gradients tensor for each layer output, or None if not requested.
             Note that some layers will have None as the gradients tensor. eg: the last layer and layers
@@ -148,12 +145,12 @@ def _gradient_returning_train_step(model, monitoring_model, x, y, sample_weight,
 
     # Forward pass
     with tf.GradientTape() as tape:
-        monitoring_outputs = monitoring_model(x)
+        monitoring_outputs = monitoring_model(x, training=True)
         y_pred = monitoring_outputs[0]
         layer_outputs = monitoring_outputs[1:]
 
         loss = model.compute_loss(x=x, y=y, y_pred=y_pred, sample_weight=sample_weight, training=True)
-        reported_loss = loss  # tracking before scaling
+        model._loss_tracker.update_state(loss, sample_weight=tf.shape(tf.keras.tree.flatten(x)[0])[0])
         loss = model.optimizer.scale_loss(loss)
 
     # Backward pass
@@ -169,7 +166,7 @@ def _gradient_returning_train_step(model, monitoring_model, x, y, sample_weight,
     # Metrics
     metrics = model.compute_metrics(x=x, y=y, y_pred=y_pred, sample_weight=sample_weight)
 
-    return reported_loss, metrics, trainable_grads, output_grads, layer_outputs
+    return metrics, trainable_grads, output_grads, layer_outputs
 
 
 class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
