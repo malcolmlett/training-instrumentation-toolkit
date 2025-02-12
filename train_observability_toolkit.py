@@ -1,5 +1,10 @@
 import tensorflow as tf
 import tensorflow_probability as tfp
+from tensorflow.keras import tree
+from keras.src.backend.tensorflow.trainer import TFEpochIterator
+from keras.src import optimizers as optimizers_module
+from keras.src.trainers.data_adapters import array_slicing
+from keras.src.trainers.data_adapters import data_adapter_utils
 import keras
 import math
 import numpy as np
@@ -16,25 +21,47 @@ from enum import Enum
 
 # Tries to replicate keras.backend.tensorflow.TensorFlowTrainer.fit() (trainer.py, keras 3.5.0)
 # as much as possible.
-def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
+def fit(model, x=None, y=None, batch_size=None, epochs=1, verbose="auto", callbacks=None,
+        validation_split=0.0, validation_data=None, shuffle=True, class_weight=None, sample_weight=None,
+        initial_epoch=0, steps_per_epoch=None, validation_steps=None, validation_batch_size=None, validation_freq=1):
     """
     A custom training loop mimicking model.fit() that makes raw gradient and layer output
     information available for tracking.
 
     Honours the state of `tf.config.run_functions_eagerly(bool)`.
 
-    Args:
-        model: usual meaning
-        dataset: usual meaning, except only copes with fixed-length datasets
-        epochs: usual meaning
-        verbose: usual meaning
-        callbacks: usual meaning plus can take instances of BaseGradientCallback
-        initial_epoch: usual meaning
+    All args are the same as for model.fit(), with the following exceptions:
+    - callbacks: additionally can be passed instances of BaseGradientCallback
+
     Returns:
          HistoryCallback
     """
-    # prepare epochs
-    num_batches = len(dataset)
+    model._assert_compile_called("fit")
+    if model.steps_per_execution != 1:
+        raise ValueError(f"Only supports steps_per_execution=1, got: {model.steps_per_execution}")
+
+    model._eval_epoch_iterator = None
+    if validation_split and validation_data is None:
+        # Create the validation data using the training data. Only supported
+        # for TF/numpy/jax arrays.
+        (x, y, sample_weight), validation_data = array_slicing.train_validation_split(
+            (x, y, sample_weight), validation_split=validation_split)
+    if validation_data is not None:
+        (val_x, val_y, val_sample_weight) = data_adapter_utils.unpack_x_y_sample_weight(validation_data)
+
+    # Create an iterator that yields batches for one epoch.
+    epoch_iterator = TFEpochIterator(
+        x=x,
+        y=y,
+        sample_weight=sample_weight,
+        batch_size=batch_size,
+        steps_per_epoch=steps_per_epoch,
+        shuffle=shuffle,
+        class_weight=class_weight,
+        distribute_strategy=model.distribute_strategy,
+        steps_per_execution=model.steps_per_execution,
+    )
+    model._maybe_symbolic_build(iterator=epoch_iterator)
 
     # prepare callbacks tracking
     gradient_callbacks = []
@@ -42,10 +69,11 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
         gradient_callbacks = [callback for callback in callbacks if isinstance(callback, BaseGradientCallback)]
         callbacks = [callback for callback in callbacks if not isinstance(callback, BaseGradientCallback)]
     if not isinstance(callbacks, tf.keras.callbacks.CallbackList):
-        callbacks = tf.keras.callbacks.CallbackList(callbacks, add_history=True, add_progbar=verbose != 0,
-                                                    verbose=verbose, epochs=epochs, steps=num_batches, model=model)
+        callbacks = tf.keras.callbacks.CallbackList(
+            callbacks, add_history=True, add_progbar=verbose != 0, verbose=verbose, epochs=epochs,
+            steps=epoch_iterator.num_batches, model=model)
     for gradient_callback in gradient_callbacks:
-        gradient_callback.set_params({'epochs': epochs, 'steps': len(dataset)})
+        gradient_callback.set_params({'epochs': epochs, 'steps': epoch_iterator.num_batches})
         gradient_callback.set_model(model)
 
     needs_output_gradients = any(cb.needs_output_gradients for cb in gradient_callbacks)
@@ -75,53 +103,103 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
     # latest values
     # - these are computed at each step, but we need to provide values at the end of each epoch,
     #   so we'll just hold onto the last value computed at each step
+    training_logs = None
     logs = {}
-    loss = None
     trainable_gradients = None
     output_gradients = None
     activations = None
 
-    # train
-    print(f"Training via custom fit() function. Will produce a few warnings; you can usually ignore these.")
+    # train begin
+    model.stop_training = False
     callbacks.on_train_begin()
     for gradient_callback in gradient_callbacks:
         gradient_callback.on_train_begin()
+
+    # training loop by epoch
+    print(f"Training via custom fit() function. Will produce a few warnings; you can usually ignore these.")
+    initial_epoch = model._initial_epoch or initial_epoch
     for epoch in range(initial_epoch, epochs):
         model.reset_metrics()
         callbacks.on_epoch_begin(epoch)
         for gradient_callback in gradient_callbacks:
             gradient_callback.on_epoch_begin(epoch)
 
-        for step, data in enumerate(dataset):
-            x, y, sample_weight = keras.utils.unpack_x_y_sample_weight(data)
-            callbacks.on_train_batch_begin(step)
-            for gradient_callback in gradient_callbacks:
-                gradient_callback.on_train_batch_begin(step)
+        # training loop by step
+        with epoch_iterator.catch_stop_iteration():
+            for step, iterator in epoch_iterator.enumerate_epoch():
+                callbacks.on_train_batch_begin(step)
+                for gradient_callback in gradient_callbacks:
+                    gradient_callback.on_train_batch_begin(step)
 
-            logs, trainable_gradients, output_gradients, activations = train_step_fn(
-                model, monitoring_model, x, y, sample_weight, needs_output_gradients)
+                x, y, sample_weight = keras.utils.unpack_x_y_sample_weight(next(iterator))
+                logs, trainable_gradients, output_gradients, activations = train_step_fn(
+                    model, monitoring_model, x, y, sample_weight, needs_output_gradients)
 
-            callbacks.on_train_batch_end(step, logs)
-            for gradient_callback in gradient_callbacks:
-                gradient_callback.on_train_batch_end(
-                    batch=step,
-                    loss=loss,
-                    gradients=trainable_gradients,
-                    trainable_variables=model.trainable_variables,
-                    activations=activations,
-                    output_gradients=output_gradients if gradient_callback.needs_output_gradients else None)
+                callbacks.on_train_batch_end(step, logs)
+                for gradient_callback in gradient_callbacks:
+                    gradient_callback.on_train_batch_end(
+                        batch=step,
+                        loss=logs['loss'],
+                        gradients=trainable_gradients,
+                        trainable_variables=model.trainable_variables,
+                        activations=activations,
+                        output_gradients=output_gradients if gradient_callback.needs_output_gradients else None)
+
+                if model.stop_training:
+                    break
+
+        # Override with model metrics instead of last step logs if needed.
+        epoch_logs = dict(model._get_metrics_result_or_logs(logs))
+
+        # Run validation.
+        if validation_data is not None and model._should_eval(epoch, validation_freq):
+            # Create EpochIterator for evaluation and cache it.
+            if getattr(model, "_eval_epoch_iterator", None) is None:
+                model._eval_epoch_iterator = TFEpochIterator(
+                    x=val_x,
+                    y=val_y,
+                    sample_weight=val_sample_weight,
+                    batch_size=validation_batch_size or batch_size,
+                    distribute_strategy=model.distribute_strategy,
+                    steps_per_execution=model.steps_per_execution,
+                    steps_per_epoch=validation_steps,
+                    shuffle=False,
+                )
+            val_logs = model.evaluate(
+                x=val_x,
+                y=val_y,
+                sample_weight=val_sample_weight,
+                batch_size=validation_batch_size or batch_size,
+                steps=validation_steps,
+                callbacks=callbacks,
+                return_dict=True,
+                _use_cached_eval_dataset=True,
+            )
+            val_logs = {"val_" + name: val for name, val in val_logs.items()}
+            epoch_logs.update(val_logs)
 
         # end of epoch
-        callbacks.on_epoch_end(epoch, logs)  # should be passing loss and mse
+        training_logs = epoch_logs
+        callbacks.on_epoch_end(epoch, epoch_logs)  # should be passing loss and mse
         for gradient_callback in gradient_callbacks:
             gradient_callback.on_epoch_end(
                 epoch=epoch,
-                loss=loss,
+                loss=epoch_logs['loss'],
                 gradients=trainable_gradients,
                 trainable_variables=model.trainable_variables,
                 activations=activations,
                 output_gradients=output_gradients if gradient_callback.needs_output_gradients else None)
-    callbacks.on_train_end(logs)
+        if model.stop_training:
+            break
+
+    if (isinstance(model.optimizer, optimizers_module.Optimizer) and epochs > 0):
+        model.optimizer.finalize_variable_values(model.trainable_weights)
+
+    # train end
+    # If _eval_epoch_iterator exists, delete it after all epochs are done.
+    if getattr(model, "_eval_epoch_iterator", None) is not None:
+        del model._eval_epoch_iterator
+    callbacks.on_train_end(training_logs)
     for gradient_callback in gradient_callbacks:
         gradient_callback.on_train_end()
 
@@ -131,18 +209,6 @@ def fit(model, dataset, epochs=1, verbose=1, callbacks=None, initial_epoch=0):
 # Tries to replicate keras.backend.tensorflow.TensorFlowTrainer.train_step() (trainer.py, keras 3.5.0)
 # as much as possible.
 def _gradient_returning_train_step(model, monitoring_model, x, y, sample_weight, compute_output_gradients):
-    """
-    This method is programmatically converted via auto-graph.
-
-    Returns:
-        - metrics - dict. Metrics returned by model, including loss
-        - trainable_variable_gradients - list. Gradients tensor for each trainable variable.
-        - output_gradients - list. Gradients tensor for each layer output, or None if not requested.
-            Note that some layers will have None as the gradients tensor. eg: the last layer and layers
-            that aren't involved in the final output.
-        - layer_outputs - list. Raw outputs from each layer.
-    """
-
     # Forward pass
     with tf.GradientTape() as tape:
         monitoring_outputs = monitoring_model(x, training=True)
@@ -150,7 +216,7 @@ def _gradient_returning_train_step(model, monitoring_model, x, y, sample_weight,
         layer_outputs = monitoring_outputs[1:]
 
         loss = model.compute_loss(x=x, y=y, y_pred=y_pred, sample_weight=sample_weight, training=True)
-        model._loss_tracker.update_state(loss, sample_weight=tf.shape(tf.keras.tree.flatten(x)[0])[0])
+        model._loss_tracker.update_state(loss, sample_weight=tf.shape(tree.flatten(x)[0])[0])
         loss = model.optimizer.scale_loss(loss)
 
     # Backward pass
