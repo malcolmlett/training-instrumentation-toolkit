@@ -2588,7 +2588,7 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
         Whether to extract layers from the model or to use the current model outputs as is.
 
     Returns:
-      (model_stats, layer_stats, layer_spatial_activity_rates), where:
+      (model_stats, layer_stats, layer_channel_activity, layer_spatial_activity), where:
         model_stats = {
           'mean_dead_rate': mean dead rate across layers
           'min_dead_rate': min dead rate across layers
@@ -2610,7 +2610,8 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
     # prepare model
     extract_layers = kwargs.get('extract_layers', True)
     if extract_layers:
-        monitoring_model = tf.keras.Model(inputs=model.inputs, outputs=[layer.output for layer in model.layers])
+        inputs = _original_inputs(model)
+        monitoring_model = tf.keras.Model(inputs=inputs, outputs=[layer.output for layer in model.layers])
     else:
         monitoring_model = model
 
@@ -2697,7 +2698,7 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
     return res
 
 
-def plot_history_overview(callbacks: list):
+def plot_history_overview(callbacks: list, details=True):
     """
     Uber-plotting function that selecst the most salient attributes of the other
     plot_xxx_history() functions so that a single plot can highlight areas that need further
@@ -2711,6 +2712,8 @@ def plot_history_overview(callbacks: list):
             - GradientHistoryCallback
             - LayerOutputHistoryCallback
             - LayerOutputGradientHistoryCallback
+        details: bool
+            Whether to include rows of plots for each callback, or just the main overview row otherwise.
     """
 
     # parse arguments - extract individual callbacks by type
@@ -2785,7 +2788,7 @@ def plot_history_overview(callbacks: list):
     plot_rows = 1
     has_activity_stats = False
     for cb in [variables, gradients, activity, output_gradients]:
-        if cb is not None:
+        if details and cb is not None:
             plot_rows += 1
         if cb is not None and cb.activity_stats is not None:
             has_activity_stats = True
@@ -2801,15 +2804,16 @@ def plot_history_overview(callbacks: list):
         keys = history_stats.history.keys() if history_stats else history.history.keys()
         hist_per_step = per_step and history_stats is not None and history_stats.step_history is not None
         for s_idx, key in enumerate(keys):
+            color = plt.rcParams['axes.prop_cycle'].by_key()['color'][s_idx]
             if hist_per_step:
-                plt.plot(history_stats.steps, history_stats.step_history[key], label=key)
+                plt.plot(history_stats.steps, history_stats.step_history[key], label=key, color=color)
             elif key == 'loss' and history_stats:
                 _plot_add_quantiles(history_stats.epoch, history_stats.epoch_stats[key],
-                                    label=key, show_percentile_labels=False, single_series=False)
+                                    label=key, show_percentile_labels=False, single_series=False, color=color)
             elif history_stats:
-                plt.plot(history_stats.epoch, history_stats.history[key], label=key)
+                plt.plot(history_stats.epoch, history_stats.history[key], label=key, color=color)
             else:
-                plt.plot(history.epoch, history.history[key], label=key)
+                plt.plot(history.epoch, history.history[key], label=key, color=color)
         plt.margins(0)
         plt.legend()
         plt.yscale('log')
@@ -2831,7 +2835,7 @@ def plot_history_overview(callbacks: list):
 
     # Per-callback plot rows
     for cb_idx, cb in enumerate([variables, gradients, activity, output_gradients]):
-        if cb is not None:
+        if details and cb is not None:
             item_type = cb.item_type
             item_name = cb.item_name
             
@@ -3129,13 +3133,13 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin):
 
     # all-model high-level summary
     plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
+    plt.title(f"{item_name_upper} unit activation rates over all {item_type_name}")
     plt.plot(iterations, model_stats['mean_activation_rate'], label='mean activation rate',
              color='tab:blue')
     plt.fill_between(iterations, model_stats['min_activation_rate'],
                      model_stats['max_activation_rate'], color='tab:blue', alpha=0.2,
                      label='min/max range')
     plt.ylim([0.0, 1.1])
-    plt.title(f"{item_name_upper} unit activation rates over all {item_type_name}")
     plt.xlabel(iteration_name)
     plt.ylabel('fraction of units')
     plt.legend()
@@ -3153,7 +3157,7 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin):
     if has_spatial_shapes:
         plt.plot(iterations, model_stats['mean_spatial_dead_rate'], label='mean spatial dead rate', color='tab:orange')
         plt.fill_between(iterations, model_stats['min_spatial_dead_rate'], model_stats['max_spatial_dead_rate'],
-                         color='tab:orange', alpha=0.2, label='min/max range')
+                         color='tab:orange', alpha=0.2, label='min/max dead rate')
 
     # individual items
     for i_idx in range(num_items):
@@ -3166,6 +3170,7 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin):
         r = 2 + i_idx // grid_width
         c = i_idx % grid_width
         plt.subplot2grid((grid_height, grid_width), (r, c))
+        plt.title(item_display_names[i_idx])
         plt.plot(iterations, activation_rates, label='activation rates', color='tab:blue')
         plt.fill_between(iterations, 0, activation_rates, color='tab:blue', alpha=0.2)
         plt.plot(iterations, dead_rates, label='dead units', color='tab:red')
@@ -3176,9 +3181,6 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin):
             plt.plot(iterations, spatial_dead_rates, label='spatial dead units', color='tab:orange', alpha=0.8)
         plt.ylim([0.0, 1.0])
         plt.margins(0)
-        plt.title(item_display_names[i_idx])
-        if i_idx == 0:
-            plt.legend()
 
         # text overlay
         plot_width = np.max(iterations)
