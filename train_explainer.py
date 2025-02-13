@@ -269,7 +269,7 @@ def explain_near_zero_gradients(callbacks: list,
             return True
     if produces_error(target_layer_handler.get_weight_gradients):
         print(f"Warning - unable to provide accurate report because {', '.join(missing_infos)}")
-        print(f"Error - No gradients found target layer")
+        print(f"Error - No gradients found for target layer")
         return
     if produces_error(target_layer_handler.get_weights):
         print(f"Warning - unable to provide accurate report because {', '.join(missing_infos)}")
