@@ -379,7 +379,8 @@ class HistoryStats(tf.keras.callbacks.History):
     def on_epoch_begin(self, epoch, logs=None):
         super().on_epoch_begin(epoch, logs)
         self._this_epoch_history = {}
-        self._epoch_start_step = (self.steps[-1] + 1) if len(self.steps) > 0 else 0
+        if self.steps is not None:
+            self._epoch_start_step = (self.steps[-1] + 1) if len(self.steps) > 0 else 0
 
     def on_train_batch_end(self, step, logs=None):
         super().on_train_batch_end(step, logs)
@@ -2900,10 +2901,10 @@ def plot_train_history(callback: HistoryStats, per_step=False, show_loss_percent
     # identify "losses" vs other metrics
     # - the main distinction needed here is between those that need to be on a log scale because they get progressively
     #   closer to zero, and those that tend to remain within the scale of 0.0 to 1.0.
-    def is_loss(key):
-        return 'loss' in key or 'entropy' in key
-    loss_keys = [k for k in callback.epoch_stats.keys() if is_loss(k)]
-    metric_keys = [k for k in callback.epoch_stats.keys() if not is_loss(k)]
+    def is_loss(k):
+        return 'loss' in k or 'entropy' in k
+    loss_keys = [k for k in callback.history.keys() if is_loss(k)]
+    metric_keys = [k for k in callback.history.keys() if not is_loss(k)]
 
     # prepare
     iterations = callback.steps if per_step else callback.epoch
