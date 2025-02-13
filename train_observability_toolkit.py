@@ -2698,7 +2698,7 @@ def measure_unit_activity(model, dataset, include_channel_activity=False, includ
     return res
 
 
-def plot_history_overview(callbacks: list, details=True):
+def plot_history_overview(callbacks: list, details=True, iterations=None):
     """
     Uber-plotting function that selecst the most salient attributes of the other
     plot_xxx_history() functions so that a single plot can highlight areas that need further
@@ -2714,6 +2714,16 @@ def plot_history_overview(callbacks: list, details=True):
             - LayerOutputGradientHistoryCallback
         details: bool
             Whether to include rows of plots for each callback, or just the main overview row otherwise.
+        iterations: slice, range, list, set, or other list-like
+            Selection over iterations to be displayed, counted against epoch or steps, depending on what is being
+            displayed. Selection method depends on type provided, which becomes important where history data
+            doesn't start at iteration 0:
+            - `slice(start, stop, step)` - selects by **index**, eg: slice(0, 50) for the first 50 iterations,
+               whatever range they happen to be in.
+            - `range(start, stop)` - selects by range of included **value**, eg: range(0, 50) for only those source
+               iterations that fall within the range 0 .. 50.
+            - any list-like object: Filters based on exact membership. Preserves selection order if available.
+              It is an error to select iterations that are not present.
     """
 
     # parse arguments - extract individual callbacks by type
@@ -2736,6 +2746,7 @@ def plot_history_overview(callbacks: list, details=True):
             gradients = cb
         elif reload_safe_isinstance(cb, LayerOutputGradientHistoryCallback):
             output_gradients = cb
+    history_either = history_stats if history_stats is not None else history
 
     # sanity check
     # - note: don't care if history is collected at a different rate to the rest
@@ -2758,28 +2769,29 @@ def plot_history_overview(callbacks: list, details=True):
 
     # prepare - iteration list
     # - must be right length for main callbacks
-    # - but prefer list from history_stats if present
+    # - but prefer list from history_stats if present and the right length
+    # - then apply filter
     iteration_name = 'step' if per_step else 'epoch'
-    it_len = None
+    src_it_len = None
     for cb in [variables, gradients, activity, output_gradients]:
         if cb.collected_value_stats is not None:
-            it_len = len(cb.collected_value_stats[0])
+            src_it_len = len(cb.collected_value_stats[0])
             break
         elif cb.collected_activity_stats is not None:
-            it_len = len(cb.collected_activity_stats[0])
+            src_it_len = len(cb.collected_activity_stats[0])
             break
     if not len:
         raise ValueError("None of the callbacks seem to have iteration information")
 
-    iterations = None
+    src_iterations = None
     if per_step and history_stats and history_stats.steps is not None:
-        iterations = history_stats.steps
-    elif not per_step and history_stats:
-        iterations = history_stats.epoch
-    elif not per_step and history:
-        iterations = history.epoch
-    if iterations is None or len(iterations) != it_len:
-        iterations = list(range(it_len))
+        src_iterations = history_stats.steps
+    elif not per_step and history_either is not None:
+        src_iterations = history_either.epoch
+    if src_iterations is None or len(src_iterations) != src_it_len:
+        src_iterations = list(range(src_it_len))
+
+    iterations, iteration_indices = _filter_iterations(src_iterations, iterations, return_indices=True)
 
     # determine plot size
     # - two plots across top, 3-grid-cols each
@@ -2803,21 +2815,35 @@ def plot_history_overview(callbacks: list, details=True):
         plt.title("Loss and Metrics")
         keys = history_stats.history.keys() if history_stats else history.history.keys()
         hist_per_step = per_step and history_stats is not None and history_stats.step_history is not None
+        if hist_per_step == per_step:
+            hist_iterations = iterations
+            hist_iteration_indices = iteration_indices
+        elif hist_per_step:
+            hist_iterations = history_stats.steps
+            hist_iteration_indices = list(range(len(hist_iterations)))
+        else:
+            hist_iterations = history_either.epoch
+            hist_iteration_indices = list(range(len(hist_iterations)))
         for s_idx, key in enumerate(keys):
             color = plt.rcParams['axes.prop_cycle'].by_key()['color'][s_idx]
             if hist_per_step:
-                plt.plot(history_stats.steps, history_stats.step_history[key], label=key, color=color)
+                plt.plot(
+                    hist_iterations,
+                    np.array(history_stats.step_history[key])[hist_iteration_indices],
+                    label=key, color=color)
             elif key == 'loss' and history_stats:
-                _plot_add_quantiles(history_stats.epoch, history_stats.epoch_stats[key],
-                                    label=key, show_percentile_labels=False, single_series=False, color=color)
-            elif history_stats:
-                plt.plot(history_stats.epoch, history_stats.history[key], label=key, color=color)
+                _plot_add_quantiles(
+                    hist_iterations,
+                    history_stats.epoch_stats[key].iloc[hist_iteration_indices],
+                    label=key, show_percentile_labels=False, single_series=False, color=color)
             else:
-                plt.plot(history.epoch, history.history[key], label=key, color=color)
+                plt.plot(hist_iterations, np.array(history_either.history[key])[iteration_indices],
+                         label=key, color=color)
         plt.margins(0)
-        plt.legend()
         plt.yscale('log')
         plt.xlabel('step' if hist_per_step else 'epoch')
+        plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer tick marks
+        plt.legend()
 
     # Main plot - Warnings
     if has_activity_stats:
@@ -2826,12 +2852,13 @@ def plot_history_overview(callbacks: list, details=True):
         for cb in [variables, gradients, activity, output_gradients]:
             if cb is not None and cb.model_activity_stats is not None:
                 item_name = cb.item_name
-                plt.plot(iterations, cb.model_activity_stats['max_dead_rate'],
+                plt.plot(iterations, np.array(cb.model_activity_stats['max_dead_rate'])[iteration_indices],
                          label=f"Worst {item_name.lower()} dead rate")
         plt.margins(0)
         plt.ylim([0.0, 1.1])
-        plt.legend()
         plt.xlabel(iteration_name)
+        plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        plt.legend()
 
     # Per-callback plot rows
     for cb_idx, cb in enumerate([variables, gradients, activity, output_gradients]):
@@ -2843,18 +2870,20 @@ def plot_history_overview(callbacks: list, details=True):
             if cb.model_magnitude_stats is not None:
                 plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 0), colspan=2)
                 plt.title(f"All model {item_name.lower()}s")
-                _plot_add_quantiles(iterations, cb.model_magnitude_stats)
+                _plot_add_quantiles(iterations, cb.model_magnitude_stats.iloc[iteration_indices])
                 plt.margins(0)
                 plt.yscale('log')
                 plt.xlabel(iteration_name)
                 plt.ylabel('magnitude')
+                plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
                 plt.legend()
 
             # Column plot - Layer comparison
             if cb.magnitude_stats is not None:
                 plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 2), colspan=2)
+                filtered_mag_stats = [stat.iloc[iteration_indices] for stat in cb.collected_magnitude_stats]
                 _plot_layer_scale_comparison(
-                    model, item_type, cb.collected_magnitude_stats, cb.collected_value_stats_indices, iterations,
+                    model, item_type, filtered_mag_stats, cb.collected_value_stats_indices, iterations,
                     xlabel=iteration_name, ylabel="log-magnitude")
 
             # Column plot - Activity rates
@@ -2862,19 +2891,20 @@ def plot_history_overview(callbacks: list, details=True):
                 plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 4), colspan=2)
                 plt.title(f"{item_name} activation rates")
                 plt.plot(iterations,
-                         cb.model_activity_stats['mean_activation_rate'],
+                         np.array(cb.model_activity_stats['mean_activation_rate'])[iteration_indices],
                          color='tab:blue', label='mean')
                 plt.fill_between(iterations,
-                                 cb.model_activity_stats['min_activation_rate'],
-                                 cb.model_activity_stats['max_activation_rate'],
+                                 np.array(cb.model_activity_stats['min_activation_rate'])[iteration_indices],
+                                 np.array(cb.model_activity_stats['max_activation_rate'])[iteration_indices],
                                  color='tab:blue', alpha=0.2)
                 plt.plot(iterations,
-                         cb.model_activity_stats['max_dead_rate'],
+                         np.array(cb.model_activity_stats['max_dead_rate'])[iteration_indices],
                          color='tab:red', label='worst dead rate')
                 plt.margins(0)
                 plt.ylim([0.0, 1.1])
                 plt.xlabel(iteration_name)
                 plt.ylabel("fraction of units")
+                plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
                 plt.legend()
 
 
@@ -3418,7 +3448,8 @@ def _plot_layer_scale_comparison(model, item_type, item_magnitude_stats, item_in
     plt.title(title)
     plt.xlabel(xlabel)
     plt.ylabel(ylabel)
-    plt.gca().set_yticks([])
+    plt.gca().set_yticks([])  # don't show y-axis tick marks
+    plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure x-axis integer ticks
     plt.stackplot(iterations, band_log_scales.T, colors=['lightsteelblue', 'royalblue'], linewidth=0)
     # layer labels placed on mid-height of layer band on left-hand side
     sample_len = max(1, math.ceil(band_log_scales.shape[0] / 5))
@@ -3458,6 +3489,64 @@ def _pick_layer_data_from_variables(variable_data, variable_indices, model):
     filtered_layers = [model.layers[l_idx] for l_idx, (i_idx, _) in enumerate(layer_metas) if i_idx is not None]
     filtered_layer_indices = [l_idx for l_idx, (i_idx, _) in enumerate(layer_metas) if i_idx is not None]
     return filtered_stats, filtered_layers, filtered_layer_indices
+
+
+def _filter_iterations(src_iterations, selection=None, return_indices=False):
+    """
+    Filters the source iterations list
+    Args:
+      src_iterations: list of recorded iteration numbers, which may not start at zero.
+      selection (slice, range, or iterable):
+        - `slice(start, stop, step)`: selects by **index**, eg: slice(0, 50) for the first 50 iterations,
+           whatever range they happen to be in.
+        - `range(start, stop, step)`: selects by **value**, eg: range(0, 50) for only those source iterations that
+           fall within the range 0 .. 50.
+        - Any iterable (list, set, generator, numpy array, etc.): Filters based on membership.
+          Throws an error if any value in the selection is not found in the source.
+          Preserves selection order if providing an ordered iterable, or otherwise preserves the source iterations order.
+      return_indices: bool.
+        Whether to additionally return the indices of the selected iterations, w.r.t src_iterations
+    Returns:
+      A list of the filtered iterations.
+      OR
+      (filtered_iterations, filtered_indices)
+    """
+
+    if selection is None:
+        filtered_iterations = src_iterations
+        filtered_indices = list(range(len(src_iterations)))
+    elif isinstance(selection, slice):
+        # select by index
+        filtered_iterations = src_iterations[selection]
+        filtered_indices = list(range(*selection.indices(len(src_iterations))))
+    elif isinstance(selection, range):
+        # select by allowed range, ignoring any selection values that aren't present
+        filtered_iterations = [v for v in src_iterations if v in selection]
+        filtered_indices = [idx for idx, v in enumerate(src_iterations) if v in selection]
+    elif isinstance(selection, (list, tuple, set, np.ndarray)):
+        # sanity check
+        src_lookup = set(src_iterations)  # for speed efficiency
+        unmatched = [v for v in selection if v not in src_lookup]
+        if len(unmatched) > 0:
+            raise ValueError(f"Iteration values not found in source: {unmatched}")
+
+        # use as direct matching-filter int src_iterations (select by value membership)
+        if isinstance(selection, set):
+            # selection has no order (eg: set type) so preserve original order instead
+            selection = set(selection)  # for speed efficiency
+            filtered_iterations = [v for v in src_iterations if v in selection]
+            filtered_indices = [idx for idx, v in enumerate(filtered_iterations) if v in selection]
+        else:
+            # selection has order so preserve that
+            filtered_iterations = list(selection)
+            filtered_indices = [src_iterations.index(v) for v in filtered_iterations]
+    else:
+        raise TypeError("selection must be a slice, range, or iterable")
+
+    if return_indices:
+        return filtered_iterations, filtered_indices
+    else:
+        return filtered_iterations
 
 
 def reload_safe_isinstance(obj, cls):
