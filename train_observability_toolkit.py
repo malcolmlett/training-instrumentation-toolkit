@@ -3150,7 +3150,6 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin):
     plt.xlabel(iteration_name)
     plt.ylabel('fraction of units')
     plt.ylim([0.0, 1.1])
-    plt.legend()
     plt.plot(iterations, model_stats['mean_dead_rate'], label='mean dead rate', color='tab:red')
     plt.fill_between(iterations, model_stats['min_dead_rate'], model_stats['max_dead_rate'],
                      color='tab:red', alpha=0.2, label='min/max range')
@@ -3158,6 +3157,7 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin):
         plt.plot(iterations, model_stats['mean_spatial_dead_rate'], label='mean spatial dead rate', color='tab:orange')
         plt.fill_between(iterations, model_stats['min_spatial_dead_rate'], model_stats['max_spatial_dead_rate'],
                          color='tab:orange', alpha=0.2, label='min/max dead rate')
+    plt.legend()
 
     # individual items
     for i_idx in range(num_items):
