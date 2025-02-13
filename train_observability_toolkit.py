@@ -3069,6 +3069,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True, ite
     plt.title(title)
     plt.xlabel(iteration_name)
     plt.ylabel(f"mean scale of magnitudes")
+    plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer x-axis ticks
     plt.legend()
 
     # layer contributions - high-level summary
@@ -3085,6 +3086,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True, ite
         _plot_add_quantiles(iterations, data)
         plt.margins(0)
         plt.yscale('log' if magnitudes else 'linear')
+        plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
         if c == 0:
             plt.ylabel('log-magnitude' if magnitudes else 'value')
 
@@ -3161,13 +3163,11 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin, iterations=Non
 
     # Prepare x-axis iterations
     # - and apply filtering
-    def filter_dict_of_lists(dic):
-        return {key: np.array(data)[iteration_indices] for key, data in dic}
     iteration_name = 'epoch' if hasattr(callback, 'epochs') else 'step'
     src_iterations = callback.epochs if hasattr(callback, 'epochs') else callback.steps
     iterations, iteration_indices = _filter_iterations(src_iterations, iterations, return_indices=True)
-    model_stats = filter_dict_of_lists(model_stats)
-    collected_activity_stats = [filter_dict_of_lists(stat) for stat in collected_activity_stats]
+    model_stats = model_stats.iloc[iteration_indices]
+    collected_activity_stats = [stat.iloc[iteration_indices] for stat in collected_activity_stats]
 
     # Prepare for layer mode
     item_display_names = []
@@ -3206,6 +3206,7 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin, iterations=Non
     plt.ylim([0.0, 1.1])
     plt.xlabel(iteration_name)
     plt.ylabel('fraction of units')
+    plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer x-axis ticks
     plt.legend()
 
     # Death rate plot
@@ -3221,6 +3222,7 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin, iterations=Non
         plt.plot(iterations, model_stats['mean_spatial_dead_rate'], label='mean spatial dead rate', color='tab:orange')
         plt.fill_between(iterations, model_stats['min_spatial_dead_rate'], model_stats['max_spatial_dead_rate'],
                          color='tab:orange', alpha=0.2, label='min/max dead rate')
+    plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
     plt.legend()
 
     # individual items
@@ -3245,6 +3247,7 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin, iterations=Non
             plt.plot(iterations, spatial_dead_rates, label='spatial dead units', color='tab:orange', alpha=0.8)
         plt.ylim([0.0, 1.0])
         plt.margins(0)
+        plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
 
         # text overlay
         plot_width = np.max(iterations)
