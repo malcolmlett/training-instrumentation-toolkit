@@ -2874,10 +2874,11 @@ def plot_history_overview(callbacks: list):
                 plt.legend()
 
 
-def plot_train_history(callback: HistoryStats, per_step=False, show_loss_percentiles=True,
+def plot_train_history(callback: tf.keras.callbacks.History, per_step=False, show_loss_percentiles=True,
                        show_metric_percentiles=True):
     """
-    Plots the loss and metric curves from a training run as collected by `HistoryStats`.
+    Plots the loss and metric curves from a training run as collected by the standard `History` callback
+    or the extended `HistoryStats` callback.
     Works with aggregate histories that have been built up over multiple model.fit() calls.
 
     Flexibly supports different losses and metrics.
@@ -2885,7 +2886,7 @@ def plot_train_history(callback: HistoryStats, per_step=False, show_loss_percent
     on a linear plot.
 
     Args:
-        callback: a history stats callback populated with data from training.
+        callback: a history or history stats callback populated with data from training.
         per_step: whether to plot data from callback.step_history instead of callback.epoch_stats.
         show_loss_percentiles: whether to include full percentile information for losses and loss-like metrics,
           or just a single value otherwise. Disabling percentile plotting can be necessary if there are
@@ -2895,6 +2896,8 @@ def plot_train_history(callback: HistoryStats, per_step=False, show_loss_percent
           many metrics.
     """
     # sanity checks
+    if per_step and not hasattr(callback, 'step_history'):
+        raise ValueError("History callback cannot be used to plot per_step data")
     if per_step and callback.step_history is None:
         raise ValueError("HistoryStats callback did not collect per_step data")
 
@@ -2917,14 +2920,14 @@ def plot_train_history(callback: HistoryStats, per_step=False, show_loss_percent
         for s_idx, key in enumerate(loss_keys):
             if per_step:
                 plt.plot(iterations, callback.step_history[key], label=key)
-            elif show_loss_percentiles:
+            elif show_loss_percentiles and hasattr(callback, 'epoch_stats'):
                 _plot_add_quantiles(iterations, callback.epoch_stats[key],
                                     color=s_idx, label=key, show_percentile_labels=False, single_series=False)
             else:
                 plt.plot(iterations, callback.history[key], label=key)
         plt.legend()
         plt.yscale('log')
-        plt.xlabel('Step' if per_step else 'Epoch')
+        plt.xlabel('step' if per_step else 'epoch')
 
     if len(metric_keys) > 0:
         plt.subplot(1, 2, 2)
@@ -2932,13 +2935,13 @@ def plot_train_history(callback: HistoryStats, per_step=False, show_loss_percent
         for s_idx, key in enumerate(metric_keys):
             if per_step:
                 plt.plot(iterations, callback.step_history[key], label=key)
-            elif show_metric_percentiles:
+            elif show_metric_percentiles and hasattr(callback, 'epoch_stats'):
                 _plot_add_quantiles(iterations, callback.epoch_stats[key],
                                     color=s_idx, label=key, show_percentile_labels=False, single_series=False)
             else:
                 plt.plot(iterations, callback.history[key], label=key)
         plt.legend()
-        plt.xlabel('Step' if per_step else 'Epoch')
+        plt.xlabel('step' if per_step else 'epoch')
 
     plt.show()
 
