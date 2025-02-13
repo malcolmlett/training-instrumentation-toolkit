@@ -1163,13 +1163,13 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
         self._collect_activity_stats(1)  # always summing over 1 sample
 
         # raw data capture
-        self._collect_raw_values(values)
+        self._collect_raw_values(self.model.variables)
 
     def _collect_raw_values(self, values):
         # TODO do slicing
         if self._variable_values:
             for var_idx, (val_list, value) in enumerate(zip(self._variable_values, values)):
-                if value is not None:
+                if val_list is not None:
                     val_list.append(tf.identity(value))  # take copy of current state
 
 
@@ -1363,7 +1363,7 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
         # TODO do slicing
         if self._gradient_values:
             for var_idx, (val_list, value) in enumerate(zip(self._gradient_values, values)):
-                if value is not None:
+                if val_list is not None:
                     val_list.append(value)
 
 
