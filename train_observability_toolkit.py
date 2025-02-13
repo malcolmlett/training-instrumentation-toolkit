@@ -3059,7 +3059,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True, ite
     # start figure
     # - at least 4 layer plots wide
     # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_items) / 2) * 2)  # nearest even number >= 4
+    grid_width = min(6, max(4, round(math.sqrt(num_items) / 2) * 2))  # nearest even number >= 4 and <= 6
     grid_height = 2 + math.ceil(num_items / grid_width)
     plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
 
@@ -3193,7 +3193,7 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin, iterations=Non
     # start figure
     # - at least 4 layer plots wide
     # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_items) / 2) * 2)  # nearest even number >= 4
+    grid_width = min(6, max(4, round(math.sqrt(num_items) / 2) * 2))  # nearest even number >= 4 and <= 6
     grid_height = 2 + math.ceil(num_items / grid_width)
     plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
 
@@ -3287,9 +3287,9 @@ def plot_channel_stats(layer_channel_activity, model=None):
 
     # start figure
     # - at least 4 plots wide
-    # - each layer has two plots, arranged virtically
+    # - each layer has two plots, arranged vertically
     # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_layers)))
+    grid_width = min(6, max(4, round(math.sqrt(num_layers))))  # 4 <= width <= 6
     grid_height = math.ceil(num_layers / grid_width)
     plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
 
@@ -3353,9 +3353,9 @@ def plot_spatial_stats(layer_spatial_activity, model=None):
 
     # start figure
     # - at least 4 plots wide
-    # - each layer has two plots, arranged virtically
+    # - each layer has two plots, arranged vertically
     # - otherwise target a square grid of layer plots
-    grid_width = max(4, round(math.sqrt(num_layers * 2)))
+    grid_width = max(9, max(4, round(math.sqrt(num_layers * 2))))  # 4 <= width <= 9
     grid_height = math.ceil(num_layers / grid_width) * 2
     plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
 
