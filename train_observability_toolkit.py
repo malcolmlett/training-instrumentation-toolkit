@@ -2980,7 +2980,7 @@ def plot_train_history(callback: tf.keras.callbacks.History, per_step=False, sho
     plt.show()
 
 
-def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
+def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True, iterations=None):
     """
     Generates a figure containing a number of plots to visualise value or magnitude stats collected
     by one of the callbacks in this module.
@@ -2991,6 +2991,16 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
         callback: any of "value stats collecting" callbacks in this module
         magnitudes: whether to plot stats for value magnitudes (default),
             or for raw values otherwise.
+        iterations: slice, range, list, set, or other list-like
+            Selection over iterations to be displayed, counted against epoch or steps, depending on what is being
+            displayed. Selection method depends on type provided, which becomes important where history data
+            doesn't start at iteration 0:
+            - `slice(start, stop, step)` - selects by **index**, eg: slice(0, 50) for the first 50 iterations,
+               whatever range they happen to be in.
+            - `range(start, stop)` - selects by range of included **value**, eg: range(0, 50) for only those source
+               iterations that fall within the range 0 .. 50.
+            - any list-like object: Filters based on exact membership. Preserves selection order if available.
+              It is an error to select iterations that are not present.
     """
     # sanity checks
     item_type = callback.item_type if hasattr(callback, 'item_type') else None
@@ -3002,8 +3012,6 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
         raise ValueError(f"{type(callback).__name__} did not collect value stats")
 
     # collect data
-    iterations = callback.epochs if hasattr(callback, 'epochs') else callback.steps
-    iteration_name = 'epoch' if hasattr(callback, 'epochs') else 'step'
     model = callback.model
     model_stats = callback.model_magnitude_stats
     item_type = callback.item_type
@@ -3020,6 +3028,15 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
             f"All model {item_name}s (incl. non-trainable)"
     if hasattr(callback, 'before_updates'):
         title += ("\n(before updates)" if callback.before_updates else "\n(after updates)")
+
+    # Prepare x-axis iterations
+    # - and apply filtering
+    iteration_name = 'epoch' if hasattr(callback, 'epochs') else 'step'
+    src_iterations = callback.epochs if hasattr(callback, 'epochs') else callback.steps
+    iterations, iteration_indices = _filter_iterations(src_iterations, iterations, return_indices=True)
+    model_stats = model_stats.iloc[iteration_indices]
+    collected_item_value_stats = [stat.iloc[iteration_indices] for stat in collected_item_value_stats]
+    collected_item_magnitude_stats = [stat.iloc[iteration_indices] for stat in collected_item_magnitude_stats]
 
     # Prepare for layer mode
     item_display_names = []
@@ -3099,13 +3116,23 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True):
     plt.show()
 
 
-def plot_activity_history(callback: ActivityStatsCollectingMixin):
+def plot_activity_history(callback: ActivityStatsCollectingMixin, iterations=None):
     """
     Plots a high-level summary of unit activity rates across the entire model
     and across each layer.
 
     Args:
         callback: any of "activity stats collecting" callbacks in this module
+        iterations: slice, range, list, set, or other list-like
+            Selection over iterations to be displayed, counted against epoch or steps, depending on what is being
+            displayed. Selection method depends on type provided, which becomes important where history data
+            doesn't start at iteration 0:
+            - `slice(start, stop, step)` - selects by **index**, eg: slice(0, 50) for the first 50 iterations,
+               whatever range they happen to be in.
+            - `range(start, stop)` - selects by range of included **value**, eg: range(0, 50) for only those source
+               iterations that fall within the range 0 .. 50.
+            - any list-like object: Filters based on exact membership. Preserves selection order if available.
+              It is an error to select iterations that are not present.
 
     Generated figure is of form:
     - top row (two columns):
@@ -3122,9 +3149,6 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin):
         raise ValueError(f"{type(callback).__name__} did not collect activity stats")
 
     # collect data
-    iterations = callback.epochs if hasattr(callback, 'epochs') else callback.steps
-    iteration_name = 'epoch' if hasattr(callback, 'epochs') else 'step'
-
     model = callback.model
     model_stats = callback.model_activity_stats
     collected_activity_stats = callback.collected_activity_stats
@@ -3134,6 +3158,16 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin):
     # Deal with callback differences
     item_name_upper = callback.item_name
     item_type_name = 'layers' if item_type.value == ItemType.LAYER.value else 'variables'
+
+    # Prepare x-axis iterations
+    # - and apply filtering
+    def filter_dict_of_lists(dic):
+        return {key: np.array(data)[iteration_indices] for key, data in dic}
+    iteration_name = 'epoch' if hasattr(callback, 'epochs') else 'step'
+    src_iterations = callback.epochs if hasattr(callback, 'epochs') else callback.steps
+    iterations, iteration_indices = _filter_iterations(src_iterations, iterations, return_indices=True)
+    model_stats = filter_dict_of_lists(model_stats)
+    collected_activity_stats = [filter_dict_of_lists(stat) for stat in collected_activity_stats]
 
     # Prepare for layer mode
     item_display_names = []
