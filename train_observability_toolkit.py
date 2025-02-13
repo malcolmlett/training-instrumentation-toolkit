@@ -107,7 +107,6 @@ def fit(model, x=None, y=None, batch_size=None, epochs=1, verbose="auto", callba
         gradient_callback.on_train_begin()
 
     # training loop by epoch
-    print(f"Training via custom fit() function. Will produce a few warnings; you can usually ignore these.")
     initial_epoch = model._initial_epoch or initial_epoch
     for epoch in range(initial_epoch, epochs):
         model.reset_metrics()
