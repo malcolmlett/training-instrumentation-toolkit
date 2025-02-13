@@ -79,19 +79,14 @@ def fit(model, x=None, y=None, batch_size=None, epochs=1, verbose="auto", callba
     needs_output_gradients = any(cb.needs_output_gradients for cb in gradient_callbacks)
 
     # prepare model for layer output collection
-    # (original model output(s) will be first entry of new outputs array, it will have single tensor or list
-    # accordingly)
-    # FIXME this is now triggering the following warning when the model gets called during the train step.
-    #  It appears to be because model.inputs returns some sort of post-processed KerasTensor
-    #  but Model(inputs=...) is usually passed a less-compiled version of KerasTensor.
-    #  Note: tf.keras.Input() returns KerasTensor.
-    #  > /usr/local/lib/python3.11/dist-packages/keras/src/models/functional.py:237: UserWarning: The structure of
-    #  >   `inputs` doesn't match the expected structure.
-    #  > Expected: ['keras_tensor_66']
-    #  > Received: inputs=Tensor(shape=(32, 2))
-    #  >   warnings.warn(msg)
+    # - original model output(s) will be first entry of new outputs array, it will have single tensor or list
+    #   accordingly
+    # - note: naively one would simply pass `inputs=model.inputs`, however that property looses the original structure
+    #   (returns a list regardless of whether a single tensor, a list, or a dict was originally supplied) and causes
+    #   warnings and probably worse problems later on. model._inputs_struct seems to be the only thing that holds
+    #   the original structure of the inputs when the model was first created.
     monitoring_model = tf.keras.Model(
-        inputs=model.inputs,
+        inputs=model._inputs_struct,
         outputs=[model.outputs] + [layer.output for layer in model.layers])
 
     # prepare train function
@@ -241,7 +236,9 @@ class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
     By default, automatically logs progress 10 times during training.
 
     Use as:
-    >>> model.fit(...., verbose=0, callbacks=[LessVerboseProgressLogger()])
+    ```python
+    model.fit(...., verbose=0, callbacks=[LessVerboseProgressLogger()])
+    ```
     """
 
     def __init__(self, display_interval=None, display_total=10):
@@ -302,17 +299,18 @@ class HistoryStats(tf.keras.callbacks.History):
             or None if per_step is False
 
     Example:
-    >>> model = tf.keras.models.Sequential([tf.keras.layers.Dense(10)])
-    >>> model.compile(tf.keras.optimizers.SGD(), loss='mse')
-    >>> history = model.fit(np.arange(100).reshape(5, 20), np.zeros(5),
-    ...                     epochs=10, verbose=1, callbacks=[HistoryStats()])
-    >>> print(history.params)
-    {'verbose': 1, 'epochs': 10, 'steps': 1}
-    >>> # check the keys of history object
-    >>> print(history.history.keys())
-    dict_keys(['loss'])
-    >>> print(history.stats.keys())
-    dict_keys(['loss'])
+    ```python
+    model = tf.keras.models.Sequential([tf.keras.layers.Dense(10)])
+    model.compile(tf.keras.optimizers.SGD(), loss='mse')
+    history = model.fit(np.arange(100).reshape(5, 20), np.zeros(5),
+    ...                 epochs=10, verbose=1, callbacks=[HistoryStats()])
+    print(history.params)
+    # out: {'verbose': 1, 'epochs': 10, 'steps': 1}
+    print(history.history.keys())
+    # out: dict_keys(['loss'])
+    print(history.stats.keys())
+    # out: dict_keys(['loss'])
+    ```
     """
 
     def __init__(self, per_step=False, quantiles=None):
