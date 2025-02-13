@@ -2959,9 +2959,10 @@ def plot_train_history(callback: tf.keras.callbacks.History, per_step=False, sho
                                     color=s_idx, label=key, show_percentile_labels=False, single_series=False)
             else:
                 plt.plot(iterations, callback.history[key], label=key)
-        plt.legend()
         plt.yscale('log')
         plt.xlabel('step' if per_step else 'epoch')
+        plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer x-axis ticks
+        plt.legend()
 
     if len(metric_keys) > 0:
         plt.subplot(1, 2, 2)
@@ -2974,8 +2975,9 @@ def plot_train_history(callback: tf.keras.callbacks.History, per_step=False, sho
                                     color=s_idx, label=key, show_percentile_labels=False, single_series=False)
             else:
                 plt.plot(iterations, callback.history[key], label=key)
-        plt.legend()
         plt.xlabel('step' if per_step else 'epoch')
+        plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer x-axis ticks
+        plt.legend()
 
     plt.show()
 
