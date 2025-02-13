@@ -81,12 +81,8 @@ def fit(model, x=None, y=None, batch_size=None, epochs=1, verbose="auto", callba
     # prepare model for layer output collection
     # - original model output(s) will be first entry of new outputs array, it will have single tensor or list
     #   accordingly
-    # - note: naively one would simply pass `inputs=model.inputs`, however that property looses the original structure
-    #   (returns a list regardless of whether a single tensor, a list, or a dict was originally supplied) and causes
-    #   warnings and probably worse problems later on. model._inputs_struct seems to be the only thing that holds
-    #   the original structure of the inputs when the model was first created.
     monitoring_model = tf.keras.Model(
-        inputs=model._inputs_struct,
+        inputs=_original_inputs(model),
         outputs=[model.outputs] + [layer.output for layer in model.layers])
 
     # prepare train function
@@ -228,6 +224,33 @@ def _gradient_returning_train_step(model, monitoring_model, x, y, sample_weight,
     metrics = model.compute_metrics(x=x, y=y, y_pred=y_pred, sample_weight=sample_weight)
 
     return metrics, trainable_grads, output_grads, layer_outputs
+
+
+def _original_inputs(model):
+    """
+    Applies some heuristics to identify the inputs for the model in their originally supplied structure.
+    This isn't straightforward because model.inputs gets normalized into a list, disregarding whether
+    the original input structure was a single tensor, a list of tensors, a dict, or some other nested structure.
+    This matters because the actual input batches we use during training are from the end user and they will
+    match the input structure when originally created.
+    """
+    # extract Functional API from Sequence or otherwise
+    functional = None
+    if isinstance(model, keras.src.Functional):
+        functional = model
+    elif hasattr(model, '_functional'):
+        functional = model._functional
+
+    # extract original input structure from Functional
+    inputs = None
+    if functional is not None and hasattr(functional, '_inputs_struct'):
+        inputs = functional._inputs_struct
+
+    # fallback
+    if inputs is None:
+        inputs = model.inputs
+
+    return inputs
 
 
 class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
