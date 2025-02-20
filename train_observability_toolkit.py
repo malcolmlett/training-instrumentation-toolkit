@@ -2762,7 +2762,7 @@ def plot_history_overview(callbacks: list, details=True, iterations=None):
     # prepare - identify model
     model = None
     for cb in [variables, gradients, activity, output_gradients]:
-        if cb.model is not None:
+        if not model and cb and cb.model:
             model = cb.model
     if model is None:
         raise ValueError("None of the callbacks have a model set")
@@ -2774,10 +2774,10 @@ def plot_history_overview(callbacks: list, details=True, iterations=None):
     iteration_name = 'step' if per_step else 'epoch'
     src_it_len = None
     for cb in [variables, gradients, activity, output_gradients]:
-        if cb.collected_value_stats is not None:
+        if cb and cb.collected_value_stats is not None:
             src_it_len = len(cb.collected_value_stats[0])
             break
-        elif cb.collected_activity_stats is not None:
+        elif cb and cb.collected_activity_stats is not None:
             src_it_len = len(cb.collected_activity_stats[0])
             break
     if not len:
@@ -2861,8 +2861,10 @@ def plot_history_overview(callbacks: list, details=True, iterations=None):
         plt.legend()
 
     # Per-callback plot rows
-    for cb_idx, cb in enumerate([variables, gradients, activity, output_gradients]):
+    cb_idx = -1
+    for cb in [variables, gradients, activity, output_gradients]:
         if details and cb is not None:
+            cb_idx += 1
             item_type = cb.item_type
             item_name = cb.item_name
             
