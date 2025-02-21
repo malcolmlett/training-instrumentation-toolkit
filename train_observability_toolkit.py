@@ -66,8 +66,8 @@ def fit(model, x=None, y=None, batch_size=None, epochs=1, verbose="auto", callba
     # prepare callbacks tracking
     gradient_callbacks = []
     if callbacks is not None and not isinstance(callbacks, tf.keras.callbacks.CallbackList):
-        gradient_callbacks = [callback for callback in callbacks if isinstance(callback, BaseGradientCallback)]
-        callbacks = [callback for callback in callbacks if not isinstance(callback, BaseGradientCallback)]
+        gradient_callbacks = [callback for callback in callbacks if reload_safe_isinstance(callback, BaseGradientCallback)]
+        callbacks = [callback for callback in callbacks if not reload_safe_isinstance(callback, BaseGradientCallback)]
     if not isinstance(callbacks, tf.keras.callbacks.CallbackList):
         callbacks = tf.keras.callbacks.CallbackList(
             callbacks, add_history=True, add_progbar=verbose != 0, verbose=verbose, epochs=epochs,
