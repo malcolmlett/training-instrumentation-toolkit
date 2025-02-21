@@ -3594,8 +3594,18 @@ def reload_safe_isinstance(obj, cls):
     """
     Because I do a lot of `reload(module)` during development, `isinstance` tests become unreliable.
     """
+    def class_isinstance(obj_cls, ref_cls):
+        obj_cls_fqn = f"{obj_cls.__module__}.{obj_cls.__name__}"
+        cls_fqn = f"{ref_cls.__module__}.{ref_cls.__name__}"
+        if obj_cls_fqn == cls_fqn:
+            return True
+
+        # recurse through inheritance hierarchies
+        for parent in obj_cls.__bases__:
+            if class_isinstance(parent, ref_cls):
+                return True
+        return False
+
     if isinstance(obj, cls):
         return True
-    obj_cls_fqn = f"{type(obj).__module__}.{type(obj).__name__}"
-    cls_fqn = f"{cls.__module__}.{cls.__name__}"
-    return obj_cls_fqn == cls_fqn
+    return class_isinstance(type(obj), cls)
