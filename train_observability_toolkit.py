@@ -644,7 +644,7 @@ class ValueStatsCollectingMixin:
         Safe to call this every iteration. Only takes effect on the first call.
         """
         if self.value_norms_enabled and self._value_norms is None:
-            self._value_norms = []
+            self._value_norms = [[] if value is not None else None for value in values]
         if self.value_stats_enabled and self._value_stats is None:
             self._value_stats = [[] if value is not None else None for value in values]
             self._magnitude_stats = [[] if value is not None else None for value in values]
@@ -655,7 +655,8 @@ class ValueStatsCollectingMixin:
         # - from: list (by item) of list (by iteration) of tensor (by stat)
         # - to:   list (by item) of pd-dataframe: iterations x percentiles
         if self._value_norms is not None:
-            self._value_norms = np.stack(self._value_norms, axis=0)
+            self._value_norms = [np.array(item_norms) if item_norms is not None else None
+                                 for item_norms in self._value_norms]
         if self._value_stats is not None:
             self._value_stats = self._stats_tensor_list_to_dataframes(
                 self._value_stats, self.value_stats_quantiles)
@@ -701,7 +702,7 @@ class ValueStatsCollectingMixin:
         """
         def computation(tensor):
             if tensor is not None:
-                norm = tf.norm(tensor) / tf.sqrt(tf.cast(tf.size(tensor), dtype=tf.dtype))
+                norm = tf.norm(tensor) / tf.sqrt(tf.cast(tf.size(tensor), dtype=tensor.dtype))
                 value_percentiles = tfp.stats.percentile(tensor, quantiles, interpolation='linear')
                 magnitude_percentiles = tfp.stats.percentile(tf.abs(tensor), quantiles, interpolation='linear')
             else:
@@ -1020,11 +1021,17 @@ class PerEpochAccumulatorStrategy:
 
     @property
     def sum(self):
-        return self._accumulators
+        """
+        An immutable tensor containing the current sum
+        """
+        return [tf.identity(a) if a is not None else None for a in self._accumulators]
 
     @property
     def mean(self):
-        return [a / tf.cast(self._count, dtype=a.dtype) for a in self._accumulators]
+        """
+        An immutable tensor containing the current mean
+        """
+        return [a / tf.cast(self._count, dtype=a.dtype) if a is not None else None for a in self._accumulators]
 
     def accumulate(self, batch: int, tensors: list):
         """
@@ -1049,7 +1056,7 @@ class PerEpochAccumulatorStrategy:
     def _reset(self, accumulators, values):
         for accumulator, value in zip(accumulators, values):
             if value is not None:
-                accumulator.assign_set(value)
+                accumulator.assign(value)
 
     @tf.function
     def _add(self, accumulators, values):
@@ -1312,8 +1319,7 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
         self._epoch = 0
         self._collected_stats_indices_transpose = None  # from model.variable to model.trainable_variable
         self._filtered_value_variable_indices = None
-        if not per_step:
-            self._gradients_accumulator = PerEpochAccumulatorStrategy()
+        self._gradients_accumulator = PerEpochAccumulatorStrategy() if not per_step else None
 
     @property
     def item_name(self):
@@ -1423,7 +1429,7 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
         """
         if not self.per_step:
             self.epochs.append(epoch)
-            self._do_collection(self._gradients_accumulator.sum())
+            self._do_collection(self._gradients_accumulator.sum)
 
     def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations, output_gradients):
         """
@@ -1711,8 +1717,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
         self._epoch = 0
         self._layer_shapes = None
         self._filtered_value_layer_indices = None
-        if not per_step:
-            self._gradients_accumulator = PerEpochAccumulatorStrategy()
+        self._gradients_accumulator = PerEpochAccumulatorStrategy() if not per_step else None
 
     @property
     def item_name(self):
@@ -1850,7 +1855,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
         # (uses partial stats that were accumulated across the steps in the batch)
         if not self.per_step:
             self.epochs.append(epoch)
-            output_gradients = self._gradients_accumulator.sum()  # use aggregated gradients
+            output_gradients = self._gradients_accumulator.sum  # use aggregated gradients
             self._collect_value_stats(output_gradients)
             self._collect_activity_stats(self.params['steps'])
             self._collect_raw_values(output_gradients)
