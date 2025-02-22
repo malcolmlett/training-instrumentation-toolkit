@@ -3126,7 +3126,7 @@ def plot_train_history(callback: tf.keras.callbacks.History, per_step=False, sho
     plt.show()
 
 
-def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True, iterations=None):
+def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', iterations=None):
     """
     Generates a figure containing a number of plots to visualise value or magnitude stats collected
     by one of the callbacks in this module.
@@ -3135,8 +3135,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True, ite
 
     Args:
         callback: any of "value stats collecting" callbacks in this module
-        magnitudes: whether to plot stats for value magnitudes (default),
-            or for raw values otherwise.
+        show: one of 'magnitudes' (default), 'values', 'norms'.
         iterations: slice, range, list, set, or other list-like
             Selection over iterations to be displayed, counted against epoch or steps, depending on what is being
             displayed. Selection method depends on type provided, which becomes important where history data
@@ -3150,6 +3149,8 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True, ite
     """
     # sanity checks
     item_type = callback.item_type if hasattr(callback, 'item_type') else None
+    if show not in ('magnitudes', 'values', 'norms'):
+        raise ValueError(f"Invalid value for show: '{show}'")
     if item_type is None or item_type.value not in (ItemType.VARIABLE.value, ItemType.LAYER.value):  # reload-safe
         raise ValueError(f"Callback collects unsupported item type: {item_type}")
     if callback.value_norms is None:
@@ -3181,9 +3182,9 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True, ite
     src_iterations = callback.epochs if hasattr(callback, 'epochs') else callback.steps
     iterations, iteration_indices = _filter_iterations(src_iterations, iterations, return_indices=True)
     model_stats = model_stats.iloc[iteration_indices]
-    collected_item_value_norms = [norms[iteration_indices] for norms in callback.collected_item_value_norms]
-    collected_item_value_stats = [stat.iloc[iteration_indices] for stat in callback.collected_item_value_stats]
-    collected_item_magnitude_stats = [stat.iloc[iteration_indices] for stat in callback.collected_item_magnitude_stats]
+    collected_item_value_norms = [norms[iteration_indices] for norms in callback.collected_value_norms]
+    collected_item_value_stats = [stat.iloc[iteration_indices] for stat in callback.collected_value_stats]
+    collected_item_magnitude_stats = [stat.iloc[iteration_indices] for stat in callback.collected_magnitude_stats]
 
     # Prepare for layer mode
     item_display_names = []
@@ -3215,7 +3216,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True, ite
     plt.yscale('log')
     plt.title(title)
     plt.xlabel(iteration_name)
-    plt.ylabel(f"size-normalized norms")
+    plt.ylabel(f"norm (size-normalized)")
     plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer x-axis ticks
     plt.legend()
 
@@ -3228,18 +3229,28 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True, ite
         r = 2 + i_idx // grid_width
         c = i_idx % grid_width
         plt.subplot2grid((grid_height, grid_width), (r, c))
-        data = collected_item_magnitude_stats[i_idx] if magnitudes else collected_item_value_stats[i_idx]
         plt.title(item_display_names[i_idx])
-        _plot_add_quantiles(iterations, data)
         plt.margins(0)
-        plt.yscale('log' if magnitudes else 'linear')
         plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        if show == 'magnitudes':
+            _plot_add_quantiles(iterations, collected_item_magnitude_stats[i_idx])
+            yscale = 'log'
+            ylabel = 'magnitude'
+        elif show == 'values':
+            _plot_add_quantiles(iterations, collected_item_value_stats[i_idx])
+            yscale = 'linear'
+            ylabel = 'value'
+        else:
+            plt.plot(collected_item_value_norms[i_idx])
+            yscale = 'log'
+            ylabel = 'norm'
+        plt.yscale(yscale)
         if c == 0:
-            plt.ylabel('log-magnitude' if magnitudes else 'value')
+            plt.ylabel(ylabel)
 
         # add "pos/neg balance" information
         ax1 = plt.gca()
-        if magnitudes:
+        if show == 'magnitudes':
             balances = pos_neg_balance(collected_item_value_stats[i_idx])
             ax2 = ax1.twinx()
             ax2.set_ylim([-1.0, +1.0])
@@ -3256,7 +3267,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True, ite
         # text overlay
         plot_width = np.max(iterations)
         plot_range = np.array(ax1.get_ylim())
-        plot_mid = np.exp(np.mean(np.log(plot_range))) if magnitudes else np.mean(plot_range)
+        plot_mid = np.exp(np.mean(np.log(plot_range))) if yscale == 'log' else np.mean(plot_range)
         if item_shapes:
             plt.text(plot_width * 0.5, plot_mid,
                      f"{item_shapes[i_idx]}",
@@ -3607,7 +3618,7 @@ def _plot_layer_scale_comparison(model, item_type, item_scales, item_indices,
                                  iterations,
                                  title="Layer comparison",
                                  xlabel="Iteration",
-                                 ylabel="relative log of mean magnitude scale"):
+                                 ylabel="relative log-norm"):
     """
     Adds a "layer comparison" chart to an existing figure.
     For easier visual display in variables mode, uses only the largest variable from each layer.
