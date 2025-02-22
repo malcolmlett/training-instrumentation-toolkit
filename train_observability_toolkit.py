@@ -977,6 +977,57 @@ class ActivityStatsCollectingMixin:
                 in zip(channel_activity_sums, spatial_activity_sums)]
 
 
+class PerEpochAccumulatorStrategy:
+    """
+    Tip: instances may consume memory (including GPU memory) that isn't needed after training,
+    so these can be discarded automatically at the end of training.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._accumulators = None
+        self._count = None
+
+    @property
+    def sum(self):
+        return self._accumulators
+
+    @property
+    def mean(self):
+        return [a / tf.cast(self._count, dtype=a.dtype) for a in self._accumulators]
+
+    def accumulate(self, batch: int, tensors: list):
+        """
+        Args:
+            batch - batch index within epoch; used to determine whether this is the first in the epoch
+            tensors - the tensors to add to the accumulator
+        """
+        # init
+        if self._accumulators is None:
+            if batch > 0:
+                raise RuntimeError("Second or subsequent tensor received but not initialised")
+            self._accumulators = [tf.Variable(t, dtype=t.dtype) for t in tensors]
+            self._count = 0
+        elif batch == 0:
+            self._reset(self._accumulators, tensors)
+            self._count = 0
+        else:
+            self._add(self._accumulators, tensors)
+            self._count += 1
+
+    @tf.function
+    def _reset(self, accumulators, values):
+        for accumulator, value in zip(accumulators, values):
+            if value is not None:
+                accumulator.assign_set(value)
+
+    @tf.function
+    def _add(self, accumulators, values):
+        for accumulator, value in zip(accumulators, values):
+            if value is not None:
+                accumulator.assign_add(value)
+
+
 class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingMixin, ActivityStatsCollectingMixin):
     """
     Standard model.fit() callback that collects various statistics and/or raw values of
@@ -1177,8 +1228,12 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
     """
     Custom tot.fit() gradient callback that collects various statistics and/or raw values of the gradients during
     training.
-    Only works for normal gradients of trainable variables.
+    Only works for the standard gradients of trainable variables.
     See `LayerOutputGradientHistoryCallback` for gradients w.r.t layer outputs.
+
+    When collecting per-epoch stats and values, gradients used are the sum of per-step gradients over
+    the course of each epoch. This smooths out the fact that batched stochastic gradient descent tends
+    to jump-around as it iterates through the batches in each epoch.
 
     Other properties:
         model: the model captured
@@ -1223,6 +1278,8 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
         self._epoch = 0
         self._collected_stats_indices_transpose = None  # from model.variable to model.trainable_variable
         self._filtered_value_variable_indices = None
+        if not per_step:
+            self._gradients_accumulator = PerEpochAccumulatorStrategy()
 
     @property
     def item_name(self):
@@ -1317,6 +1374,9 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
         self._finalize_value_stats()
         self._finalize_activity_stats()
 
+        # free memory
+        del self._gradients_accumulator
+
     def on_epoch_begin(self, epoch):
         """
         Just tracks the current epoch number
@@ -1329,7 +1389,7 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
         """
         if not self.per_step:
             self.epochs.append(epoch)
-            self._do_collection(gradients)
+            self._do_collection(self._gradients_accumulator.sum())
 
     def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations, output_gradients):
         """
@@ -1340,6 +1400,8 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
             step = self.params['steps'] * self._epoch + batch
             self.steps.append(step)
             self._do_collection(gradients)
+        else:
+            self._gradients_accumulator.accumulate(batch, gradients)
 
     def _do_collection(self, gradients):
         # note: gradients list is always relative to model.trainable_variables, but I use
