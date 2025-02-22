@@ -3614,8 +3614,8 @@ def _plot_layer_scale_comparison(model, item_type, item_scales, item_indices,
     Args:
         model: the model
         item_type: layer or variable
-        item_scales: list of scalars indicating the "scale" of each collected item.
-            Typically some sort of norm of the item.
+        item_scales: list (by item) of 1D-arrays (by iteration) indicating the "scale" of each collected
+            item across iterations. Typically individual values are some sort of norm of the original tensor.
         item_indices: layer or variable indices of collected items
         iterations: x-axis values
     """
@@ -3626,6 +3626,7 @@ def _plot_layer_scale_comparison(model, item_type, item_scales, item_indices,
         filtered_scales, filtered_layers, _ = _pick_layer_data_from_variables(
             item_scales, item_indices, model)
         filtered_layer_names = [layer.name for layer in filtered_layers]
+    filtered_scales = np.stack(filtered_scales, axis=-1)
     band_log_scales = _log_normalize(filtered_scales, axis=-1)
 
     plt.margins(0)
