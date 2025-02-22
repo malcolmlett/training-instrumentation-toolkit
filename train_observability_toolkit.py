@@ -546,7 +546,7 @@ class ValueStatsCollectingMixin:
         Pandas data-frame with shape (iterations, percentiles).
         """
         if self._value_norms is not None:
-            scales = np.stack(self.collected_value_norms, axis=0)
+            scales = np.stack(self.collected_value_norms, axis=-1)
             return _compute_model_summary_stats(scales)
         else:
             return None
@@ -3011,24 +3011,24 @@ def plot_history_overview(callbacks: list, details=True, iterations=None):
             item_name = cb.item_name
             
             # Column plot - Value range
-            if cb.model_magnitude_stats is not None:
+            if cb.model_norm_stats is not None:
                 plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 0), colspan=2)
                 plt.title(f"All model {item_name.lower()}s")
-                _plot_add_quantiles(iterations, cb.model_magnitude_stats.iloc[iteration_indices])
+                _plot_add_quantiles(iterations, cb.model_norm_stats.iloc[iteration_indices])
                 plt.margins(0)
                 plt.yscale('log')
                 plt.xlabel(iteration_name)
-                plt.ylabel('magnitude')
+                plt.ylabel('norm')
                 plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
                 plt.legend()
 
             # Column plot - Layer comparison
-            if cb.magnitude_stats is not None:
+            if cb.value_norms is not None:
                 plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 2), colspan=2)
-                filtered_mag_stats = [stat.iloc[iteration_indices] for stat in cb.collected_magnitude_stats]
+                filtered_scales = [stat.iloc[iteration_indices] for stat in cb.collected_value_norms]
                 _plot_layer_scale_comparison(
-                    model, item_type, filtered_mag_stats, cb.collected_value_stats_indices, iterations,
-                    xlabel=iteration_name, ylabel="log-magnitude")
+                    model, item_type, filtered_scales, cb.collected_value_stats_indices, iterations,
+                    xlabel=iteration_name, ylabel="relative log-norm")
 
             # Column plot - Activity rates
             if cb.activity_stats is not None:
@@ -3152,6 +3152,8 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True, ite
     item_type = callback.item_type if hasattr(callback, 'item_type') else None
     if item_type is None or item_type.value not in (ItemType.VARIABLE.value, ItemType.LAYER.value):  # reload-safe
         raise ValueError(f"Callback collects unsupported item type: {item_type}")
+    if callback.value_norms is None:
+        raise ValueError(f"{type(callback).__name__} did not collect value norms")
     if callback.magnitude_stats is None:
         raise ValueError(f"{type(callback).__name__} did not collect value magnitude stats")
     if callback.value_stats is None:
@@ -3159,12 +3161,10 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True, ite
 
     # collect data
     model = callback.model
-    model_stats = callback.model_magnitude_stats
+    model_stats = callback.model_norm_stats
     item_type = callback.item_type
-    collected_item_value_stats = callback.collected_value_stats
-    collected_item_magnitude_stats = callback.collected_magnitude_stats
     collected_item_indices = callback.collected_value_stats_indices
-    num_items = len(collected_item_value_stats)
+    num_items = len(collected_item_indices)
 
     # Deal with callback differences
     item_name = callback.item_name.lower()
@@ -3181,8 +3181,9 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True, ite
     src_iterations = callback.epochs if hasattr(callback, 'epochs') else callback.steps
     iterations, iteration_indices = _filter_iterations(src_iterations, iterations, return_indices=True)
     model_stats = model_stats.iloc[iteration_indices]
-    collected_item_value_stats = [stat.iloc[iteration_indices] for stat in collected_item_value_stats]
-    collected_item_magnitude_stats = [stat.iloc[iteration_indices] for stat in collected_item_magnitude_stats]
+    collected_item_value_norms = [norms[iteration_indices] for norms in callback.collected_item_value_norms]
+    collected_item_value_stats = [stat.iloc[iteration_indices] for stat in callback.collected_item_value_stats]
+    collected_item_magnitude_stats = [stat.iloc[iteration_indices] for stat in callback.collected_item_magnitude_stats]
 
     # Prepare for layer mode
     item_display_names = []
@@ -3214,13 +3215,13 @@ def plot_value_history(callback: ValueStatsCollectingMixin, magnitudes=True, ite
     plt.yscale('log')
     plt.title(title)
     plt.xlabel(iteration_name)
-    plt.ylabel(f"mean scale of magnitudes")
+    plt.ylabel(f"size-normalized norms")
     plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer x-axis ticks
     plt.legend()
 
     # layer contributions - high-level summary
     plt.subplot2grid((grid_height, grid_width), (0, grid_width // 2), colspan=grid_width // 2, rowspan=2)
-    _plot_layer_scale_comparison(model, item_type, collected_item_magnitude_stats, collected_item_indices, iterations)
+    _plot_layer_scale_comparison(model, item_type, collected_item_value_norms, collected_item_indices, iterations)
 
     # individual layers or variables
     for i_idx in range(num_items):
@@ -3602,7 +3603,7 @@ def _plot_add_quantiles(x, data, label=None, color="tab:blue", show_percentile_l
                  label=_label(quantiles[bot], None))
 
 
-def _plot_layer_scale_comparison(model, item_type, item_magnitude_stats, item_indices,
+def _plot_layer_scale_comparison(model, item_type, item_scales, item_indices,
                                  iterations,
                                  title="Layer comparison",
                                  xlabel="Iteration",
@@ -3613,19 +3614,19 @@ def _plot_layer_scale_comparison(model, item_type, item_magnitude_stats, item_in
     Args:
         model: the model
         item_type: layer or variable
-        item_magnitude_stats: list of stats dataframes
-        item_indices: layer or variable indices
+        item_scales: list of scalars indicating the "scale" of each collected item.
+            Typically some sort of norm of the item.
+        item_indices: layer or variable indices of collected items
         iterations: x-axis values
     """
     if item_type.value == ItemType.LAYER.value:  # reload-safe
         filtered_layer_names = [model.layers[l_idx].name for l_idx in item_indices]
-        filtered_stats = item_magnitude_stats
+        filtered_scales = item_scales
     else:
-        filtered_stats, filtered_layers, _ = _pick_layer_data_from_variables(
-            item_magnitude_stats, item_indices, model)
+        filtered_scales, filtered_layers, _ = _pick_layer_data_from_variables(
+            item_scales, item_indices, model)
         filtered_layer_names = [layer.name for layer in filtered_layers]
-    scales = get_scales_across_stats_list(filtered_stats, scale_quantile=50)
-    band_log_scales = _log_normalize(scales, axis=-1)
+    band_log_scales = _log_normalize(filtered_scales, axis=-1)
 
     plt.margins(0)
     plt.title(title)
