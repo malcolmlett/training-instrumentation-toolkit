@@ -3025,7 +3025,7 @@ def plot_history_overview(callbacks: list, details=True, iterations=None):
             # Column plot - Layer comparison
             if cb.value_norms is not None:
                 plt.subplot2grid((grid_height, grid_width), (2 + cb_idx, 2), colspan=2)
-                filtered_scales = [stat.iloc[iteration_indices] for stat in cb.collected_value_norms]
+                filtered_scales = [norms[iteration_indices] for norms in cb.collected_value_norms]
                 _plot_layer_scale_comparison(
                     model, item_type, filtered_scales, cb.collected_value_stats_indices, iterations,
                     xlabel=iteration_name, ylabel="relative log-norm")
