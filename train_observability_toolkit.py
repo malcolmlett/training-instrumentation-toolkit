@@ -512,19 +512,25 @@ class ValueStatsCollectingMixin:
     "Items" are typically something related to layers or variables.
     """
 
-    def __init__(self, value_stats=True, value_stats_quantiles=None, *args, **kwargs):
+    def __init__(self, value_norms=True, value_stats=True, value_stats_quantiles=None, *args, **kwargs):
         """
         Args:
+            value_norms: bool.
+                Whether to enable collection of value norms.
             value_stats: bool.
                 Whether to enable collection of value stats.
-
             value_stats_quantiles: list of percentiles in range 0 .. 100.
                 Default: [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
         """
         super().__init__(*args, **kwargs)
+        self.value_norms_enabled = value_norms
         self.value_stats_enabled = value_stats
         self.value_stats_quantiles = value_stats_quantiles or [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
         self._collected_value_indices = None
+
+        # - initially: list (by item) of list (by iteration) of scalar norms of gradients
+        # - finally:   list (by item) of np array with shape (iterations,)
+        self._value_norms = None
 
         # shape of data structure is optimised for speed of accumulation during training
         # so needs to be converted to a more usable data structure after training
@@ -534,15 +540,39 @@ class ValueStatsCollectingMixin:
         self._magnitude_stats = None
 
     @property
+    def model_norm_stats(self):
+        """
+        Stats across the norms of values across all measured variables/layers in the model.
+        Pandas data-frame with shape (iterations, percentiles).
+        """
+        if self._value_norms is not None:
+            scales = np.stack(self.collected_value_norms, axis=0)
+            return _compute_model_summary_stats(scales)
+        else:
+            return None
+
+    @property
     def model_magnitude_stats(self):
         """
         Stats across the general magnitudes of values across all measured variables/layers in the model.
         Pandas data-frame with shape (iterations, percentiles).
         """
         if self._magnitude_stats is not None:
-            return self._compute_scale_distribution_across_stats_list(self._magnitude_stats)
+            scales = get_scales_across_stats_list(self._magnitude_stats, 50)
+            return _compute_model_summary_stats(scales)
         else:
             return None
+
+    @property
+    def value_norms(self):
+        """
+        List (by variable/layer) of array containing the norms of each variable at each iteration,
+        or None if not enabled. Each list entry is either a numpy array of shape (iterations,), or
+        None if data is not available for that variable/layer.
+        Norms are calculated as the frobenius (aka euclidean) norm, and then divided by `sqrt(size)` so that tensors
+        of different sizes have the same scale. Mathematically equivalent to the RMS of the individual values.
+        """
+        return self._value_norms
 
     @property
     def value_stats(self):
@@ -561,6 +591,18 @@ class ValueStatsCollectingMixin:
         or None if stats are not collected for that variable/layer.
         """
         return self._magnitude_stats
+
+    @property
+    def collected_value_norms(self):
+        """
+        Value norms filtered only on those that have been collected.
+        None if value norms collection is disabled.
+        Use collected_value_stats_indices() to identify which model variables/layers are included.
+        """
+        if self._value_norms is not None:
+            return [norms for norms in self._value_norms if norms is not None]
+        else:
+            return None
 
     @property
     def collected_value_stats(self):
@@ -601,6 +643,8 @@ class ValueStatsCollectingMixin:
         Automatically called on first data collection.
         Safe to call this every iteration. Only takes effect on the first call.
         """
+        if self.value_norms_enabled and self._value_norms is None:
+            self._value_norms = []
         if self.value_stats_enabled and self._value_stats is None:
             self._value_stats = [[] if value is not None else None for value in values]
             self._magnitude_stats = [[] if value is not None else None for value in values]
@@ -610,6 +654,8 @@ class ValueStatsCollectingMixin:
         # convert data structures
         # - from: list (by item) of list (by iteration) of tensor (by stat)
         # - to:   list (by item) of pd-dataframe: iterations x percentiles
+        if self._value_norms is not None:
+            self._value_norms = np.stack(self._value_norms, axis=0)
         if self._value_stats is not None:
             self._value_stats = self._stats_tensor_list_to_dataframes(
                 self._value_stats, self.value_stats_quantiles)
@@ -619,26 +665,29 @@ class ValueStatsCollectingMixin:
     def _collect_value_stats(self, values):
         self._init_value_stats(values)
         if self._value_stats is not None:
-            # compute value and magnitued percentile stats for each individual variable
-            stat_pairs = self._compute_percentile_stats(values, self.value_stats_quantiles)
+            # compute value and magnitude percentile stats for each individual variable
+            # - returns tuples (norm, magnitude_percentiles, value_percentiles)
+            stat_tuples = self._compute_iteration_value_stats(values, self.value_stats_quantiles)
 
             # append to stats list
             # (performance note: this loop doesn't seem to cost much)
-            for item_value_stats, item_magnitude_stats, (value_percentiles, magnitude_percentiles) \
-                    in zip(self._value_stats, self._magnitude_stats, stat_pairs):
+            for item_value_norms, item_value_stats, item_magnitude_stats,\
+                    (norm, value_percentiles, magnitude_percentiles) \
+                    in zip(self._value_norms, self._value_stats, self._magnitude_stats, stat_tuples):
+                if item_value_norms is not None:
+                    item_value_norms.append(norm)
                 if item_value_stats is not None:
                     item_value_stats.append(value_percentiles)
                 if item_magnitude_stats is not None:
                     item_magnitude_stats.append(magnitude_percentiles)
 
-    # This is fairly expensive. It could be worth optionally calculating percentiles, but by default
-    # calculating simpler stats. Just need to find a way to cope with magnitude data that doesn't
-    # work well for std.dev calcualtions.
+    # This is fairly expensive. It could be worth defaulting to calculation of simpler stats and only doing
+    # percentiles if requested. However, simple mean + stddev isn't very good for heavily skewed distributions
+    # like gradient magnitudes.
     @tf.function
-    def _compute_percentile_stats(self, tensors, quantiles):
+    def _compute_iteration_value_stats(self, tensors, quantiles):
         """
-        Computes a set of percentiles across the raw values and magnitudes of each
-        provided tensor.
+        Computes a set of stats across the raw values and magnitudes of each provided tensor.
         For tensors that commonly have values distributed either side of zero, the median will
         typically be around zero, and the 25th and 75th percentiles represent the respective medians
         in the positive and negative halves.
@@ -646,16 +695,18 @@ class ValueStatsCollectingMixin:
             tensors: list of tensors for which percentiles should be calculated, some of which may be None.
             quantiles: list of quantiles to compute values for
         Returns:
+            - norm - scalar norm
             - value_percentiles - tensor of percentile values across the tensor values, None for None tensors
             - magnitude_percentile - tensor of percentile values across the tensor magnitudes, None for None tensors
         """
         def computation(tensor):
             if tensor is not None:
+                norm = tf.norm(tensor) / tf.sqrt(tf.cast(tf.size(tensor), dtype=tf.dtype))
                 value_percentiles = tfp.stats.percentile(tensor, quantiles, interpolation='linear')
                 magnitude_percentiles = tfp.stats.percentile(tf.abs(tensor), quantiles, interpolation='linear')
             else:
-                value_percentiles, magnitude_percentiles = None, None
-            return value_percentiles, magnitude_percentiles
+                norm, value_percentiles, magnitude_percentiles = None, None, None
+            return norm, value_percentiles, magnitude_percentiles
         return [computation(tensor) for tensor in tensors]
 
     @staticmethod
@@ -675,29 +726,6 @@ class ValueStatsCollectingMixin:
                 df = None
             item_dataframes.append(df)
         return item_dataframes
-
-    @staticmethod
-    def _compute_scale_distribution_across_stats_list(magnitude_stats_dataframes, quantiles=None):
-        """
-        Calculates meta-stats against a set of quantile stats.
-        Assumes the use of dataframes where each column represents a quantile, represented as a number in range 0 to 100.
-        Args:
-            magnitude_stats_dataframes: list (by item) of pandas dataframes of shape (iterations, quantiles)
-            quantiles: set of quantiles to return in final result.
-        Returns:
-            pandas dataframe with shape (iterations, quantiles)
-        """
-        quantiles = quantiles or [0, 25, 50, 75, 100]
-
-        # collect a table of all scales across all stats
-        scales = get_scales_across_stats_list(magnitude_stats_dataframes, 50)
-
-        # calculate stats across the table
-        stats = tfp.stats.percentile(scales, quantiles, axis=-1, interpolation='linear')
-        stats = tf.transpose(stats)
-
-        # return as dataframe with quantiles as columns
-        return pd.DataFrame(stats.numpy(), columns=quantiles)
 
 
 class ActivityStatsCollectingMixin:
@@ -979,8 +1007,10 @@ class ActivityStatsCollectingMixin:
 
 class PerEpochAccumulatorStrategy:
     """
-    Tip: instances may consume memory (including GPU memory) that isn't needed after training,
-    so these can be discarded automatically at the end of training.
+    Helps with efficiently summing up gradients etc. each update step within an epoch, so that results
+    can be computed on the sum or mean values at the end the epoch.
+    Tip: instances may consume memory that isn't needed after training, including GCP memory.
+    Instances of this class can usually be discarded automatically at the end of training.
     """
 
     def __init__(self):
@@ -1056,6 +1086,8 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
                 If False, this reflects the notion of capturing the weights and biases as a RESULT of each update step.
                 If True, this reflects the notion of capturing the weights and biases that were used DURING
                 the update step.
+            value_norms: bool, default: True.
+                Whether to collect the norms of values.
             value_stats: bool, default: True.
                 Whether to collect value and magnitude stats.
             activity_stats: bool, default: True.
@@ -1252,6 +1284,8 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
                 If per-step is set, then a `steps` list is available instead, and activity
                 is collected on each update step.
                 The same applies to layer output capture if enabled.
+            value_norms: bool, default: True.
+                Whether to collect the norms of values.
             value_stats: bool, default: True.
                 Whether to collect value and magnitude stats.
             activity_stats: bool, default: True.
@@ -1395,13 +1429,15 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
         """
         Collects gradient stats and raw gradients after each update step, if configured.
         """
-        # collect stats at each training step
+        # per-epoch mode only: accumulate gradients over course of epoch
+        if not self.per_step:
+            self._gradients_accumulator.accumulate(batch, gradients)
+
+        # per-step mode only: collect stats at each training step
         if self.per_step:
             step = self.params['steps'] * self._epoch + batch
             self.steps.append(step)
             self._do_collection(gradients)
-        else:
-            self._gradients_accumulator.accumulate(batch, gradients)
 
     def _do_collection(self, gradients):
         # note: gradients list is always relative to model.trainable_variables, but I use
@@ -1452,6 +1488,8 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
                 If per-step is set, then a `steps` list is available instead, and activity
                 is collected on each update step.
                 The same applies to layer output capture if enabled.
+            value_norms: bool, default: True.
+                Whether to collect the norms of values.
             value_stats: bool, default: True.
                 Whether to collect value and magnitude stats.
             activity_stats: bool, default: True.
@@ -1621,6 +1659,11 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
     """
     Custom tot.fit() gradient callback function that collects various statistics and/or raw values of
     layer output gradients during training.
+    See `GradientHistoryCallback` for the standard gradients w.r.t variables.
+
+    When collecting per-epoch stats and values, gradients used are the sum of per-step gradients over
+    the course of each epoch. This smooths out the fact that batched stochastic gradient descent tends
+    to jump-around as it iterates through the batches in each epoch.
 
     Other properties:
         model: the model captured
@@ -1639,6 +1682,8 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
                 If per-step is set, then a `steps` list is available instead, and activity
                 is collected on each update step.
                 The same applies to layer output capture if enabled.
+            value_norms: bool, default: True.
+                Whether to collect the norms of values.
             value_stats: bool, default: True.
                 Whether to collect value and magnitude stats.
             activity_stats: bool, default: True.
@@ -1666,6 +1711,8 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
         self._epoch = 0
         self._layer_shapes = None
         self._filtered_value_layer_indices = None
+        if not per_step:
+            self._gradients_accumulator = PerEpochAccumulatorStrategy()
 
     @property
     def item_name(self):
@@ -1759,6 +1806,9 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
         self._finalize_value_stats()
         self._finalize_activity_stats()
 
+        # free memory
+        del self._gradients_accumulator
+
     def on_epoch_begin(self, epoch):
         """
         Tracks the current epoch number and resets sums across each epoch
@@ -1781,6 +1831,10 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
         is_accum = (not self.per_step)
         self._accum_activity_stats(output_gradients, is_accum)
 
+        # per-epoch mode only: accumulate gradients over course of epoch
+        if not self.per_step:
+            self._gradients_accumulator.accumulate(batch, output_gradients)
+
         # stats calculations for each step, if configured
         if self.per_step:
             self.steps.append(self.params['steps'] * self._epoch + batch)
@@ -1796,6 +1850,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
         # (uses partial stats that were accumulated across the steps in the batch)
         if not self.per_step:
             self.epochs.append(epoch)
+            output_gradients = self._gradients_accumulator.sum()  # use aggregated gradients
             self._collect_value_stats(output_gradients)
             self._collect_activity_stats(self.params['steps'])
             self._collect_raw_values(output_gradients)
@@ -2310,6 +2365,26 @@ def _append_dict_list(dic, addendum_dict):
         dic[key].append(addendum_dict[key])
 
 
+def _compute_model_summary_stats(iteration_item_values, quantiles=None):
+    """
+    Calculates meta-stats against a set of quantile stats.
+    Assumes the use of dataframes where each column represents a quantile, represented as a number in range 0 to 100.
+    Args:
+        iteration_item_values: np array of shape (iterations, items) containing data to summarise
+        quantiles: set of quantiles to return in final result.
+    Returns:
+        pandas dataframe with shape (iterations, quantiles)
+    """
+    quantiles = quantiles or [0, 25, 50, 75, 100]
+
+    # calculate stats across the raw per-item values
+    stats = tfp.stats.percentile(iteration_item_values, quantiles, axis=-1, interpolation='linear')
+    stats = tf.transpose(stats)
+
+    return pd.DataFrame(stats.numpy(), columns=quantiles)
+    # return as dataframe with quantiles as columns
+
+
 # TODO consider alternatively estimating the original mean as something like
 #    sum([percentile * quantile for percentile,quantile in zip(percentiles, stats)])
 #  more accurately:
@@ -2374,7 +2449,7 @@ def _normalize_collection_sets_for_layers(model: tf.keras.Model, collection_sets
               # applicable if none of above specified:
               'include_non_trainable': bool (default False)  # whether to include non-trainable layers
 
-              # one of:
+              # one of (NOT YET SUPPORTED):
               'density': float, default: 1.0  # fraction of units to collect outputs from, automatically sliced
               'max_units': int, default: None  # max number of units to collect outputs from, automatically sliced
               'slices': [slice]  # slices to use for each selected layer
@@ -2485,7 +2560,7 @@ def _normalize_collection_sets_for_variables(model: tf.keras.Model, collection_s
               # applicable if none of above specified, or if using 'layers', 'layer_indices', or 'layer_names':
               'include_non_trainable': bool (default False)  # whether to include non-trainable variables
 
-              # one of:
+              # one of (NOT YET SUPPORTED):
               'density': float, default: 1.0  # fraction of units to collect outputs from, automatically sliced
               'max_units': int, default: None  # max number of units to collect outputs from, automatically sliced
               'slices': [slice]  # slices to use for each selected variable
