@@ -1900,6 +1900,19 @@ class LearningRateHistoryCallback(BaseGradientCallback):
         self._ilr_stats = [] if stats else None
 
     @property
+    def model_stats(self):
+        """
+        Pandas DataFrame with shape (iteration, percentiles) of stats over the norms of implicit learning rates.
+        """
+        # gather into shape (iterations, variables)
+        # then compute stats and return as (iterations, percentiles)
+        q = [0, 25, 50, 75, 100]
+        num_iterations = len(self._ilr_norms[0])
+        data = np.stack([[norms[it] for norms in self._ilr_norms] for it in range(num_iterations)], axis=0)
+        data = tfp.stats.percentile(data, q, axis=-1).numpy().T
+        return pd.DataFrame(data, columns=q)
+
+    @property
     def ilr_norms(self):
         """
         A list (by trainable variable) of 1D-array (by iteration) containing the norms of the per-element
@@ -3334,6 +3347,109 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin, iterations=Non
             plt.text(plot_width * 0.5, 0.5,
                      f"{item_shapes[i_idx]}\n"
                      f"{final_dead_rate * 100:.1f}% dead",
+                     horizontalalignment='center', verticalalignment='center')
+
+    plt.show()
+
+
+def plot_lr_history(callback: LearningRateHistoryCallback, show='auto', iterations=None):
+    """
+    Generates a figure containing a number of plots to visualise the collected learning rate history
+    information during training.
+
+    Args:
+        callback: callback populated with data from training
+        show: one of 'auto' (default), 'values', 'norms'. Where:
+            'auto' - plots value stats if available, otherwise norms.
+            'values' - implicit LR stats
+            'norms' - implicit LR norms
+        iterations: slice, range, list, set, or other list-like
+            Selection over iterations to be displayed, counted against epoch or steps, depending on what is being
+            displayed. Selection method depends on type provided, which becomes important where history data
+            doesn't start at iteration 0:
+            - `slice(start, stop, step)` - selects by **index**, eg: slice(0, 50) for the first 50 iterations,
+               whatever range they happen to be in.
+            - `range(start, stop)` - selects by range of included **value**, eg: range(0, 50) for only those source
+               iterations that fall within the range 0 .. 50.
+            - any list-like object: Filters based on exact membership. Preserves selection order if available.
+              It is an error to select iterations that are not present.
+    """
+    # sanity checks
+    if show not in ('auto', 'values', 'norms'):
+        raise ValueError(f"Invalid value for show: '{show}'")
+    if show == 'auto':
+        show = 'values' if callback.ilr_stats is not None else 'norms'
+    if show == 'values' and callback.ilr_stats is None:
+        raise ValueError(f"Callback did not collect implicit learning rate stats")
+
+    # collect data
+    model = callback.model
+    num_items = len(callback.ilr_norms)
+
+    # Prepare x-axis iterations
+    # - and apply filtering
+    src_iterations = list(range(len(callback.ilr_norms[0])))
+    iterations, iteration_indices = _filter_iterations(src_iterations, iterations, return_indices=True)
+    model_stats = callback.model_stats.iloc[iteration_indices]
+    collected_item_value_norms = [norms[iteration_indices] for norms in callback.ilr_norms]
+    collected_item_value_stats = [stat.iloc[iteration_indices] for stat in callback.ilr_stats]
+    collected_item_indices = trainable_variable_indices_to_variable_indices(model)
+
+    # Prepare display info
+    item_display_names = []
+    item_shapes = [model.variables[v_idx].shape for v_idx in collected_item_indices]
+    layer_id_lookup = layer_indices_by_variable(model)
+    for v_idx in collected_item_indices:
+        l_idx = layer_id_lookup[v_idx]
+        layer_name = model.layers[l_idx].name
+        variable_name = model.variables[v_idx].name
+        item_display_names.append(f"{layer_name}(#{l_idx})/{variable_name}")
+
+    # start figure
+    # - at least 4 layer plots wide
+    # - otherwise target a square grid of layer plots
+    grid_width = min(6, max(4, round(math.sqrt(num_items) / 2) * 2))  # nearest even number >= 4 and <= 6
+    grid_height = 2 + math.ceil(num_items / grid_width)
+    plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
+
+    # all-model high-level summary
+    plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
+    _plot_add_quantiles(iterations, model_stats)
+    plt.title("All model")
+    plt.margins(0)
+    plt.yscale('log')
+    plt.xlabel("iterations")
+    plt.ylabel(f"norm (size-normalized)")
+    plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer x-axis ticks
+    plt.legend()
+
+    # individual layers or variables
+    for i_idx in range(num_items):
+        r = 2 + i_idx // grid_width
+        c = i_idx % grid_width
+        plt.subplot2grid((grid_height, grid_width), (r, c))
+        plt.title(item_display_names[i_idx])
+        plt.margins(0)
+        plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
+        if show == 'values':
+            _plot_add_quantiles(iterations, collected_item_value_stats[i_idx])
+            yscale = 'linear'
+            ylabel = 'value'
+        else:
+            plt.plot(collected_item_value_norms[i_idx])
+            yscale = 'log'
+            ylabel = 'norm'
+        plt.yscale(yscale)
+        if c == 0:
+            plt.ylabel(ylabel)
+
+        # text overlay
+        plot_width = np.max(iterations)
+        plot_range = np.array(plt.gca().get_ylim())
+        plot_mid = np.exp(np.mean(np.log(plot_range))) if yscale == 'log' else np.mean(plot_range)
+        if item_shapes:
+            plt.text(plot_width * 0.5, plot_mid,
+                     f"{item_shapes[i_idx]}",
                      horizontalalignment='center', verticalalignment='center')
 
     plt.show()
