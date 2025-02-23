@@ -886,13 +886,14 @@ class ActivityStatsCollectingMixin:
 
         # convert per-item stats
         if self._activity_stats is not None:
-            def convert(i_idx):
+            def convert(i_idx, columns):
                 if self._activity_stats[0][i_idx] is not None:
-                    item_data = [np.stack(iteration_stats[i_idx], axis=-1) for iteration_stats in self._activity_stats]
-                    return pd.DataFrame(item_data, columns=self._activity_stat_keys())
+                    item_data = [iteration_stats[i_idx] for iteration_stats in self._activity_stats]
+                    return pd.DataFrame(item_data, columns=columns)
                 return None
             num_items = len(self._activity_stats[0])
-            self._activity_stats = [convert(i_idx) for i_idx in range(num_items)]
+            cols = self._activity_stat_keys()
+            self._activity_stats = [convert(i_idx, cols) for i_idx in range(num_items)]
 
         # compute model-whole stats
         if self._activity_stats is not None:
@@ -1870,6 +1871,80 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
                         self._gradient_values[l_idx] = None
                     else:
                         val_list.append(gradients[l_idx])
+
+
+class LearningRateHistoryCallback(BaseGradientCallback):
+    """
+    ADAM optimizers and others that use momentum have an effective dynamic learning rate that is computed
+    per-element and adapts to changes in the loss landscape during training. This callback attempts
+    to calculate that "implicit" per-element learning rate, and then to collect stats across the learning
+    rates for reporting.
+    """
+    def __init__(self, stats=True):
+        """
+        Args:
+            stats: bool.
+                Whether to collect percentile stats over per-element learning rates.
+                Adds considerable time to training.
+        """
+        super().__init__()
+        self._variables_before = None
+        self.quantiles = [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
+
+        # initially: list (by iteration) of list (by variable) of norm tensor
+        # finally: list (by variable) of np-array with shape (iteration,)
+        self._ilr_norms = []
+
+        # initially: list (by iteration) of list (by variable) of percentiles tensor
+        # finally: list (by variable) of pd-DataFrame with shape (iteration, percentile)
+        self._ilr_stats = [] if stats else None
+
+    @property
+    def ilr_norms(self):
+        """
+        A list (by trainable variable) of 1D-array (by iteration) containing the norms of the per-element
+        "implicit learning rates". Norms are size-adjusted, effectively computing the RMS of the per-element values.
+        """
+        return self._ilr_norms
+
+    @property
+    def ilr_stats(self):
+        """
+        A list (by trainable variable) of pandas DataFrame, with shape (iteration, percentile), containining percentile
+        stats over the per-element "implicit learning rates".
+        None if not enabled.
+        """
+        return self._ilr_stats
+
+    def on_train_end(self):
+        def gather(iteration_item_data, v_idx):
+            item_data = [iteration_values[v_idx] for iteration_values in iteration_item_data]
+            return np.stack(item_data, axis=0)  # shape: (iterations, ...)
+
+        # convert to final format
+        num_vars = len(self._ilr_stats[0])
+        self._ilr_norms = [gather(self._ilr_norms, v_idx) for v_idx in range(num_vars)]
+        if self._ilr_stats is not None:
+            self._ilr_stats = [pd.DataFrame(gather(self._ilr_stats, v_idx), columns=self.quantiles)
+                               for v_idx in range(num_vars)]
+
+    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations, output_gradients):
+        # free memory
+        del self._variables_before
+
+    def on_train_batch_begin(self, batch):
+        self._variables_before = [tf.identity(v) for v in self.model.trainable_variables]
+
+    def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations, output_gradients):
+        deltas = [after - before for after, before in zip(self.model.trainable_variables, self._variables_before)]
+        implicit_learning_rates = [-delta / g for delta, g in zip(deltas, gradients)]
+        implicit_learning_rates = [tf.gather_nd(ilr, tf.where(tf.math.is_finite(ilr))) for ilr in
+                                   implicit_learning_rates]
+        ilr_norms = [tf.norm(ilr) / tf.sqrt(tf.cast(tf.size(ilr), dtype=ilr.dtype)) for ilr in implicit_learning_rates]
+        self._ilr_norms.append(ilr_norms)
+        if self._ilr_stats is not None:
+            ilr_percentiles = [tfp.stats.percentile(ilr, self.quantiles) for ilr in implicit_learning_rates]
+            self._ilr_stats.append(ilr_percentiles)
 
 
 class ItemType(Enum):
