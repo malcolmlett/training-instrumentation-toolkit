@@ -3478,7 +3478,7 @@ def plot_lr_history(callback: LearningRateHistoryCallback, show='auto', iteratio
     plt.margins(0)
     plt.yscale('log')
     plt.xlabel(iteration_name)
-    plt.ylabel("norm (size-normalized)" if show == 'values' else "median")
+    plt.ylabel("median" if show == 'values' else "norm (size-normalized)")
     plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer x-axis ticks
     plt.legend()
 
