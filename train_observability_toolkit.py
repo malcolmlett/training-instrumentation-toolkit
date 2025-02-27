@@ -1879,16 +1879,37 @@ class LearningRateHistoryCallback(BaseGradientCallback):
     per-element and adapts to changes in the loss landscape during training. This callback attempts
     to calculate that "implicit" per-element learning rate, and then to collect stats across the learning
     rates for reporting.
+
+    When computing implicit learning rates on a per-epoch basis, computed values are an approximation. To get an
+    accurate mean learning rate we'd need to compute the learning rate and norm every update step and calculate the
+    norm at the end of the epoch, but this increases computation overhead by about 2.5x compared to the estimation
+    approach used here.
+
+    Multiple update steps affect each model variable as follows (where V = variable tensor, R = implicit learning
+    rate tensor, and G = gradient tensor), and (*) = element-wise multiplication):
+    > delta_V = sum{i=1..k}[R_i (*) G_i]
+
+    We compute the gradient sum G_s over the whole epoch, and use the full epoch delta_V to estimate
+    an average implicit learning rate R_mu as (where (/) is element-wise division). This is approximately a
+    gradient-weighted average of the individual per-step learning rates, with the caveat that gradients can be
+    negative. In practice the ILR norm trends measured this way tend to follow the same overall scale of a more
+    accurate per-epoch ILR mean.
+    >  delta_V = R_mu (*) G_s  => r_mu = delta_V (/) G_s
+
+    If you need a more accurate result, it's better to just collect per_step data and do the averaging yourself after.
     """
-    def __init__(self, stats=True):
+    def __init__(self, per_step=False, stats=True):
         """
         Args:
+            per_step: bool.
+                Whether to collect per-step values, or per-epoch otherwise.
             stats: bool.
                 Whether to collect percentile stats over per-element learning rates.
                 Adds considerable time to training.
         """
         super().__init__()
-        self._variables_before = None
+        self.per_step = per_step
+        self.stats = stats
         self.quantiles = [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
 
         # initially: list (by iteration) of list (by variable) of norm tensor
@@ -1898,6 +1919,10 @@ class LearningRateHistoryCallback(BaseGradientCallback):
         # initially: list (by iteration) of list (by variable) of percentiles tensor
         # finally: list (by variable) of pd-DataFrame with shape (iteration, percentile)
         self._ilr_stats = [] if stats else None
+
+        # internal tracking
+        self._variables_before = None
+        self._gradients_accumulator = PerEpochAccumulatorStrategy() if not per_step else None
 
     @property
     def model_stats(self):
@@ -1915,15 +1940,16 @@ class LearningRateHistoryCallback(BaseGradientCallback):
     @property
     def ilr_norms(self):
         """
-        A list (by trainable variable) of 1D-array (by iteration) containing the norms of the per-element
-        "implicit learning rates". Norms are size-adjusted, effectively computing the RMS of the per-element values.
+        A list (by trainable variable) of 1D-array (iteration) containing the norms of the per-element
+        "implicit learning rates". Norms are size-adjusted, making them mathematically equivalent to RMS of
+        the per-element values.
         """
         return self._ilr_norms
 
     @property
     def ilr_stats(self):
         """
-        A list (by trainable variable) of pandas DataFrame, with shape (iteration, percentile), containining percentile
+        A list (by trainable variable) of pandas DataFrame, with shape (iteration, percentile), containing percentile
         stats over the per-element "implicit learning rates".
         None if not enabled.
         """
@@ -1941,19 +1967,38 @@ class LearningRateHistoryCallback(BaseGradientCallback):
             self._ilr_stats = [pd.DataFrame(gather(self._ilr_stats, v_idx), columns=self.quantiles)
                                for v_idx in range(num_vars)]
 
-    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations, output_gradients):
         # free memory
         del self._variables_before
-
-    def on_train_batch_begin(self, batch):
+        del self._gradients_accumulator
+        
+    def on_epoch_begin(self, epoch):
         self._variables_before = [tf.identity(v) for v in self.model.trainable_variables]
 
+    def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations, output_gradients):
+        # per-epoch
+        if not self.per_step:
+            self._do_collect(self._variables_before, self._gradients_accumulator.sum)
+
     def on_train_batch_end(self, batch, loss, gradients, trainable_variables, activations, output_gradients):
-        deltas = [after - before for after, before in zip(self.model.trainable_variables, self._variables_before)]
+        if self.per_step:
+            # per-step mode: collect and update 'before' for next step
+            self._do_collect(self._variables_before, gradients)
+            self._variables_before = [tf.identity(v) for v in self.model.trainable_variables]
+        else:
+            # per-epoch mode: accumulate gradients over course of epoch
+            self._gradients_accumulator.accumulate(batch, gradients)
+
+    def _do_collect(self, variables_before, gradients):
+        # size-normalized norms (tf.norm(tensor) / tf.sqrt(tf.size(tensor))) are mathematically equivalent
+        # to the root-mean-square of the tensor. In practice there are some numerical stability differences in
+        # the implementation, and the RMS implementation is faster (~4x faster on GPU with tensors of size 2.5M).
+        # Thus, we actually compute the RMS value rather than using tf.norm().
+        deltas = [after - before for after, before in zip(self.model.trainable_variables, variables_before)]
         implicit_learning_rates = [-delta / g for delta, g in zip(deltas, gradients)]
         implicit_learning_rates = [tf.gather_nd(ilr, tf.where(tf.math.is_finite(ilr))) for ilr in
                                    implicit_learning_rates]
-        ilr_norms = [tf.norm(ilr) / tf.sqrt(tf.cast(tf.size(ilr), dtype=ilr.dtype)) for ilr in implicit_learning_rates]
+        ilr_norms = [tf.sqrt(tf.reduce_mean(tf.square(ilr))) for ilr in implicit_learning_rates]
+
         self._ilr_norms.append(ilr_norms)
         if self._ilr_stats is not None:
             ilr_percentiles = [tfp.stats.percentile(ilr, self.quantiles) for ilr in implicit_learning_rates]
