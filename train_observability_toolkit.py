@@ -1044,7 +1044,7 @@ class PerEpochAccumulatorStrategy:
         if self._accumulators is None:
             if batch > 0:
                 raise RuntimeError("Second or subsequent tensor received but not initialised")
-            self._accumulators = [tf.Variable(t, dtype=t.dtype) for t in tensors]
+            self._accumulators = [tf.Variable(t, dtype=t.dtype) if t is not None else None for t in tensors]
             self._count = 0
         elif batch == 0:
             self._reset(self._accumulators, tensors)
