@@ -3443,9 +3443,13 @@ def plot_lr_history(callback: LearningRateHistoryCallback, show='auto', iteratio
 
     # Prepare x-axis iterations
     # - and apply filtering
+    iteration_name = 'epoch' if hasattr(callback, 'epochs') else 'step'
     src_iterations = list(range(len(callback.ilr_norms[0])))
     iterations, iteration_indices = _filter_iterations(src_iterations, iterations, return_indices=True)
-    model_stats = callback.model_stats.iloc[iteration_indices]
+    if show == 'values':
+        model_stats = callback.model_stats.iloc[iteration_indices]
+    else:
+        model_stats = callback.model_norm_stats.iloc[iteration_indices]
     collected_item_value_norms = [norms[iteration_indices] for norms in callback.ilr_norms]
     collected_item_value_stats = [stat.iloc[iteration_indices] for stat in callback.ilr_stats]
     collected_item_indices = trainable_variable_indices_to_variable_indices(model)
@@ -3473,8 +3477,8 @@ def plot_lr_history(callback: LearningRateHistoryCallback, show='auto', iteratio
     plt.title("All model implicit learning rates")
     plt.margins(0)
     plt.yscale('log')
-    plt.xlabel("iterations")
-    plt.ylabel(f"norm (size-normalized)")
+    plt.xlabel(iteration_name)
+    plt.ylabel("norm (size-normalized)" if show == 'values' else "median")
     plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer x-axis ticks
     plt.legend()
 
