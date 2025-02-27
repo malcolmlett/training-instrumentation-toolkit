@@ -3415,7 +3415,7 @@ def plot_lr_history(callback: LearningRateHistoryCallback, show='auto', iteratio
     # all-model high-level summary
     plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
     _plot_add_quantiles(iterations, model_stats)
-    plt.title("All model")
+    plt.title("All model implicit learning rates")
     plt.margins(0)
     plt.yscale('log')
     plt.xlabel("iterations")
@@ -3433,7 +3433,7 @@ def plot_lr_history(callback: LearningRateHistoryCallback, show='auto', iteratio
         plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
         if show == 'values':
             _plot_add_quantiles(iterations, collected_item_value_stats[i_idx])
-            yscale = 'linear'
+            yscale = 'log'
             ylabel = 'value'
         else:
             plt.plot(collected_item_value_norms[i_idx])
