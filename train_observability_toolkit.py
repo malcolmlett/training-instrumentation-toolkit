@@ -1925,7 +1925,7 @@ class LearningRateHistoryCallback(BaseGradientCallback):
         self._gradients_accumulator = PerEpochAccumulatorStrategy() if not per_step else None
 
     @property
-    def model_stats(self):
+    def model_norm_stats(self):
         """
         Pandas DataFrame with shape (iteration, percentiles) of stats over the norms of implicit learning rates.
         """
@@ -1934,6 +1934,16 @@ class LearningRateHistoryCallback(BaseGradientCallback):
         q = [0, 25, 50, 75, 100]
         num_iterations = len(self._ilr_norms[0])
         data = np.stack([[norms[it] for norms in self._ilr_norms] for it in range(num_iterations)], axis=0)
+        data = tfp.stats.percentile(data, q, axis=-1).numpy().T
+        return pd.DataFrame(data, columns=q)
+
+    @property
+    def model_stats(self):
+        """
+        Pandas DataFrame with shape (iteration, percentiles) of stats over the medians of implicit learning rates.
+        """
+        q = [0, 25, 50, 75, 100]
+        data = np.stack([stats[50] for stats in self._ilr_stats], axis=1)
         data = tfp.stats.percentile(data, q, axis=-1).numpy().T
         return pd.DataFrame(data, columns=q)
 
