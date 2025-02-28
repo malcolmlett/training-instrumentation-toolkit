@@ -1564,7 +1564,7 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         """
         super().__init__(data_format='BSC', *args, **kwargs)
 
-        if batch_reduction and batch_reduction not in ('auto' 'mean', 'sum'):
+        if batch_reduction and batch_reduction not in ('auto', 'mean', 'sum'):
             raise ValueError(f"Invalid batch_reduction: '{batch_reduction}'")
         if batch_reduction == 'auto':
             batch_reduction = None if per_step else 'mean'
@@ -1701,6 +1701,10 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         is_accum = (not self.per_step)
         self._accum_activity_stats(activations, is_accum)
 
+        # per-epoch mode only: accumulate activations over course of epoch
+        if not self.per_step:
+            self._activations_accumulator.accumulate(batch, activations)
+
         # stats calculations for each step, if configured
         if self.per_step:
             if self.batch_reduction == 'sum':
@@ -1799,7 +1803,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
         """
         super().__init__(data_format='BSC', *args, **kwargs)
 
-        if batch_reduction and batch_reduction not in ('auto' 'mean', 'sum'):
+        if batch_reduction and batch_reduction not in ('auto', 'mean', 'sum'):
             raise ValueError(f"Invalid batch_reduction: '{batch_reduction}'")
         if batch_reduction == 'auto':
             batch_reduction = None if per_step else 'mean'
