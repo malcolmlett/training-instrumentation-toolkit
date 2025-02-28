@@ -687,8 +687,8 @@ class ValueStatsCollectingMixin:
                 if item_magnitude_stats is not None:
                     item_magnitude_stats.append(magnitude_percentiles)
 
-    # This is fairly expensive. It could be worth defaulting to calculation of simpler stats and only doing
-    # percentiles if requested. However, simple mean + stddev isn't very good for heavily skewed distributions
+    # Percentile calculation is fairly expensive. It could be worth defaulting to calculation of simpler stats and only
+    # doing percentiles if requested. However, simple mean + stddev isn't very good for heavily skewed distributions
     # like gradient magnitudes.
     @tf.function
     def _compute_iteration_value_stats(self, tensors, quantiles):
@@ -697,6 +697,13 @@ class ValueStatsCollectingMixin:
         For tensors that commonly have values distributed either side of zero, the median will
         typically be around zero, and the 25th and 75th percentiles represent the respective medians
         in the positive and negative halves.
+
+        Norms are calculated as a size-normalized euclidean norm. This makes for easy comparison across layers.
+        If not size normalised then the scale would be proportional to the sqrt of its total number of elements
+        (often in the thousands). This is mathematically equivalent to the root-mean-square of the tensor values.
+        It also happens that computing RMS is more efficient in TF than using tf.norm() (particularly on GPU).
+        So we use that to calculate the norm.
+
         Args:
             tensors: list of tensors for which percentiles should be calculated, some of which may be None.
             quantiles: list of quantiles to compute values for
@@ -707,7 +714,7 @@ class ValueStatsCollectingMixin:
         """
         def computation(tensor):
             if tensor is not None:
-                norm = tf.norm(tensor) / tf.sqrt(tf.cast(tf.size(tensor), dtype=tensor.dtype))
+                norm = tf.sqrt(tf.reduce_mean(tf.square(tensor)))
                 value_percentiles = tfp.stats.percentile(tensor, quantiles, interpolation='linear')
                 magnitude_percentiles = tfp.stats.percentile(tf.abs(tensor), quantiles, interpolation='linear')
             else:
@@ -893,7 +900,8 @@ class ActivityStatsCollectingMixin:
         if self._activity_stats is not None:
             def convert(i_idx, columns):
                 if self._activity_stats[0][i_idx] is not None:
-                    item_data = [iteration_stats[i_idx] for iteration_stats in self._activity_stats]
+                    item_data = [[stat.numpy() for stat in iteration_stats[i_idx]]
+                                 for iteration_stats in self._activity_stats]
                     return pd.DataFrame(item_data, columns=columns)
                 return None
             num_items = len(self._activity_stats[0])
