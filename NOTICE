@@ -1,5 +1,5 @@
 NOTICE
--------
+
 This repository is maintained by Malcolm Lett. Unless otherwise stated, all contents of this repository are © 2025 Malcolm Lett.
 
 The code and ideas in this repository are governed by the MIT License, as specified in the LICENSE file.
@@ -7,7 +7,7 @@ You are encouraged to use and adapt the contents for your own work.
 
 
 ACKNOWLEDGMENT REQUEST
-----------------------
+
 If you use or adapt the **code**, **concepts**, or **ideas** from this project in your own work, please acknowledge
 this repository. A suggested attribution is:
 
@@ -19,7 +19,7 @@ Thank you for your support!
 
 
 THIRD-PARTY CODE
-----------------
+
 Certain portions of this repository are derived from, or otherwise include code from, the Keras project.
 Please see `NOTICE-KERAS` for details and license information related to that code.
 
