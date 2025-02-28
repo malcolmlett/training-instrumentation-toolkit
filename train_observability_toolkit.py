@@ -551,20 +551,30 @@ class ValueStatsCollectingMixin:
         Pandas data-frame with shape (iterations, percentiles).
         """
         if self._value_norms is not None:
-            scales = np.stack(self.collected_value_norms, axis=-1)
-            return _compute_model_summary_stats(scales)
+            # gather into shape (iterations, variables)
+            # then compute stats and return as (iterations, percentiles)
+            q = [0, 25, 50, 75, 100]
+            data = np.stack(self.collected_value_norms, axis=-1)
+            data = tfp.stats.percentile(data, q, axis=-1, interpolation='linear').numpy().T
+            return pd.DataFrame(data, columns=q)
         else:
             return None
 
     @property
     def model_magnitude_stats(self):
         """
-        Stats across the general magnitudes of values across all measured variables/layers in the model.
+        Stats across the median magnitudes of values across all measured variables/layers in the model.
         Pandas data-frame with shape (iterations, percentiles).
+        Various experimentations have found that plotting the per-variable/layer medians provides
+        the most intuitive sense of what the model overview plot means.
         """
         if self._magnitude_stats is not None:
-            scales = get_scales_across_stats_list(self._magnitude_stats, 50)
-            return _compute_model_summary_stats(scales)
+            # gather into shape (iterations, variables)
+            # then compute stats and return as (iterations, percentiles)
+            q = [0, 25, 50, 75, 100]
+            data = np.stack([stats[50] for stats in self._value_stats if stats is not None], axis=1)
+            data = tfp.stats.percentile(data, q, axis=-1).numpy().T
+            return pd.DataFrame(data, columns=q)
         else:
             return None
 
@@ -2065,7 +2075,7 @@ class LearningRateHistoryCallback(BaseGradientCallback):
         q = [0, 25, 50, 75, 100]
         num_iterations = len(self._ilr_norms[0])
         data = np.stack([[norms[it] for norms in self._ilr_norms] for it in range(num_iterations)], axis=0)
-        data = tfp.stats.percentile(data, q, axis=-1).numpy().T
+        data = tfp.stats.percentile(data, q, axis=-1, interpolation='linear').numpy().T
         return pd.DataFrame(data, columns=q)
 
     @property
@@ -2482,62 +2492,6 @@ def _index_by_identity(lst, target):
 def _append_dict_list(dic, addendum_dict):
     for key in addendum_dict.keys():
         dic[key].append(addendum_dict[key])
-
-
-def _compute_model_summary_stats(iteration_item_values, quantiles=None):
-    """
-    Calculates meta-stats against a set of quantile stats.
-    Assumes the use of dataframes where each column represents a quantile, represented as a number in range 0 to 100.
-    Args:
-        iteration_item_values: np array of shape (iterations, items) containing data to summarise
-        quantiles: set of quantiles to return in final result.
-    Returns:
-        pandas dataframe with shape (iterations, quantiles)
-    """
-    quantiles = quantiles or [0, 25, 50, 75, 100]
-
-    # calculate stats across the raw per-item values
-    stats = tfp.stats.percentile(iteration_item_values, quantiles, axis=-1, interpolation='linear')
-    stats = tf.transpose(stats)
-
-    return pd.DataFrame(stats.numpy(), columns=quantiles)
-    # return as dataframe with quantiles as columns
-
-
-# TODO consider alternatively estimating the original mean as something like
-#    sum([percentile * quantile for percentile,quantile in zip(percentiles, stats)])
-#  more accurately:
-#    sum([(percentile-prev_percentile) * (quantile+prev_quantile)/2 for ...
-#         in zip(offset(percentiles), offset(stats), percentiles, stats])
-def get_scales_across_stats_list(stats_dataframes, scale_quantile=50):
-    """
-    Extracts a set of "scale" heuristics from a set of quantile stats.
-    Assumes the use of dataframes where each column represents a quantile, represented as a number in range 0 to 100.
-
-    In the future, might change to defaulting to estimate the mean magnitude.
-    Note that this works best if stats have been collected ocross magnitudes.
-
-    Args:
-        stats_dataframes: list of pandas dataframes of shape (iterations, quantiles)
-        scale_quantile: a hint about the quantile to attempt to use as the proxy for the
-            "scale" of typical values.
-            If present, the both this quantile and its opposite (100 - scale_quantile)
-            must be present within the stats.
-    Returns:
-        np-array with shape (iterations, variables)
-    """
-    # Implementation note:
-    # - previously I'd done things like picking the 50th percentile, or assumed that the 25th and 75th
-    #   were either side of zero. But they all run into problems.
-    #   For example, taking the 50th even on magnitude data can be a problem if slightly > 50% of the
-    #   values are zero. In the end, estimating the mean from the percentiles just seems like the best approach.
-    #
-    # TODO assume a normal distribution and use that to downplay the weight for the outer percentiles
-
-    scales = [np.mean(np.abs(variable_stat.to_numpy()), axis=1)
-              for variable_stat in stats_dataframes
-              if variable_stat is not None]
-    return np.stack(scales, axis=-1)  # shape: iterations x variables
 
 
 def _normalize_collection_sets_for_layers(model: tf.keras.Model, collection_sets: list):
@@ -3249,7 +3203,10 @@ def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', i
 
     Args:
         callback: any of "value stats collecting" callbacks in this module
-        show: one of 'magnitudes' (default), 'values', 'norms'.
+        show: one of 'magnitudes' (default), 'values', 'norms'. Where:
+            'magnitudes' - percentile stats over value magnitudes (log scale).
+            'values' - percentile stats over raw values (linear scale).
+            'norms' - norms of values (log scale).
         iterations: slice, range, list, set, or other list-like
             Selection over iterations to be displayed, counted against epoch or steps, depending on what is being
             displayed. Selection method depends on type provided, which becomes important where history data
@@ -3276,8 +3233,8 @@ def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', i
 
     # collect data
     model = callback.model
-    model_stats = callback.model_norm_stats
     item_type = callback.item_type
+    item_type_name = item_type.name.lower()
     collected_item_indices = callback.collected_value_stats_indices
     num_items = len(collected_item_indices)
 
@@ -3295,7 +3252,10 @@ def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', i
     iteration_name = 'epoch' if hasattr(callback, 'epochs') else 'step'
     src_iterations = callback.epochs if hasattr(callback, 'epochs') else callback.steps
     iterations, iteration_indices = _filter_iterations(src_iterations, iterations, return_indices=True)
-    model_stats = model_stats.iloc[iteration_indices]
+    if show == 'norms':
+        model_stats = callback.model_norm_stats.iloc[iteration_indices]
+    else:
+        model_stats = callback.model_magnitude_stats.iloc[iteration_indices]
     collected_item_value_norms = [norms[iteration_indices] for norms in callback.collected_value_norms]
     collected_item_value_stats = [stat.iloc[iteration_indices] for stat in callback.collected_value_stats]
     collected_item_magnitude_stats = [stat.iloc[iteration_indices] for stat in callback.collected_magnitude_stats]
@@ -3330,7 +3290,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', i
     plt.yscale('log')
     plt.title(title)
     plt.xlabel(iteration_name)
-    plt.ylabel(f"norm (size-normalized)")
+    plt.ylabel(f"{item_type_name} norm (size-normalized)" if show == 'norms' else f"{item_type_name} magnitude median")
     plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer x-axis ticks
     plt.legend()
 
@@ -3577,10 +3537,10 @@ def plot_lr_history(callback: LearningRateHistoryCallback, show='auto', iteratio
     iteration_name = 'epoch' if hasattr(callback, 'epochs') else 'step'
     src_iterations = list(range(len(callback.ilr_norms[0])))
     iterations, iteration_indices = _filter_iterations(src_iterations, iterations, return_indices=True)
-    if show == 'values':
-        model_stats = callback.model_stats.iloc[iteration_indices]
-    else:
+    if show == 'norms':
         model_stats = callback.model_norm_stats.iloc[iteration_indices]
+    else:
+        model_stats = callback.model_stats.iloc[iteration_indices]
     collected_item_value_norms = [norms[iteration_indices] for norms in callback.ilr_norms]
     collected_item_value_stats = [stat.iloc[iteration_indices] for stat in callback.ilr_stats]
     collected_item_indices = trainable_variable_indices_to_variable_indices(model)
@@ -3609,7 +3569,7 @@ def plot_lr_history(callback: LearningRateHistoryCallback, show='auto', iteratio
     plt.margins(0)
     plt.yscale('log')
     plt.xlabel(iteration_name)
-    plt.ylabel("median" if show == 'values' else "norm (size-normalized)")
+    plt.ylabel("per-variable norm (size-normalized)" if show == 'norms' else "per-variable median")
     plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer x-axis ticks
     plt.legend()
 
