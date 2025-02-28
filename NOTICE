@@ -1,0 +1,26 @@
+NOTICE
+-------
+This repository is maintained by Malcolm Lett. Unless otherwise stated, all contents of this repository are © 2025 Malcolm Lett.
+
+The code and ideas in this repository are governed by the MIT License, as specified in the LICENSE file.
+You are encouraged to use and adapt the contents for your own work.
+
+
+ACKNOWLEDGMENT REQUEST
+----------------------
+If you use or adapt the **code**, **concepts**, or **ideas** from this project in your own work, please acknowledge
+this repository. A suggested attribution is:
+
+"This project uses code and ideas from `malcolmlett/training-instrumentation-toolkit`, © 2025 Malcolm Lett. Available under the MIT License."
+
+While acknowledgment is not legally required, it is greatly appreciated and helps support the open-source community.
+
+Thank you for your support!
+
+
+THIRD-PARTY CODE
+----------------
+Certain portions of this repository are derived from, or otherwise include code from, the Keras project.
+Please see `NOTICE-KERAS` for details and license information related to that code.
+
+Thank you for your support!

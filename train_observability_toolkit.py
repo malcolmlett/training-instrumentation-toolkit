@@ -19,8 +19,8 @@ from enum import Enum
 #  model.layers[l].compute_output_shape(model.layers[l].input.shape)
 
 
-# Tries to replicate keras.backend.tensorflow.TensorFlowTrainer.fit() (trainer.py, keras 3.5.0)
-# as much as possible.
+# NOTICE: copied with changes from the Keras project (https://github.com/keras-team/keras).
+#  See NOTICE-KERAS for licence information.
 def fit(model, x=None, y=None, batch_size=None, epochs=1, verbose="auto", callbacks=None,
         validation_split=0.0, validation_data=None, shuffle=True, class_weight=None, sample_weight=None,
         initial_epoch=0, steps_per_epoch=None, validation_steps=None, validation_batch_size=None, validation_freq=1):
@@ -28,6 +28,7 @@ def fit(model, x=None, y=None, batch_size=None, epochs=1, verbose="auto", callba
     A custom training loop mimicking model.fit() that makes raw gradient and layer output
     information available for tracking.
 
+    Tries to replicate keras.backend.tensorflow.TensorFlowTrainer.fit() (trainer.py, keras 3.5.0) as much as possible.
     Honours the state of `tf.config.run_functions_eagerly(bool)`.
 
     All args are the same as for model.fit(), with the following exceptions:
@@ -196,9 +197,13 @@ def fit(model, x=None, y=None, batch_size=None, epochs=1, verbose="auto", callba
     return model.history
 
 
-# Tries to replicate keras.backend.tensorflow.TensorFlowTrainer.train_step() (trainer.py, keras 3.5.0)
-# as much as possible.
+# NOTICE: copied with changes from the Keras project (https://github.com/keras-team/keras).
+#  See NOTICE-KERAS for licence information.
 def _gradient_returning_train_step(model, monitoring_model, x, y, sample_weight, compute_output_gradients):
+    """
+    Single train + update step.
+    Tries to replicate keras.backend.tensorflow.TensorFlowTrainer.fit() (trainer.py, keras 3.5.0) as much as possible.
+    """
     # Forward pass
     with tf.GradientTape() as tape:
         monitoring_outputs = monitoring_model(x, training=True)
