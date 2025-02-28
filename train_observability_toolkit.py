@@ -461,7 +461,12 @@ class BaseGradientCallback:
         Subclasses should override for any actions to run.
 
         Supplied with training parameters from the last batch of the epoch. Can be a convenient alternative where
-        training doesn't use batches, or when you only want to sample the occasional update.
+        training doesn't use batches, or when you only want to sample the occasional update. However, be aware
+        that because it is supplied values from only the last batch, the results can be quite skewed and noisy.
+        You will often need to accumulate values over the epoch and compute means.
+
+        The first dimension of activations and output_gradients is `batch_size`, which can vary during training.
+        In particular, the last batch of an epoch can be less than the usual size.
 
         Args:
             epoch: Integer, index of epoch.
@@ -1015,22 +1020,33 @@ class PerEpochAccumulatorStrategy:
     Instances of this class can usually be discarded automatically at the end of training.
     """
 
-    def __init__(self):
+    def __init__(self, batch_reduction=False, keep_dims=False):
+        """
+        Args:
+            batch_reduction: bool.
+                Whether to reduce along the batch dimension (always assumed to be the first dimension).
+                Needed if a batch dimension is present and varies by step - which is often the case
+                for the last batch of each epoch.
+            keep_dims: bool.
+                Whether to keep the batch dimension when applying batch_reduction.
+        """
         super().__init__()
+        self.batch_reduction = batch_reduction
+        self.keep_dims = keep_dims
         self._accumulators = None
         self._count = None
 
     @property
     def sum(self):
         """
-        An immutable tensor containing the current sum
+        An immutable tensor containing the current sums
         """
         return [tf.identity(a) if a is not None else None for a in self._accumulators]
 
     @property
     def mean(self):
         """
-        An immutable tensor containing the current mean
+        An immutable tensor containing the current means
         """
         return [a / tf.cast(self._count, dtype=a.dtype) if a is not None else None for a in self._accumulators]
 
@@ -1044,26 +1060,45 @@ class PerEpochAccumulatorStrategy:
         if self._accumulators is None:
             if batch > 0:
                 raise RuntimeError("Second or subsequent tensor received but not initialised")
-            self._accumulators = [tf.Variable(t, dtype=t.dtype) if t is not None else None for t in tensors]
-            self._count = 0
+            self._accumulators = [tf.Variable(self._transform_batch_dim(t), dtype=t.dtype) if t is not None else None
+                                  for t in tensors]
+            self._count = self._get_divisor(tensors)
         elif batch == 0:
             self._reset(self._accumulators, tensors)
-            self._count = 0
+            self._count = self._get_divisor(tensors)
         else:
             self._add(self._accumulators, tensors)
-            self._count += 1
+            self._count += self._get_divisor(tensors)
 
     @tf.function
     def _reset(self, accumulators, values):
         for accumulator, value in zip(accumulators, values):
             if value is not None:
-                accumulator.assign(value)
+                accumulator.assign(self._transform_batch_dim(value))
 
     @tf.function
     def _add(self, accumulators, values):
         for accumulator, value in zip(accumulators, values):
             if value is not None:
-                accumulator.assign_add(value)
+                accumulator.assign_add(self._transform_batch_dim(value))
+
+    def _transform_batch_dim(self, tensor):
+        if self.batch_reduction:
+            return tf.reduce_sum(tensor, axis=0, keepdims=self.keep_dims)
+        else:
+            return tensor
+        
+    def _get_divisor(self, tensors):
+        """
+        Computes the divisor component for this iteration to be used when computing the global mean.
+        If reducing the batch dimension, then returns the batch size for the given batch, otherwise returns 1.
+        Note that the batch size can vary for the last batch in an epoch.
+        """
+        if self.batch_reduction:
+            for tensor in tensors:
+                if tensor is not None:
+                    return tf.shape(tensor)[0]
+        return 1
 
 
 class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingMixin, ActivityStatsCollectingMixin):
@@ -1478,6 +1513,10 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
     Custom tot.fit() gradient callback function that collects various statistics and/or raw values of
     layer outputs during training.
 
+    When collecting data per-epoch, by default, raw values and value stats are calculated based on the mean layer
+    output over all samples in the epoch. This ensures consistency with `LayerOutputGradientHistoryCallback`.
+    Activity stats are always calculated over all individual samples.
+
     Other properties:
         model: the model captured
         epochs: list of int. Epoch numbers correlated to captured gradients/gradient-stats
@@ -1486,7 +1525,7 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
             (only available if per_step is True)
     """
 
-    def __init__(self, per_step=False, collection_sets=None, *args, **kwargs):
+    def __init__(self, per_step=False, batch_reduction='auto', keep_dims=False, collection_sets=None, *args, **kwargs):
         """
         Args:
             per_step: bool. Whether to collect per-step stats, or per-epoch otherwise.
@@ -1495,6 +1534,21 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
                 If per-step is set, then a `steps` list is available instead, and activity
                 is collected on each update step.
                 The same applies to layer output capture if enabled.
+            batch_reduction: one of 'auto' (default), 'mean', 'sum', or None.
+                When doing per-epoch collection, determines how values are accumulated over the course of the epoch
+                and over each sample in each batch when computing value norms, value stats, and raw values.
+                - 'auto' applies no reduction in per-step mode and 'mean' in per-epoch mode.
+                - 'mean' uses the mean value across all samples in the batch/epoch.
+                    The batch-dim in returned raw values is either dropped (keep_dims==False)
+                    or reduced to size 1 (keep_dims==True).
+                - 'sum' uses the sum across all samples in the batch/epoch
+                    The batch-dim in returned raw values is either dropped (keep_dims==False)
+                    or reduced to size 1 (keep_dims==True).
+                - None applies no reduction. For per-step data collection, uses and retains all samples in each batch.
+                    For per-epoch data collection, uses and retains only the last batch of each epoch. 
+                    Note that the last batch often has less samples than for all other batches in an epoch.
+            keep_dims: bool.
+                Whether to retain the batch-dim if using 'mean' or 'sum' batch reduction.
             value_norms: bool, default: True.
                 Whether to collect the norms of values.
             value_stats: bool, default: True.
@@ -1509,7 +1563,15 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
                 See _normalize_collection_sets_for_layers() for format details.
         """
         super().__init__(data_format='BSC', *args, **kwargs)
+
+        if batch_reduction and batch_reduction not in ('auto' 'mean', 'sum'):
+            raise ValueError(f"Invalid batch_reduction: '{batch_reduction}'")
+        if batch_reduction == 'auto':
+            batch_reduction = None if per_step else 'mean'
+
         self.per_step = per_step
+        self.batch_reduction = batch_reduction
+        self.keep_dims = keep_dims
         self.collection_sets = collection_sets
 
         # results variable creation
@@ -1523,6 +1585,8 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         self._epoch = 0
         self._layer_shapes = None
         self._filtered_value_layer_indices = None
+        self._activations_accumulator = PerEpochAccumulatorStrategy(batch_reduction=True, keep_dims=keep_dims) \
+            if not per_step and self.batch_reduction else None
 
     @property
     def item_name(self):
@@ -1612,6 +1676,9 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         self._finalize_value_stats()
         self._finalize_activity_stats()
 
+        # free memory
+        del self._activations_accumulator
+
     def on_epoch_begin(self, epoch, logs=None):
         """
         Tracks the current epoch number and resets sums across each epoch
@@ -1636,22 +1703,35 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
 
         # stats calculations for each step, if configured
         if self.per_step:
+            if self.batch_reduction == 'sum':
+                activations = [tf.reduce_sum(t, keepdims=self.keep_dims) for t in activations]
+            elif self.batch_reduction == 'mean':
+                activations = [tf.reduce_mean(t, keepdims=self.keep_dims) for t in activations]
+
             self.steps.append(self.params['steps'] * self._epoch + batch)
             self._collect_value_stats(activations)
-            self._collect_activity_stats(1)
             self._collect_raw_values(activations)
+
+            # activity stats calculated based on accumulated partial stats
+            self._collect_activity_stats(1)
 
     def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations, output_gradients):
         """
         Collects gradient stats and raw gradients after each epoch, if configured at per-epoch level.
         """
-        # stats calculation across entire epoch, if configured
-        # (uses partial stats that were accumulated across the steps in the batch)
         if not self.per_step:
+            # compute aggregated activations, otherwise use last batch
+            if self.batch_reduction == 'sum':
+                activations = self._activations_accumulator.sum
+            elif self.batch_reduction == 'mean':
+                activations = self._activations_accumulator.mean
+
             self.epochs.append(epoch)
             self._collect_value_stats(activations)
-            self._collect_activity_stats(self.params['steps'])
             self._collect_raw_values(activations)
+
+            # activity stats calculated based on accumulated partial stats
+            self._collect_activity_stats(self.params['steps'])
 
     def _collect_raw_values(self, activations):
         # TODO do slicing
@@ -1668,9 +1748,11 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
     layer output gradients during training.
     See `GradientHistoryCallback` for the standard gradients w.r.t variables.
 
-    When collecting per-epoch stats and values, gradients used are the sum of per-step gradients over
-    the course of each epoch. This smooths out the fact that batched stochastic gradient descent tends
-    to jump-around as it iterates through the batches in each epoch.
+    When collecting data per-epoch, by default, raw values and value stats are calculated based on the mean gradient
+    over all samples in the epoch. This smooths out the fact that batched stochastic gradient descent tends to
+    jump-around as it iterates through the batches in each epoch. It also resolves the fact that the last batch of
+    each epoch often has fewer samples than for other batches.
+    Activity stats are always calculated over all individual samples.
 
     Other properties:
         model: the model captured
@@ -1680,7 +1762,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
             (only available if per_step is True)
     """
 
-    def __init__(self, per_step=False, collection_sets=None, *args, **kwargs):
+    def __init__(self, per_step=False, batch_reduction='auto', keep_dims=False, collection_sets=None, *args, **kwargs):
         """
         Args:
             per_step: bool. Whether to collect per-step stats and raw values, or per-epoch otherwise.
@@ -1689,6 +1771,19 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
                 If per-step is set, then a `steps` list is available instead, and activity
                 is collected on each update step.
                 The same applies to layer output capture if enabled.
+            batch_reduction: one of 'auto' (default), 'mean', 'sum', or None.
+                When doing per-epoch collection, determines how values are accumulated over the course of the epoch
+                and over each sample in each batch when computing value norms, value stats, and raw values.
+                - 'auto' applies no reduction in per-step mode and 'mean' in per-epoch mode.
+                - 'mean' uses the mean value across all samples in the batch/epoch.
+                    The batch-dim in returned raw values is either dropped (keep_dims==False)
+                    or reduced to size 1 (keep_dims==True).
+                - 'sum' uses the sum across all samples in the batch/epoch
+                    The batch-dim in returned raw values is either dropped (keep_dims==False)
+                    or reduced to size 1 (keep_dims==True).
+                - None applies no reduction. For per-step data collection, uses and retains all samples in each batch.
+                    For per-epoch data collection, uses and retains only the last batch of each epoch. 
+                    Note that the last batch often has less samples than for all other batches in an epoch.
             value_norms: bool, default: True.
                 Whether to collect the norms of values.
             value_stats: bool, default: True.
@@ -1703,7 +1798,15 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
                 See _normalize_collection_sets_for_layers() for format details.
         """
         super().__init__(data_format='BSC', *args, **kwargs)
+
+        if batch_reduction and batch_reduction not in ('auto' 'mean', 'sum'):
+            raise ValueError(f"Invalid batch_reduction: '{batch_reduction}'")
+        if batch_reduction == 'auto':
+            batch_reduction = None if per_step else 'mean'
+
         self.per_step = per_step
+        self.batch_reduction = batch_reduction
+        self.keep_dims = keep_dims
         self.collection_sets = collection_sets
 
         # results variable creation
@@ -1718,7 +1821,8 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
         self._epoch = 0
         self._layer_shapes = None
         self._filtered_value_layer_indices = None
-        self._gradients_accumulator = PerEpochAccumulatorStrategy() if not per_step else None
+        self._gradients_accumulator = PerEpochAccumulatorStrategy(batch_reduction=True, keep_dims=keep_dims) \
+            if not per_step and self.batch_reduction else None
 
     @property
     def item_name(self):
@@ -1753,6 +1857,9 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
         Raw captured gradients, if any.
         None if raw data is not being captured, and each layer entry is None if that
         layer is not captured.
+        When collecting per-step, returned gradients include a batch-dimension which can vary on the last
+        batch of each epoch. When collecting per-epoch, returned gradients include a batch-dimension of size 1,
+        containing the mean across all samples in the epoch.
         Returns:
             list (by model.layers) of list (by step/epoch) of gradient tensors.
             None if variable capturing not enabled.
@@ -1843,23 +1950,35 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
 
         # stats calculations for each step, if configured
         if self.per_step:
+            if self.batch_reduction == 'sum':
+                output_gradients = [tf.reduce_sum(t, keepdims=self.keep_dims) for t in output_gradients]
+            elif self.batch_reduction == 'mean':
+                output_gradients = [tf.reduce_mean(t, keepdims=self.keep_dims) for t in output_gradients]
+
             self.steps.append(self.params['steps'] * self._epoch + batch)
             self._collect_value_stats(output_gradients)
-            self._collect_activity_stats(1)
             self._collect_raw_values(output_gradients)
+
+            # activity stats calculated based on accumulated partial stats
+            self._collect_activity_stats(1)
 
     def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations, output_gradients):
         """
         Collects gradient stats and raw gradients after each epoch, if configured at per-epoch level.
         """
-        # stats calculation across entire epoch, if configured
-        # (uses partial stats that were accumulated across the steps in the batch)
         if not self.per_step:
+            # compute aggregated gradients, otherwise use last batch
+            if self.batch_reduction == 'sum':
+                output_gradients = self._gradients_accumulator.sum
+            elif self.batch_reduction == 'mean':
+                output_gradients = self._gradients_accumulator.mean
+
             self.epochs.append(epoch)
-            output_gradients = self._gradients_accumulator.sum  # use aggregated gradients
             self._collect_value_stats(output_gradients)
-            self._collect_activity_stats(self.params['steps'])
             self._collect_raw_values(output_gradients)
+
+            # activity stats calculated based on accumulated partial stats
+            self._collect_activity_stats(self.params['steps'])
 
     def _collect_raw_values(self, gradients):
         # TODO do slicing
