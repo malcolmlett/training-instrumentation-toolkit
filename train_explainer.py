@@ -3,14 +3,14 @@ import tensorflow as tf
 import tensorflow_probability as tfp
 
 import conv_tools
-import train_observability_toolkit as tot
-import matmul_explainer as me
+import train_instrumentation as tinstr
+import matmul_explainer as mmexpl
 
 
 def explain_near_zero_gradients_skeleton(layer_index: int,
-                                         gradients: tot.GradientHistoryCallback,
-                                         activity: tot.LayerOutputHistoryCallback,
-                                         variables: tot.VariableHistoryCallback,
+                                         gradients: tinstr.GradientHistoryCallback,
+                                         activity: tinstr.LayerOutputHistoryCallback,
+                                         variables: tinstr.VariableHistoryCallback,
                                          epoch: None, step: None,
                                          threshold: float = None, threshold_percentile: float = 0.01):
     """
@@ -66,8 +66,8 @@ def explain_near_zero_gradients_skeleton(layer_index: int,
 
     # collect reference information
     model = gradients.model
-    variable_indices_lookup = tot.variable_indices_by_layer(model, include_trainable_only=True)
-    variable_indices = tot.variable_indices_by_layer(model, include_trainable_only=True)[layer_index]
+    variable_indices_lookup = tinstr.variable_indices_by_layer(model, include_trainable_only=True)
+    variable_indices = tinstr.variable_indices_by_layer(model, include_trainable_only=True)[layer_index]
     target_layer_variables = [variables.variables[var_index][iteration] for var_index in variable_indices]
     target_layer_activations = activity.layer_outputs[layer_index][iteration]
     target_layer_gradients = [gradients.gradients_list[var_index][iteration] for var_index in variable_indices]
@@ -151,13 +151,13 @@ def explain_near_zero_gradients(callbacks: list,
     gradients = None
     output_gradients = None
     for cb in callbacks:
-        if reload_safe_isinstance(cb, tot.VariableHistoryCallback):
+        if reload_safe_isinstance(cb, tinstr.VariableHistoryCallback):
             variables = cb
-        elif reload_safe_isinstance(cb, tot.LayerOutputHistoryCallback):
+        elif reload_safe_isinstance(cb, tinstr.LayerOutputHistoryCallback):
             activity = cb
-        elif reload_safe_isinstance(cb, tot.GradientHistoryCallback):
+        elif reload_safe_isinstance(cb, tinstr.GradientHistoryCallback):
             gradients = cb
-        elif reload_safe_isinstance(cb, tot.LayerOutputGradientHistoryCallback):
+        elif reload_safe_isinstance(cb, tinstr.LayerOutputGradientHistoryCallback):
             output_gradients = cb
     missing_infos = []
     if variables is None:
@@ -196,7 +196,7 @@ def explain_near_zero_gradients(callbacks: list,
     target_layer = model.layers[layer_index]
     inbound_layer_indices = _find_inbound_layers(model, target_layer, return_type='index')
     outbound_layer_indices = _find_outbound_layers(model, target_layer, return_type='index')
-    l_to_var_indices = tot.variable_indices_by_layer(model, include_trainable_only=False)
+    l_to_var_indices = tinstr.variable_indices_by_layer(model, include_trainable_only=False)
     print(f"layer: #{layer_index} = {target_layer} at iteration {iteration}")
     print(f"  inbound_layer_indices: {inbound_layer_indices}")
     print(f"  outbound_layer_indices: {outbound_layer_indices}")
@@ -282,7 +282,7 @@ def explain_near_zero_gradients(callbacks: list,
 
     def _explain_tensor(name, tensor, mask_name=None, mask=None, negatives_are_bad=False, include_summary_by_unit=False):
         quantiles = [0, 25, 50, 75, 100]
-        counts, sums, threshold = me.tensor_classify(tensor, confidence=confidence, return_threshold=True)
+        counts, sums, threshold = mmexpl.tensor_classify(tensor, confidence=confidence, return_threshold=True)
         summaries, _ = describe_tensor_near_zero_explanation(counts, sums, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)
         if not verbose:
            summaries = [summaries[0]]  # pick first only
@@ -297,15 +297,15 @@ def explain_near_zero_gradients(callbacks: list,
         print(f"  summary:           {', '.join(summaries)}")
         if verbose:
             print(f"  value percentiles: {quantiles} -> {tfp.stats.percentile(tensor, quantiles).numpy()}")
-            print(f"  PZN counts/sums:   {me.summarise(counts, sums, show_percentages=False, show_means=False)}")
-            print(f"  PZN counts/means:  {me.summarise(counts, sums, show_percentages=True, show_means=True)}")
+            print(f"  PZN counts/sums:   {mmexpl.summarise(counts, sums, show_percentages=False, show_means=False)}")
+            print(f"  PZN counts/means:  {mmexpl.summarise(counts, sums, show_percentages=True, show_means=True)}")
         if mask_name:
             mask_summaries, _ = describe_tensor_near_zero_explanation(counts, sums, mask=mask, threshold=threshold, negatives_are_bad=negatives_are_bad, verbose=verbose)
             if not verbose:
               mask_summaries = [mask_summaries[0]]  # pick first only
             print(f"  {(mask_name + ':'):19} {', '.join(mask_summaries)}")
         if mask_name and verbose:
-            print(f"  {(mask_name + ':'):19} {me.summarise(counts, sums, mask=mask, show_percentages=True, show_means=True)}")
+            print(f"  {(mask_name + ':'):19} {mmexpl.summarise(counts, sums, mask=mask, show_percentages=True, show_means=True)}")
 
     def _explain_actual_vs_estimate(name, actual, estimate):
         error = estimate - actual
@@ -331,8 +331,8 @@ def explain_near_zero_gradients(callbacks: list,
         else:
             print(f"  summary:           {fraction * 100:.1f}% near-zero")
         if verbose:
-            print(f"  PZN combinations:  {me.summarise(counts, sums, show_percentages=False, show_means=False)}")
-            print(f"  PZN combinations:  {me.summarise(counts, sums, show_percentages=True, show_means=True)}")
+            print(f"  PZN combinations:  {mmexpl.summarise(counts, sums, show_percentages=False, show_means=False)}")
+            print(f"  PZN combinations:  {mmexpl.summarise(counts, sums, show_percentages=True, show_means=True)}")
 
     def _explain_combination_near_zero(name, inputs, result, counts, sums, fixed_threshold=None):
         if not verbose:
@@ -342,8 +342,8 @@ def explain_near_zero_gradients(callbacks: list,
         orig_total = np.size(counts[..., 0])
         mask_total = np.sum(mask)
         print(f"{name} {mask_total / orig_total * 100:.1f}% near zero ({_format_threshold(threshold)}):")
-        print(f"  PZN combinations:  {me.summarise(counts, sums, mask=mask, show_percentages=False, show_means=False)}")
-        print(f"  PZN combinations:  {me.summarise(counts, sums, mask=mask, show_percentages=True, show_means=True)}")
+        print(f"  PZN combinations:  {mmexpl.summarise(counts, sums, mask=mask, show_percentages=False, show_means=False)}")
+        print(f"  PZN combinations:  {mmexpl.summarise(counts, sums, mask=mask, show_percentages=True, show_means=True)}")
 
         # preferred detail - list of causal explanandums
         descriptions, fractions = describe_near_zero_explanation(counts, sums, input_names=inputs, mask=mask, threshold=threshold)
@@ -354,11 +354,11 @@ def explain_near_zero_gradients(callbacks: list,
         # fall-back detailed description - filtered and grouped classifications
         # (less visually pleasing, so only using as fallback)
         if not descriptions:
-            counts, sums, terms = me.filter_classifications(counts, sums)
-            count_groups, sum_groups, term_groups = me.group_classifications(counts, sums, terms, mask=mask)
-            count_groups, sum_groups, term_groups, coverage = me.filter_groups(
+            counts, sums, terms = mmexpl.filter_classifications(counts, sums)
+            count_groups, sum_groups, term_groups = mmexpl.group_classifications(counts, sums, terms, mask=mask)
+            count_groups, sum_groups, term_groups, coverage = mmexpl.filter_groups(
                 count_groups, sum_groups, term_groups, completeness=0.75, max_groups=10, return_coverage=True)
-            desc = me.describe_groups(count_groups, sum_groups, term_groups, show_ranges=True)
+            desc = mmexpl.describe_groups(count_groups, sum_groups, term_groups, show_ranges=True)
             for size, summary in zip(desc['sizes'], desc['summaries']):
                 print(f"  {size / mask_total * 100:.1f}% explained as (counts/sums): {summary}")
             print(f"  (explains top most {coverage * 100:.1f}% of near-zero)")
@@ -576,7 +576,7 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
     """
     # parse args
     orig_counts, orig_sums, orig_terms = counts, sums, terms
-    counts, sums, terms_list = me.standardize(counts, sums, terms, mask=mask)
+    counts, sums, terms_list = mmexpl.standardize(counts, sums, terms, mask=mask)
     if len(terms_list) != 9:
         raise ValueError("Not a matmul-like classification")
     if input_names and len(input_names) != 2:
@@ -589,7 +589,7 @@ def describe_near_zero_explanation(counts, sums=None, terms=None, *, mask=None, 
     # - construct original output value before masking
     # - get percentile
     if threshold is None:
-        orig_counts, orig_sums, orig_terms = me.standardize(orig_counts, orig_sums, orig_terms)
+        orig_counts, orig_sums, orig_terms = mmexpl.standardize(orig_counts, orig_sums, orig_terms)
         value = np.sum(orig_sums, axis=-1)
         threshold = tfp.stats.percentile(tf.abs(value), 100 * (1 - confidence), interpolation='linear').numpy()
 
@@ -673,7 +673,7 @@ def describe_tensor_near_zero_explanation(counts, sums=None, *, mask=None, thres
 
     """
     # parse args
-    counts, sums, _ = me.standardize(counts, sums, mask=mask)
+    counts, sums, _ = mmexpl.standardize(counts, sums, mask=mask)
     if counts.shape[-1] != 3:
         raise ValueError("Not a tensor classification")
 
@@ -721,7 +721,7 @@ def describe_tensor_units_near_zero_explanation(counts, sums=None, *, mask=None,
         list of textual descriptions, approximately with highest-degree summary first
     """
     # parse args
-    counts, sums, _ = me.standardize(counts, sums, mask=mask)
+    counts, sums, _ = mmexpl.standardize(counts, sums, mask=mask)
     if counts.shape[-1] != 3:
         raise ValueError("Not a tensor classification")
 
@@ -822,9 +822,9 @@ def _find_layer_by_node(model, node, return_type='layer'):
 # TODO take key error messages and merge with new code
 # TODO needs to be extended out to cope with different layer types
 def _estimate_backprop_from_layer(model, layer_index, iteration,
-                                  gradients: tot.GradientHistoryCallback,
-                                  activity: tot.LayerOutputHistoryCallback,
-                                  variables: tot.VariableHistoryCallback):
+                                  gradients: tinstr.GradientHistoryCallback,
+                                  activity: tinstr.LayerOutputHistoryCallback,
+                                  variables: tinstr.VariableHistoryCallback):
     print(f"[BEGIN] _estimate_backprop_from_layer(layer_index={layer_index})")
 
     # get model and identify inbound and outbound layers
@@ -839,7 +839,7 @@ def _estimate_backprop_from_layer(model, layer_index, iteration,
     # print(f"inbound_layer_indices: {inbound_layer_indices}")
 
     # pre-compute lookups
-    l_to_var_indices = tot.variable_indices_by_layer(model, include_trainable_only=False)
+    l_to_var_indices = tinstr.variable_indices_by_layer(model, include_trainable_only=False)
     # print(f"l_to_var_indices: {l_to_var_indices}")
 
     # get variables, activities, and gradients of interest
@@ -1257,7 +1257,7 @@ class LayerHandler:
             counts, sums
         """
         S_l = self.calculate_S()
-        return me.multiply_classify(dJdA_l, S_l)
+        return mmexpl.multiply_classify(dJdA_l, S_l)
 
     def calculate_dJdW(self, dJdZ_l, return_equation=False, return_note=False):
         """
@@ -1340,7 +1340,7 @@ class DenseLayerHandler(LayerHandler):
     def classify_Z_calculation(self, confidence):
         A_0 = self.get_input()
         W_l = self.get_weights()
-        return me.matmul_classify(A_0, W_l, confidence=confidence)
+        return mmexpl.matmul_classify(A_0, W_l, confidence=confidence)
 
     def calculate_dJdW(self, dJdZ_l, return_equation=False, return_note=False):
         # The following mirrors how TF Dense layer copes with unexpected spatial dims - by treating them
@@ -1372,7 +1372,7 @@ class DenseLayerHandler(LayerHandler):
         A_0 = self.get_input()
         axes_A = list(range(len(A_0.shape) - 1))
         axes_dJdZ = list(range(len(dJdZ_l.shape) - 1))
-        return me.tensordot_classify(A_0, dJdZ_l, axes=[axes_A, axes_dJdZ], confidence=confidence)
+        return mmexpl.tensordot_classify(A_0, dJdZ_l, axes=[axes_A, axes_dJdZ], confidence=confidence)
 
     def calculate_backprop(self, return_note=False):
         # We need the backprop gradients that are produced by this layer and which feed into the gradient update step of
@@ -1439,7 +1439,7 @@ class ConvLayerHandler(LayerHandler):
         A_0 = self.get_input()
         W_l = self.get_weights()
         conv_params, _ = self.get_conv_params()
-        return me.conv_classify(A_0, W_l, confidence=confidence, **conv_params)
+        return mmexpl.conv_classify(A_0, W_l, confidence=confidence, **conv_params)
 
     def calculate_dJdW(self, dJdZ_l, return_equation=False, return_note=False):
         # while tf.nn.conv2d_backprop_filter() and tf.nn.conv1d_backprop_filter() are available,
@@ -1466,7 +1466,7 @@ class ConvLayerHandler(LayerHandler):
         W = self.get_weights()
         conv_params, note = self.get_conv_params()
         try:
-            return me.conv_backprop_filter_classify(x=A_0, d_out=dJdZ_l, kernel_shape=W.shape, **conv_params)
+            return mmexpl.conv_backprop_filter_classify(x=A_0, d_out=dJdZ_l, kernel_shape=W.shape, **conv_params)
         except ValueError as e:
             raise UnsupportedNetworkError(f"unsupported convolution - {e}")
 

@@ -1,8 +1,8 @@
 # TODO needs to be converted to a proper set of unit tests once this toolkit is moved
 # to something with a build tool
 import tensorflow as tf
-from train_observability_toolkit import *
-from train_observability_toolkit import _normalize_collection_sets_for_layers, _normalize_collection_sets_for_variables
+from train_instrumentation import *
+from train_instrumentation import _normalize_collection_sets_for_layers, _normalize_collection_sets_for_variables
 
 
 def run_test_suite():
