@@ -572,7 +572,7 @@ class ValueStatsCollectingMixin:
             # gather into shape (iterations, variables)
             # then compute stats and return as (iterations, percentiles)
             q = [0, 25, 50, 75, 100]
-            data = np.stack([stats[50] for stats in self._value_stats if stats is not None], axis=1)
+            data = np.stack([stats[50] for stats in self._magnitude_stats if stats is not None], axis=1)
             data = tfp.stats.percentile(data, q, axis=-1).numpy().T
             return pd.DataFrame(data, columns=q)
         else:
