@@ -3383,7 +3383,7 @@ def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', i
         plot_range = np.array(ax1.get_ylim())
         plot_mid = np.exp(np.mean(np.log(plot_range))) if yscale == 'log' else np.mean(plot_range)
         if item_shapes:
-            plt.text(plot_width * 0.5, plot_mid,
+            ax1.text(plot_width * 0.5, plot_mid,
                      f"{item_shapes[i_idx]}",
                      horizontalalignment='center', verticalalignment='center')
 
