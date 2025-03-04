@@ -7,108 +7,6 @@ import train_instrumentation as tinstr
 import matmul_explainer as mmexpl
 
 
-def explain_near_zero_gradients_skeleton(layer_index: int,
-                                         gradients: tinstr.GradientHistoryCallback,
-                                         activity: tinstr.LayerOutputHistoryCallback,
-                                         variables: tinstr.VariableHistoryCallback,
-                                         epoch: None, step: None,
-                                         threshold: float = None, threshold_percentile: float = 0.01):
-    """
-    Attempts to identify the explanation for zero and near-zero gradients in a given layer.
-
-    Args:
-        layer_index: layer to examine
-        gradients:
-            callback populated with raw gradients for at least the layer in question
-            and any AFTER it that take it as input
-        activity:
-            callback populated with raw layer outputs for at least the layer in question
-            and any BEFORE it that it takes as input
-        variables:
-            callback populated with raw weights, biases, and other variables for at least the layer in question
-            and any AFTER it that take it as input
-        epoch: epoch number selection from callback histories, if callbacks captured against epochs
-        step: step number selection from callback histories, if callbacks captured against update steps
-        threshold: gradients equal or below this magnitude are considered "near-zero"
-        threshold_percentile: threshold inferred at this percentile magnitude of the range of gradients.
-            Ignored for this layer gradient if 'threshold' is set, but still used for other thresholds.
-
-    Usage:
-    > l_idx = 35
-    > gradients = GradientHistoryCallback(collection_sets=[{layer_indices: [l_idx, l_idx+1]})
-    > activity = ActivityHistoryCallback(collection_sets=[{layer_indices: [l_idx-1, l_idx]})
-    > variables = VariableHistoryCallback(collection_sets=[{layer_indices: [l_idx, l_idx+1]}, before_updates=True)
-    > fit(model, train_data, callbacks=[gradients, activity, variables])
-    > explain_near_zero_gradients(l_idx, epoch=..., gradients, activity, variables)
-    Example output:
-    > Examining layer 35
-    >   weights shape: (None, 10, 10, 512, 256)
-    >   bias shape: (None, 10, 10, 256)
-    > Layer summary:
-    >   units: 25600
-    >   fan-in: 51200
-    >   biases: 25600
-    > Strict-zero gradients with strict zero or negative sources:
-    >   units: 347 (1.36%)
-    >
-    > Neor-zero gradients (magnitude < 0.00035):
-    >
-    >
-    """
-
-    # handle arguments
-    if epoch is not None:
-        iteration = gradients.epochs.index(epoch)
-    elif step is not None:
-        iteration = gradients.steps.index(step)
-    else:
-        raise ValueError("One of epoch or step must be specified")
-
-    # collect reference information
-    model = gradients.model
-    variable_indices_lookup = tinstr.variable_indices_by_layer(model, include_trainable_only=True)
-    variable_indices = tinstr.variable_indices_by_layer(model, include_trainable_only=True)[layer_index]
-    target_layer_variables = [variables.variables[var_index][iteration] for var_index in variable_indices]
-    target_layer_activations = activity.layer_outputs[layer_index][iteration]
-    target_layer_gradients = [gradients.gradients_list[var_index][iteration] for var_index in variable_indices]
-    target_layer_weights = None # TODO - arbitrarily pick largest of target_layer_variables
-    target_layer_other_vars = []  # TODO - all other layer vars except the biggest one
-
-    # TODO be smarter by examining the model structure to identify which layer or layers are inputs
-    input_activations = activity.layer_outputs[layer_index-1][iteration]
-
-    # print basic summary
-    print(f"Examining layer {layer_index}:")
-    print(f"  units: {target_layer_activations.shape} = {np.size(target_layer_activations)}")  # need to remove batch dim
-    print(f"  layer input: {input_activations.shape} = {np.size(input_activations)}")  # need to remove batch dim
-    print(f"  fan-in per unit: {target_layer_weights.shape} = {np.size(target_layer_weights)}")  # need to remove output channel dim
-    if len(target_layer_other_vars) == 0:
-        print(f"  biases: <none>")
-    else:
-        for other_var in target_layer_other_vars:
-            print(f"  biases: {other_var.shape} = {np.size(other_var)}")
-
-    # identify gradients to investigate
-    # - theory:
-    #    A single unit of a dense or conv layer has fan-in weights and 1 bias. Any number of those may encounter
-    #    zero or near near-zero gradients. On the bias we don't really care. And we probably don't care about
-    #    individual near-zero grdients, but rather where a single unit is suffering from many near-zero gradients.
-    # - approach:
-    #    Need to think more about this.
-    #    Currently selecting by gradient.
-    #    Might need to also select units, and mix them according to different sources.
-    if threshold is None:
-        threshold = ... # TODO identify percentile level across all flottened values across all target_layer_gradients
-    target_variable_threshold_masks = [np.abs(grad) <= threshold for grad in target_layer_gradients]  # works for gradients and variables
-    target_variable_zero_masks = [np.exact(grad, 0.0) for grad in target_layer_gradients]  # works for gradients and variables
-
-    print(f"Examining {np.sum(target_variable_zero_masks)} zero gradients "
-          f"and {np.sum(target_variable_threshold_masks)} near-zero gradients total...")
-
-    # Do lengthy processing
-    # TODO ...
-
-
 def explain_near_zero_gradients(callbacks: list,
                                 layer_index: int,
                                 epoch=None, step=None,
@@ -208,9 +106,6 @@ def explain_near_zero_gradients(callbacks: list,
     inbound_layer_indices = _find_inbound_layers(model, target_layer, return_type='index')
     outbound_layer_indices = _find_outbound_layers(model, target_layer, return_type='index')
     l_to_var_indices = tinstr.variable_indices_by_layer(model, include_trainable_only=False)
-    print(f"layer: #{layer_index} = {target_layer} at iteration {iteration}")
-    print(f"  inbound_layer_indices: {inbound_layer_indices}")
-    print(f"  outbound_layer_indices: {outbound_layer_indices}")
     if not inbound_layer_indices:
         raise ValueError(f"Layer #{layer_index} has no inbound layers")
     if not outbound_layer_indices:
@@ -383,9 +278,13 @@ def explain_near_zero_gradients(callbacks: list,
     num_near_zero_gradients = np.sum(near_zero_gradients_mask)
     num_gradients = np.size(dJdW_l)
 
-    # explain context
-    print()
-    print(f"Summary...")
+    # explain context and give summary
+    print(f"Examining layer #{layer_index} at iteration {iteration}:")
+    print(f"  layer:               {target_layer_handler.layer.name}")
+    print(f"  units:               {target_layer_handler.get_weights().shape[-1]}")
+    print(f"  weights:             {tf.size(target_layer_handler.get_weights())}")
+    print(f"  input from layers:   {inbound_layer_indices}")
+    print(f"  output to layers:    {outbound_layer_indices}")
     print(f"  near-zero gradients: {num_near_zero_gradients} ({num_near_zero_gradients / num_gradients * 100:0.1f}%) "
           f"{_format_threshold(near_zero_gradients_threshold)}")
     if missing_infos:
@@ -411,7 +310,7 @@ def explain_near_zero_gradients(callbacks: list,
         name = "A_0" if len(target_layer_handler.inputs) == 1 else f"A_0#{idx}"
         _explain_tensor(name + ' - input value', A_0, include_summary_by_unit=True)
 
-    W_l = target_layer_handler.get_weights()
+    W_l =
     _explain_tensor("W_l - weights of target layer", W_l,
                     "corresponding to near-zero gradients", near_zero_gradients_mask)
 
