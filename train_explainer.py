@@ -159,23 +159,34 @@ def explain_near_zero_gradients(callbacks: list,
             gradients = cb
         elif reload_safe_isinstance(cb, tinstr.LayerOutputGradientHistoryCallback):
             output_gradients = cb
+
+    # validations
     missing_infos = []
     if variables is None:
         missing_infos.append("variable callback not supplied")
     elif variables.variables is None:
         missing_infos.append("variable values not collected during training")
-    if activity is None:
-        missing_infos.append("activity callback not supplied")
-    elif activity.layer_outputs is None:
-        missing_infos.append("layer outputs not collected during training")
+
     if gradients is None:
         missing_infos.append("gradients callback not supplied")
     elif gradients.gradients is None:
         missing_infos.append("gradients not collected during training")
+
+    if activity is None:
+        missing_infos.append("layer output callback not supplied")
+    elif activity.layer_outputs is None:
+        missing_infos.append("layer outputs not collected during training")
+    elif activity.batch_reduction is not None:
+        missing_infos.append("layer outputs were collected with batch reduction, must use batch_reduction=None")
+        activity = None
+
     if output_gradients is None:
         missing_infos.append("output_gradients callback not supplied")
     elif output_gradients.gradients is None:
         missing_infos.append("output gradients not collected during training")
+    elif output_gradients.batch_reduction is not None:
+        missing_infos.append("output gradients were collected with batch reduction, must use batch_reduction=None")
+        output_gradients = None
 
     # parse arguments - identify iteration number
     if epoch is not None:
@@ -255,6 +266,7 @@ def explain_near_zero_gradients(callbacks: list,
     # get variables, activities, and gradients of interest
     # TODO do something with handler notes
     # TODO incorporate extra error checking that was in _estimate_backprop_from_layer()
+    # TODO don't bother trying to get next_layer_handlers unless needed
     target_layer_handler, target_layer_handler_note = _get_layer_handler(layer_index, 'l', missing_infos)
     next_layer_handlers_and_notes = [_get_layer_handler(l_idx, '2') for l_idx in outbound_layer_indices]
     next_layer_handlers = [handler for handler, note in next_layer_handlers_and_notes]
@@ -277,7 +289,7 @@ def explain_near_zero_gradients(callbacks: list,
         return
     if produces_error(target_layer_handler.get_A):
         print(f"Warning - unable to provide accurate report because {', '.join(missing_infos)}")
-        print(f"Error - No output activations found target layer")
+        print(f"Error - No activations found for target layer")
         return
 
     def _explain_tensor(name, tensor, mask_name=None, mask=None, negatives_are_bad=False, include_summary_by_unit=False):
@@ -435,8 +447,10 @@ def explain_near_zero_gradients(callbacks: list,
     print(f"Backward pass...")
     dJdA_l = target_layer_handler.output_gradients
     if dJdA_l is not None:
+        # dJdA_l has been directly measured, so work off that
         _explain_tensor(f"dJ/dA_l - backprop into this layer", dJdA_l, include_summary_by_unit=True)
     else:
+        # dJdA_l wasn't measured directly, but we can estimate it instead if we have data from the next layer.
         # estimate dJdA_l by estimating backprop from each output layer and then combining
         # - unlikely to need to do this, but I wrote this code before I realised I could directly extract output
         #   gradients
