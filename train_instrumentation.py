@@ -3126,7 +3126,7 @@ def plot_history_overview(callbacks: list, details=True, iterations=None):
 
 
 def plot_train_history(callback: tf.keras.callbacks.History, per_step=False, show_loss_percentiles=True,
-                       show_metric_percentiles=True):
+                       show_metric_percentiles=True, iterations=None):
     """
     Plots the loss and metric curves from a training run as collected by the standard `History` callback
     or the extended `HistoryStats` callback.
@@ -3145,6 +3145,16 @@ def plot_train_history(callback: tf.keras.callbacks.History, per_step=False, sho
         show_metric_percentiles: whether to include full percentile information for metrics,
           or just a single value otherwise. Disabling percentile plotting can be necessary if there are
           many metrics.
+        iterations: slice, range, list, set, or other list-like
+            Selection over iterations to be displayed, counted against epoch or steps, depending on what is being
+            displayed. Selection method depends on type provided, which becomes important where history data
+            doesn't start at iteration 0:
+            - `slice(start, stop, step)` - selects by **index**, eg: slice(0, 50) for the first 50 iterations,
+               whatever range they happen to be in.
+            - `range(start, stop)` - selects by range of included **value**, eg: range(0, 50) for only those source
+               iterations that fall within the range 0 .. 50.
+            - any list-like object: Filters based on exact membership. Preserves selection order if available.
+              It is an error to select iterations that are not present.
     """
     # sanity checks
     if per_step and not hasattr(callback, 'step_history'):
@@ -3161,7 +3171,8 @@ def plot_train_history(callback: tf.keras.callbacks.History, per_step=False, sho
     metric_keys = [k for k in callback.history.keys() if not is_loss(k)]
 
     # prepare
-    iterations = callback.steps if per_step else callback.epoch
+    src_iterations = callback.steps if per_step else callback.epoch
+    iterations, iteration_indices = _filter_iterations(src_iterations, iterations, return_indices=True)
 
     # do plots
     plt.figure(figsize=(11, 3))
@@ -3170,12 +3181,12 @@ def plot_train_history(callback: tf.keras.callbacks.History, per_step=False, sho
         plt.title("Loss")
         for s_idx, key in enumerate(loss_keys):
             if per_step:
-                plt.plot(iterations, callback.step_history[key], label=key)
+                plt.plot(iterations, np.array(callback.step_history[key])[iteration_indices], label=key)
             elif show_loss_percentiles and hasattr(callback, 'epoch_stats'):
-                _plot_add_quantiles(iterations, callback.epoch_stats[key],
+                _plot_add_quantiles(iterations, callback.epoch_stats[key].iloc[iteration_indices],
                                     color=s_idx, label=key, show_percentile_labels=False, single_series=False)
             else:
-                plt.plot(iterations, callback.history[key], label=key)
+                plt.plot(iterations, np.array(callback.history[key])[iteration_indices], label=key)
         plt.yscale('log')
         plt.xlabel('step' if per_step else 'epoch')
         plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer x-axis ticks
@@ -3186,12 +3197,12 @@ def plot_train_history(callback: tf.keras.callbacks.History, per_step=False, sho
         plt.title("Metrics")
         for s_idx, key in enumerate(metric_keys):
             if per_step:
-                plt.plot(iterations, callback.step_history[key], label=key)
+                plt.plot(iterations, np.array(callback.step_history[key])[iteration_indices], label=key)
             elif show_metric_percentiles and hasattr(callback, 'epoch_stats'):
-                _plot_add_quantiles(iterations, callback.epoch_stats[key],
+                _plot_add_quantiles(iterations, callback.epoch_stats[key].iloc[iteration_indices],
                                     color=s_idx, label=key, show_percentile_labels=False, single_series=False)
             else:
-                plt.plot(iterations, callback.history[key], label=key)
+                plt.plot(iterations, np.array(callback.history[key])[iteration_indices], label=key)
         plt.xlabel('step' if per_step else 'epoch')
         plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer x-axis ticks
         plt.legend()
