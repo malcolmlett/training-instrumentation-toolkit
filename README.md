@@ -53,4 +53,4 @@ tinstr.plot_history_overview([history, variables, gradients, outputs, output_gra
 
 ## Docs
 
-See `doc` folder for Jupiter notebooks with explanation of functionality.
+See the [doc](doc/index.md) folder for Jupiter notebooks with explanation of functionality.
