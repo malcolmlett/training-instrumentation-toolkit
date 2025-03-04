@@ -138,23 +138,23 @@ def explain_near_zero_gradients(callbacks: list,
     Usage:
     > l_idx = 35
     > variables = VariableHistoryCallback(collection_sets=[{'layer_indices': [l_idx]}], before_updates=True)
-    > activity = ActivityHistoryCallback(collection_sets=[{'layer_indices': [l_idx-1, l_idx]}])
     > gradients = GradientHistoryCallback(collection_sets=[{'layer_indices': [l_idx]}])
-    > output_gradients = LayerOutputGradientHistoryCallback(collection_sets=[{'layer_indices': [l_idx]}])
-    > fit(model, train_data, callbacks=[variables, activity, gradients, output_gradients])
-    > explain_near_zero_gradients(l_idx, epoch=..., callbacks=[variables, activity, gradients, output_gradients])
+    > outputs = LayerOutputHistoryCallback(collection_sets=[{'layer_indices': [l_idx-1, l_idx]}], batch_reduction=None)
+    > output_gradients = LayerOutputGradientHistoryCallback(collection_sets=[{'layer_indices': [l_idx]}], batch_reduction=None)
+    > fit(model, train_data, callbacks=[variables, gradients, outputs, output_gradients])
+    > explain_near_zero_gradients([variables, gradients, outputs, output_gradients], l_idx, epoch=...)
     """
 
     # parse arguments - extract individual callbacks by type
     variables = None
-    activity = None
     gradients = None
+    outputs = None
     output_gradients = None
     for cb in callbacks:
         if reload_safe_isinstance(cb, tinstr.VariableHistoryCallback):
             variables = cb
         elif reload_safe_isinstance(cb, tinstr.LayerOutputHistoryCallback):
-            activity = cb
+            outputs = cb
         elif reload_safe_isinstance(cb, tinstr.GradientHistoryCallback):
             gradients = cb
         elif reload_safe_isinstance(cb, tinstr.LayerOutputGradientHistoryCallback):
@@ -172,20 +172,20 @@ def explain_near_zero_gradients(callbacks: list,
     elif gradients.gradients is None:
         missing_infos.append("gradients not collected during training")
 
-    if activity is None:
+    if outputs is None:
         missing_infos.append("layer output callback not supplied")
-    elif activity.layer_outputs is None:
+    elif outputs.layer_outputs is None:
         missing_infos.append("layer outputs not collected during training")
-    elif activity.batch_reduction is not None:
-        missing_infos.append("layer outputs were collected with batch reduction, must use batch_reduction=None")
-        activity = None
+    elif outputs.batch_reduction is not None:
+        missing_infos.append("layer outputs were collected with batch reduction (must use batch_reduction=None)")
+        outputs = None
 
     if output_gradients is None:
-        missing_infos.append("output_gradients callback not supplied")
+        missing_infos.append("output gradients callback not supplied")
     elif output_gradients.gradients is None:
         missing_infos.append("output gradients not collected during training")
     elif output_gradients.batch_reduction is not None:
-        missing_infos.append("output gradients were collected with batch reduction, must use batch_reduction=None")
+        missing_infos.append("output gradients were collected with batch reduction (must use batch_reduction=None)")
         output_gradients = None
 
     # parse arguments - identify iteration number
@@ -217,53 +217,54 @@ def explain_near_zero_gradients(callbacks: list,
         raise ValueError(f"Layer #{layer_index} has no outbound layers")
 
     def _get_layer_handler(l_idx, subscript, warnings_out=None):
-        # does None-safe equivalent of:
-        #  vars = [variables.variables[var_idx][iteration] for var_idx in l_to_var_indices[l_idx]]
-        #  grads = [gradients.gradients[var_idx][iteration] for var_idx in l_to_var_indices[l_idx]]
-        #  inputs = [activity.layer_outputs[l_idx2][iteration] for l_idx2 in inbound_layer_indices]
-        #  output = activity.layer_outputs[l_idx][iteration]
-        #  output_grads = output_gradients.gradients[l_idx][iteration]
-
+        """
+        This complex looking function just does the "None-safe" equivalent of:
+          layerSvars = [variables.variables[var_idx][iteration] for var_idx in l_to_var_indices[l_idx]]
+          layer_grads = [gradients.gradients[var_idx][iteration] for var_idx in l_to_var_indices[l_idx]]
+          layer_inps = [outputs.layer_outputs[l_idx2][iteration] for l_idx2 in inbound_layer_indices]
+          layer_out = outputs.layer_outputs[l_idx][iteration]
+          layer_out_grads = output_gradients.gradients[l_idx][iteration]
+        """
         if warnings_out is None:
             warnings_out = []
         layer = model.layers[l_idx]
-        vars = []
-        grads = []
-        inputs = []
-        output = None
-        output_grads = None
+        layer_vars = []
+        layer_grads = []
+        layer_inps = []
+        layer_out = None
+        layer_out_grads = None
         for var_idx in l_to_var_indices[l_idx]:
             if variables and variables.variables is not None:
                 if variables.variables[var_idx] is None:
                     warnings_out.append(f"variable {var_idx} not collected")
                 else:
-                    vars.append(variables.variables[var_idx][iteration])
+                    layer_vars.append(variables.variables[var_idx][iteration])
             if gradients and gradients.gradients is not None:
                 if gradients.gradients[var_idx] is None:
                     warnings_out.append(f"gradients of variable {var_idx} not collected")
                 else:
-                    grads.append(gradients.gradients[var_idx][iteration])
-        for l_idx2 in inbound_layer_indices:
-            if activity and activity.layer_outputs is not None:
-                if activity.layer_outputs[l_idx2] is None:
-                    warnings_out.append(f"layer {l_idx2} outputs not collected")
+                    layer_grads.append(gradients.gradients[var_idx][iteration])
+        for l_idx0 in inbound_layer_indices:
+            if outputs and outputs.layer_outputs is not None:
+                if outputs.layer_outputs[l_idx0] is None:
+                    warnings_out.append(f"layer {l_idx0} outputs not collected")
                 else:
-                    inputs.append(activity.layer_outputs[l_idx2][iteration])
-        if activity and activity.layer_outputs is not None:
-            if activity.layer_outputs[l_idx] is None:
+                    layer_inps.append(outputs.layer_outputs[l_idx0][iteration])
+        if outputs and outputs.layer_outputs is not None:
+            if outputs.layer_outputs[l_idx] is None:
                 warnings_out.append(f"layer {l_idx} outputs not collected")
             else:
-                output = activity.layer_outputs[l_idx][iteration]
+                layer_out = outputs.layer_outputs[l_idx][iteration]
         if output_gradients and output_gradients.gradients is not None:
             if output_gradients.gradients[l_idx] is None:
                 warnings_out.append(f"output gradients for layer {l_idx} not collected")
             else:
-                output_grads = output_gradients.gradients[l_idx][iteration]
+                layer_out_grads = output_gradients.gradients[l_idx][iteration]
         return get_layer_handler_for(
-            layer=layer, layer_index=l_idx, layer_subscript=subscript, return_note=True,
-            variables=vars, gradients=grads, inputs=inputs, output=output, output_gradients=output_grads)
+            layer=layer, layer_index=l_idx, layer_subscript=subscript, return_note=True, variables=layer_vars,
+            gradients=layer_grads, inputs=layer_inps, output=layer_out, output_gradients=layer_out_grads)
 
-    # get variables, activities, and gradients of interest
+    # get layer handlers
     # TODO do something with handler notes
     # TODO incorporate extra error checking that was in _estimate_backprop_from_layer()
     # TODO don't bother trying to get next_layer_handlers unless needed
@@ -833,8 +834,8 @@ def _find_layer_by_node(model, node, return_type='layer'):
     return None
 
 
+# no longer in use
 # TODO take key error messages and merge with new code
-# TODO needs to be extended out to cope with different layer types
 def _estimate_backprop_from_layer(model, layer_index, iteration,
                                   gradients: tinstr.GradientHistoryCallback,
                                   activity: tinstr.LayerOutputHistoryCallback,
