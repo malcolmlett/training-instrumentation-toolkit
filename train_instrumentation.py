@@ -1725,7 +1725,7 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         self._accum_activity_stats(activations, is_accum)
 
         # per-epoch mode only: accumulate activations over course of epoch
-        if not self.per_step:
+        if not self.per_step and self._activations_accumulator:
             self._activations_accumulator.accumulate(batch, activations)
 
         # stats calculations for each step, if configured
@@ -1972,7 +1972,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
         self._accum_activity_stats(output_gradients, is_accum)
 
         # per-epoch mode only: accumulate gradients over course of epoch
-        if not self.per_step:
+        if not self.per_step and self._gradients_accumulator:
             self._gradients_accumulator.accumulate(batch, output_gradients)
 
         # stats calculations for each step, if configured
