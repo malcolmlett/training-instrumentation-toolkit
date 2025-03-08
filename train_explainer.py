@@ -310,7 +310,7 @@ def explain_near_zero_gradients(callbacks: list,
         name = "A_0" if len(target_layer_handler.inputs) == 1 else f"A_0#{idx}"
         _explain_tensor(name + ' - input value', A_0, include_summary_by_unit=True)
 
-    W_l =
+    W_l = target_layer_handler.get_weights()
     _explain_tensor("W_l - weights of target layer", W_l,
                     "corresponding to near-zero gradients", near_zero_gradients_mask)
 
