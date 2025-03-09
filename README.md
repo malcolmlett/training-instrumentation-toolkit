@@ -17,11 +17,15 @@ Some of the kinds of problems that this tooling is targeted at include:
 * and more generally for identifying the cause of slow training progress
 
 This project came out of experiments looking into options for improving the "training observability" - ie: improving our
-ability to observe how the model training algorithm is behaving. I'm not seeking to replace existing tooling,
+ability to observe how the model training algorithm is behaving. There's a gap between the tools used in academic
+literature to investigate these kinds of problems versus what's easy to do out of the box with the likes of TensorFlow
+and PyTorch. I wanted to see what it would take to bridge that gap. I'm not seeking to replace existing tooling,
 rather to suggest some data collection and visualisation approaches that I think would be good to add to existing
-tooling for TensorFlow and PyTorch. I have intentionally focused on basic plotting via matplotlib so that I could
-get away from any limitations inherent within the existing plotting tools such as that provided by TensorBoard,
-Weights & Biases, etc.
+tooling for TensorFlow and PyTorch. In the meantime, this toolkit is easy to incorporate into your existing
+training pipeline.
+
+I have intentionally focused on basic plotting via matplotlib so that I could get away from any limitations inherent
+within the existing plotting tools such as that provided by TensorBoard, Weights & Biases, etc.
 
 Anyone is free to take what's here and use as a basis for their own work, though attribution would be greatly
 appreciated.
