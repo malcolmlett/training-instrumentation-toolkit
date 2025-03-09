@@ -1,6 +1,6 @@
 # Training Instrumentation Toolkit
-TensorFlow addons for instrumenting training loops in order to collect, analyse, and visualize detailed metrics on
-gradients, weights, and layer activations.
+TensorFlow addons for instrumenting NN model training loops in order to collect, analyse, and visualize detailed
+metrics on gradients, weights, and layer activations.
 
 Intended to improve development turnaround time by making it easier to access subtle indicators of training progress and
 potential training problems. Aids in troubleshooting by providing insight into many aspects of model training in one go,
