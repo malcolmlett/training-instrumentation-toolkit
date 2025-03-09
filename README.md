@@ -17,7 +17,7 @@ Some of the kinds of problems that this tooling is targeted at include:
 * and more generally for identifying the cause of slow training progress
 
 This project came out of experiments looking into options for improving the "training observability" - ie: improving our
-ability to observe how the model training algorithm is behaving. There's a gap between the tools used in academic
+ability to observe how the model training algorithm is behaving. There's a gap between the techniques used in academic
 literature to investigate these kinds of problems versus what's easy to do out of the box with the likes of TensorFlow
 and PyTorch. I wanted to see what it would take to bridge that gap. I'm not seeking to replace existing tooling,
 rather to suggest some data collection and visualisation approaches that I think would be good to add to existing
