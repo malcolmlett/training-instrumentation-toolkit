@@ -3288,9 +3288,8 @@ def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', i
         layer_id_lookup = layer_indices_by_variable(model)
         for v_idx in collected_item_indices:
             l_idx = layer_id_lookup[v_idx]
-            layer_name = model.layers[l_idx].name
-            variable_name = model.variables[v_idx].name
-            item_display_names.append(f"{layer_name}(#{l_idx})/{variable_name}")
+            variable_path = model.variables[v_idx].path
+            item_display_names.append(f"layer {l_idx}:\n{variable_path}")
 
     # start figure
     # - at least 4 layer plots wide
@@ -3431,9 +3430,8 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin, iterations=Non
         layer_id_lookup = layer_indices_by_variable(model)
         for v_idx in collected_item_indices:
             l_idx = layer_id_lookup[v_idx]
-            layer_name = model.layers[l_idx].name
-            variable_name = model.variables[v_idx].name
-            item_display_names.append(f"{layer_name}(#{l_idx})/{variable_name}")
+            variable_path = model.variables[v_idx].path
+            item_display_names.append(f"layer {l_idx}:\n{variable_path}")
     has_spatial_shapes = any([len(shape) > 0 for shape in spatial_shapes])
 
     # start figure
