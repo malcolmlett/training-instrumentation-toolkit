@@ -1714,6 +1714,11 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         """
         Accumulates activations from each step. Also emits stats, if configured at per-step level.
         """
+        # WORKAROUND:
+        # Doesn't cope with layers that return multiple outputs in a list.
+        # For now, pre-process to just pick the first of each layer's activations if there are multiple
+        activations = [activation[0] if isinstance(activation, list) else activation for activation in activations]
+
         # initialisation on first access to raw data
         if self._layer_shapes is None:
             self._layer_shapes = [activation.shape for activation in activations]
@@ -1752,6 +1757,12 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
                 activations = self._activations_accumulator.sum
             elif self.batch_reduction == 'mean':
                 activations = self._activations_accumulator.mean
+            else:
+                # WORKAROUND:
+                # Doesn't cope with layers that return multiple outputs in a list.
+                # For now, pre-process to just pick the first of each layer's activations if there are multiple
+                activations = [activation[0] if isinstance(activation, list) else activation
+                               for activation in activations]
 
             self.epochs.append(epoch)
             self._collect_value_stats(activations)
@@ -1961,6 +1972,12 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
         """
         Accumulates activations from each step. Also emits stats, if configured at per-step level.
         """
+        # WORKAROUND:
+        # Doesn't cope with layers that return multiple outputs in a list.
+        # For now, pre-process to just pick the first of each layer's output gradients if there are multiple
+        output_gradients = [output[0] if isinstance(output, list) else output
+                            for output in output_gradients]
+
         # initialisation on first access to raw data
         if self._layer_shapes is None:
             self._layer_shapes = [output.shape if output is not None else None for output in output_gradients]
@@ -1999,6 +2016,12 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
                 output_gradients = self._gradients_accumulator.sum
             elif self.batch_reduction == 'mean':
                 output_gradients = self._gradients_accumulator.mean
+            else:
+                # WORKAROUND:
+                # Doesn't cope with layers that return multiple outputs in a list.
+                # For now, pre-process to just pick the first of each layer's output gradients if there are multiple
+                output_gradients = [output[0] if isinstance(output, list) else output
+                                    for output in output_gradients]
 
             self.epochs.append(epoch)
             self._collect_value_stats(output_gradients)
