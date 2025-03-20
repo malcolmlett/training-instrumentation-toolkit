@@ -668,6 +668,7 @@ class ValueStatsCollectingMixin:
         if self.value_stats_enabled and self._value_stats is None:
             self._value_stats = [[] if value is not None else None for value in values]
             self._magnitude_stats = [[] if value is not None else None for value in values]
+        if self.value_norms_enabled or self.value_stats_enabled:
             self._collected_value_indices = [i_idx for i_idx, value in enumerate(values) if value is not None]
 
     def _finalize_value_norms_and_stats(self):
@@ -690,17 +691,21 @@ class ValueStatsCollectingMixin:
             # - returns tuples (norm, magnitude_percentiles, value_percentiles)
             stat_tuples = self._compute_iteration_value_stats(values, self.value_stats_quantiles)
 
-            # append to stats list
-            # (performance note: this loop doesn't seem to cost much)
-            for item_value_norms, item_value_stats, item_magnitude_stats,\
-                    (norm, value_percentiles, magnitude_percentiles) \
-                    in zip(self._value_norms, self._value_stats, self._magnitude_stats, stat_tuples):
-                if item_value_norms is not None:
-                    item_value_norms.append(norm)
-                if item_value_stats is not None:
-                    item_value_stats.append(value_percentiles)
-                if item_magnitude_stats is not None:
-                    item_magnitude_stats.append(magnitude_percentiles)
+            # append to norms and stats lists
+            # (performance note: these loops don't seem to cost much)
+            if self._value_norms is not None:
+                for item_value_norms, (norm, value_percentiles, magnitude_percentiles) \
+                        in zip(self._value_norms, stat_tuples):
+                    if item_value_norms is not None:
+                        item_value_norms.append(norm)
+            if self._value_stats is not None:
+                for item_value_stats, item_magnitude_stats,\
+                        (norm, value_percentiles, magnitude_percentiles) \
+                        in zip(self._value_stats, self._magnitude_stats, stat_tuples):
+                    if item_value_stats is not None:
+                        item_value_stats.append(value_percentiles)
+                    if item_magnitude_stats is not None:
+                        item_magnitude_stats.append(magnitude_percentiles)
 
     # Percentile calculation is fairly expensive. It could be worth defaulting to calculation of simpler stats and only
     # doing percentiles if requested. However, simple mean + stddev isn't very good for heavily skewed distributions
