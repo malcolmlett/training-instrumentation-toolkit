@@ -657,7 +657,7 @@ class ValueStatsCollectingMixin:
         """
         return self._collected_value_indices
 
-    def _init_value_stats(self, values):
+    def _init_value_norms_and_stats(self, values):
         """
         Initialisation of tracking once we have a first example of what the values look like.
         Automatically called on first data collection.
@@ -670,7 +670,7 @@ class ValueStatsCollectingMixin:
             self._magnitude_stats = [[] if value is not None else None for value in values]
             self._collected_value_indices = [i_idx for i_idx, value in enumerate(values) if value is not None]
 
-    def _finalize_value_stats(self):
+    def _finalize_value_norms_and_stats(self):
         # convert data structures
         # - from: list (by item) of list (by iteration) of tensor (by stat)
         # - to:   list (by item) of pd-dataframe: iterations x percentiles
@@ -683,9 +683,9 @@ class ValueStatsCollectingMixin:
             self._magnitude_stats = self._stats_tensor_list_to_dataframes(
                 self._magnitude_stats, self.value_stats_quantiles)
 
-    def _collect_value_stats(self, values):
-        self._init_value_stats(values)
-        if self._value_stats is not None:
+    def _collect_value_norms_and_stats(self, values):
+        self._init_value_norms_and_stats(values)
+        if self._value_norms is not None or self._value_stats is not None:
             # compute value and magnitude percentile stats for each individual variable
             # - returns tuples (norm, magnitude_percentiles, value_percentiles)
             stat_tuples = self._compute_iteration_value_stats(values, self.value_stats_quantiles)
@@ -728,12 +728,15 @@ class ValueStatsCollectingMixin:
             - magnitude_percentile - tensor of percentile values across the tensor magnitudes, None for None tensors
         """
         def computation(tensor):
-            if tensor is not None:
+            if tensor is not None and self._value_norms is not None:
                 norm = tf.sqrt(tf.reduce_mean(tf.square(tensor)))
+            else:
+                norm = None
+            if tensor is not None and self._value_stats is not None:
                 value_percentiles = tfp.stats.percentile(tensor, quantiles, interpolation='linear')
                 magnitude_percentiles = tfp.stats.percentile(tf.abs(tensor), quantiles, interpolation='linear')
             else:
-                norm, value_percentiles, magnitude_percentiles = None, None, None
+                value_percentiles, magnitude_percentiles = None, None
             return norm, value_percentiles, magnitude_percentiles
         return [computation(tensor) for tensor in tensors]
 
@@ -1252,7 +1255,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
         self._variable_stats_mask = [value is not None for value in values]
 
         # init stats
-        self._init_value_stats(values)
+        self._init_value_norms_and_stats(values)
         self._init_activity_stats(values)
 
         # expand collection_sets and initialise variable storages
@@ -1276,7 +1279,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
             self.epochs = np.array(self.epochs)
 
         # convert data structures to output formats
-        self._finalize_value_stats()
+        self._finalize_value_norms_and_stats()
         self._finalize_activity_stats()
 
     def on_epoch_begin(self, epoch, logs=None):
@@ -1305,7 +1308,7 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
                   in zip(self.model.variables, self._variable_stats_mask)]
 
         # value stats
-        self._collect_value_stats(values)
+        self._collect_value_norms_and_stats(values)
 
         # activity stats
         self._accum_activity_stats(values, is_accum=False)
@@ -1470,7 +1473,7 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
             self.epochs = np.array(self.epochs)
 
         # convert data structures to output formats
-        self._finalize_value_stats()
+        self._finalize_value_norms_and_stats()
         self._finalize_activity_stats()
 
         # free memory
@@ -1512,7 +1515,7 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
                   for v_idx in range(len(self.model.variables))]
 
         # value stats
-        self._collect_value_stats(values)
+        self._collect_value_norms_and_stats(values)
 
         # activity stats
         self._accum_activity_stats(values, is_accum=False)
@@ -1696,7 +1699,7 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
             self.steps = np.array(self.steps)
         else:
             self.epochs = np.array(self.epochs)
-        self._finalize_value_stats()
+        self._finalize_value_norms_and_stats()
         self._finalize_activity_stats()
 
         # free memory
@@ -1741,7 +1744,7 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
                 activations = [tf.reduce_mean(t, keepdims=self.keep_dims) for t in activations]
 
             self.steps.append(self.params['steps'] * self._epoch + batch)
-            self._collect_value_stats(activations)
+            self._collect_value_norms_and_stats(activations)
             self._collect_raw_values(activations)
 
             # activity stats calculated based on accumulated partial stats
@@ -1765,7 +1768,7 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
                                for activation in activations]
 
             self.epochs.append(epoch)
-            self._collect_value_stats(activations)
+            self._collect_value_norms_and_stats(activations)
             self._collect_raw_values(activations)
 
             # activity stats calculated based on accumulated partial stats
@@ -1954,7 +1957,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
             self.steps = np.array(self.steps)
         else:
             self.epochs = np.array(self.epochs)
-        self._finalize_value_stats()
+        self._finalize_value_norms_and_stats()
         self._finalize_activity_stats()
 
         # free memory
@@ -2000,7 +2003,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
                 output_gradients = [tf.reduce_mean(t, keepdims=self.keep_dims) for t in output_gradients]
 
             self.steps.append(self.params['steps'] * self._epoch + batch)
-            self._collect_value_stats(output_gradients)
+            self._collect_value_norms_and_stats(output_gradients)
             self._collect_raw_values(output_gradients)
 
             # activity stats calculated based on accumulated partial stats
@@ -2024,7 +2027,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
                                     for output in output_gradients]
 
             self.epochs.append(epoch)
-            self._collect_value_stats(output_gradients)
+            self._collect_value_norms_and_stats(output_gradients)
             self._collect_raw_values(output_gradients)
 
             # activity stats calculated based on accumulated partial stats
