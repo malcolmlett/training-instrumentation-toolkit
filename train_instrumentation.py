@@ -12,6 +12,7 @@ from numpy.polynomial.polynomial import Polynomial
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+import time
 import tqdm
 from enum import Enum
 
@@ -280,16 +281,16 @@ class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
     def set_params(self, params):
         self.epoch_count = params['epochs']
         self.group_start_epoch = -1
-        self.group_start_time = tf.timestamp()
+        self.group_start_time = time.perf_counter()
         if self.display_interval is None:
             self.display_interval = math.floor(self.epoch_count / self.display_total)
 
     def on_epoch_begin(self, epoch, logs=None):
-        self.epoch_start = tf.timestamp()
+        self.epoch_start = time.perf_counter()
 
     def on_epoch_end(self, epoch, logs=None):
         if self.display_interval == 0 or ((epoch + 1) % self.display_interval == 0) or epoch == self.epoch_count - 1:
-            now = tf.timestamp()
+            now = time.perf_counter()
             group_dur = now - self.group_start_time
             rate = group_dur / (epoch - self.group_start_epoch)
             self.group_start_time = now
