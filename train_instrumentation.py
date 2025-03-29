@@ -274,16 +274,26 @@ class LessVerboseProgressLogger(tf.keras.callbacks.Callback):
         self.display_interval = display_interval
         self.display_total = display_total
         self.epoch_count = None
+        self.training_start_time = None
         self.group_start_time = None
         self.group_start_epoch = None
         self.epoch_start = None
 
     def set_params(self, params):
+        # note: we use a standard python timer and not TF's own, because TF's timer is not available
+        # if the caller runs in deterministic mode
         self.epoch_count = params['epochs']
         self.group_start_epoch = -1
         self.group_start_time = time.perf_counter()
         if self.display_interval is None:
             self.display_interval = math.floor(self.epoch_count / self.display_total)
+
+    def on_train_begin(self, logs=None):
+        self.training_start_time = time.perf_counter()
+
+    def on_train_end(self, logs=None):
+        seconds = time.perf_counter() - self.training_start_time
+        print(f"Total training time: {seconds:.1f} sec")
 
     def on_epoch_begin(self, epoch, logs=None):
         self.epoch_start = time.perf_counter()
