@@ -2404,26 +2404,48 @@ def _compute_percentile_stats(tensor, quartiles, magnitudes=False):
     return tfp.stats.percentile(tensor, quartiles, interpolation='linear')
 
 
-def variable_indices_by_layer(model: tf.keras.Model, include_trainable_only: bool = False):
+def variable_indices_by_layer(model, include_trainable_only=False, single=False):
     """
     Groups indices of model.variable by layer.
 
-    Note: even with include_trainable_only==True, this produces different results from
+    By default, this returns a list of variables for each layer. That will vary from an empty list for layers
+    with no variables (or no trainable variables), to many. By setting single=False, this method will instead
+    return a single index for each layer, identifying the single "main" variable, which will typically be
+    the "weight" or "kernel". The heuristic is to pick the largest variable in the layer. For layers with no variables,
+    a None is returned.
+
+    Note: even with include_trainable_only=True, this produces different results from
     trainable_variable_indices_by_layer() which indexes variables by their position in model.trainable_variables.
 
     Params:
         model: a model
         include_trainable_only: bool
             Whether to only include the indices for trainable variables, or for all variables otherwise.
+        single: bool
+            Whether to identify the single "main" variable and return just its index, or None if no variable
+            for the layer. Otherwise, returns a list of variable indices for each layer.
     Returns:
-         list (by layer index) of list (by variable) of variable indices from original model.variable list.
+         list (by layer index) of list (by variable) of variable indices from original model.variable list,
+         OR
+         list (by layer index) of main variable index
     """
     if include_trainable_only:
-        return [[_index_by_identity(model.variables, var) for var in layer.trainable_variables]
-                for layer in model.layers]
+        variable_lists = [[_index_by_identity(model.variables, var) for var in layer.trainable_variables]
+                          for layer in model.layers]
     else:
-        return [[_index_by_identity(model.variables, var) for var in layer.variables]
-                for layer in model.layers]
+        variable_lists = [[_index_by_identity(model.variables, var) for var in layer.variables]
+                          for layer in model.layers]
+
+    if single:
+        def largest(var_indices):
+            if var_indices is not None and len(var_indices) > 0:
+                meta_idx = tf.argmax([tf.size(model.variables[var_idx]) for var_idx in var_indices])
+                return var_indices[meta_idx]
+            else:
+                return None
+        return [largest(indices) for indices in variable_lists]
+    else:
+        return variable_lists
 
 
 def trainable_variable_indices_by_layer(model: tf.keras.Model):
