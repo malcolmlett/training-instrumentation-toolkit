@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "If you find this repository useful in your research, please consider giving a star :star: and a citation as below:"
+authors:
+- family-names: "Lett"
+  given-names: "Malcolm"
+  orcid: "https://orcid.org/0000-0003-4903-1580"
+title: "Training Introspection Toolkit"
+version: 1.0
+date-released: 2025-03-09
+url: "https://github.com/malcolmlett/training-instrumentation-toolkit"

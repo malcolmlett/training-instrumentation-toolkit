@@ -84,5 +84,14 @@ notebooks directly within Google Colab so you can run them yourself.
 2. [Visualisations](doc/visualisations.ipynb)
 3. [Train Explainer](doc/train-explainer.ipynb)
 
-The above docs are all found in the `doc` folder. If you navigate there you will also find other experiments,
-and a series of notebooks that feed into blog posts.
+Detailed pydocs are available within the source code.
+
+The above documentation notebooks all found in the `doc` folder. If you navigate there you will also find other
+experiments, including a series of notebooks that feed into blog posts.
+
+## License
+See the [LICENSE](./LICENSE) file for details about the license under which this code is made available.
+
+## Citation
+If you find this repository useful in your research, please consider giving a star :star: and a citation.
+For citation information, please see the "Cite this repository" button on the right.
