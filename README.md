@@ -76,6 +76,13 @@ tinstr.plot_history_overview([history, variables, gradients, outputs, output_gra
 
 ## Docs
 
-See the [doc](doc/index.md) folder for Jupiter notebooks that explain the functionality.
+The following Jupiter notebooks demonstrate the core functionality of the _training-instrumentation-toolkit_,
+including how you can easily use it as a basis for collecting your metrics. They include links to open the
+notebooks directly within Google Colab so you can run them yourself.
 
-Blog posts using this work are currently being written.
+1. [Instrumentation](doc/instrumenting.ipynb)
+2. [Visualisations](doc/visualisations.ipynb)
+3. [Train Explainer](doc/train-explainer.ipynb)
+
+The above docs are all found in the `doc` folder. If you navigate there you will also find other experiments,
+and a series of notebooks that feed into blog posts.
