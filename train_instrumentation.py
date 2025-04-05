@@ -3274,7 +3274,7 @@ def plot_train_history(callback: tf.keras.callbacks.History, per_step=False, sho
     plt.show()
 
 
-def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', iterations=None):
+def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', yscale='auto', iterations=None):
     """
     Generates a figure containing a number of plots to visualise value or magnitude stats collected
     by one of the callbacks in this module.
@@ -3287,6 +3287,10 @@ def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', i
             'magnitudes' - percentile stats over value magnitudes (log scale).
             'values' - percentile stats over raw values (linear scale).
             'norms' - norms of values (log scale).
+        yscale: one of 'auto' (default), 'linear', 'log'. Where:
+            'auto' - automatically selects linear or log depending on the kind of value shown.
+            'linear' - linear scale
+            'log' - log scale. Ignored if show='values.
         iterations: slice, range, list, set, or other list-like
             Selection over iterations to be displayed, counted against epoch or steps, depending on what is being
             displayed. Selection method depends on type provided, which becomes important where history data
@@ -3302,6 +3306,8 @@ def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', i
     item_type = callback.item_type if hasattr(callback, 'item_type') else None
     if show not in ('magnitudes', 'values', 'norms'):
         raise ValueError(f"Invalid value for show: '{show}'")
+    if yscale not in ('auto', 'linear', 'log'):
+        raise ValueError(f"Invalid yscale: '{yscale}'")
     if item_type is None or item_type.value not in (ItemType.VARIABLE.value, ItemType.LAYER.value):  # reload-safe
         raise ValueError(f"Callback collects unsupported item type: {item_type}")
     if callback.value_norms is None:
@@ -3310,6 +3316,13 @@ def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', i
         raise ValueError(f"{type(callback).__name__} did not collect value magnitude stats")
     if callback.value_stats is None:
         raise ValueError(f"{type(callback).__name__} did not collect value stats")
+
+    if show == 'values':
+        # forced linear if showing values
+        yscale = 'linear'
+    elif yscale == 'auto':
+        # magnitudes and norms default to log scale
+        yscale = 'log'
 
     # collect data
     model = callback.model
@@ -3387,15 +3400,12 @@ def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', i
         plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))
         if show == 'magnitudes':
             _plot_add_quantiles(iterations, collected_item_magnitude_stats[i_idx])
-            yscale = 'log'
             ylabel = 'magnitude'
         elif show == 'values':
             _plot_add_quantiles(iterations, collected_item_value_stats[i_idx])
-            yscale = 'linear'
             ylabel = 'value'
         else:
             plt.plot(collected_item_value_norms[i_idx])
-            yscale = 'log'
             ylabel = 'norm'
         plt.yscale(yscale)
         if c == 0:
