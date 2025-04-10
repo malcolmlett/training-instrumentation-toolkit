@@ -6,6 +6,39 @@ import conv_tools
 import train_instrumentation as tinstr
 import matmul_explainer as mmexpl
 
+# Future improvements:
+# - Representing A_{l-1}
+#    Using A_0 is really confusing.
+#    Try using X instead.
+#    Then we can basically consider a layer on its own, without any layer indices:
+#      Forward:   X --(W, b)--> Z --(S)--> A
+#      Backward:  dJ/dA, dA/dZ = S, dZ/dX, dJ/dW, etc.
+#
+# - Per-outcome grouping of input combinations:
+#    When trying to understand how Z ends up negative, I find that just looking at the classification
+#    combinations from A_0 dot W_l doesn't fully explain things.
+#    For example, in the 202503 blog-post notebook on neuron death I have an analysis into
+#    Z of the one of the head layers having about 98% negative values. A_0 has 98% zero,
+#    and A dot W shows lots of zero outcomes. The explanation for the negative Z values is not there.
+#    It's possible that all the zeros get shifted to negative by the bias, or that the small fraction of remaining
+#    positive and negative values have sufficient inbalance between them that they produce the final negative Z values.
+#    So, I simply want to add another entry to the detailed breakdown output, giving:
+#      A_0 PZN:
+#         Z: 4032.0 = Σ 0.000000, P: 64.0 = Σ 0.644935
+#      W   PZN:
+#         N: 32877.0 = Σ -1815, P: 32003.0 = Σ 1729, Z: 656.0 = Σ -0
+#      A_0 dot W PZN:
+#         ZN: 517488.0 = Σ 0.000, ZP: 504336.0 = Σ 0.000, ZZ: 10368.0 = Σ 0.000, PN: 8544.0 = Σ -4.955, PP: 7712.0 = Σ 4.165, PZ: 128.0 = Σ 0.000
+#      Z:
+#         N: 4007.0 = Σ -27.72, P: 48.0 = Σ 0.36, Z: 41.0 = Σ -0.03
+#      A_0 dot W PZN by Z class:                                      <new>
+#         Z[P]: ZN: .., ZP: .., ZZ: .., PN: .., PP: .., PZ: ..
+#         Z[Z]: ZN: .., ZP: .., ZZ: .., PN: .., PP: .., PZ: ..        <-- this one is currently displayed, but in a different way
+#         Z[N]: ZN: .., ZP: .., ZZ: .., PN: .., PP: .., PZ: ..
+#
+# - Should I also add a breakdown of (A_0 dot W) + b?
+#    It looks like the bias can have a bigger impact than I thought.
+
 
 def explain_near_zero_gradients(callbacks: list,
                                 layer_index: int,
