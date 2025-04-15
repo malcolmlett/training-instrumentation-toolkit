@@ -3088,7 +3088,8 @@ def plot_history_overview(callbacks: list, details=True, iterations=None):
     plt.figure(figsize=(13, 4 * grid_height / 2), layout='constrained')
 
     # Main plot - Loss
-    # - uses per_step as a guide, but only plots what's available
+    # - uses per_step as a recommendation, but only plots what's available
+    # - also has to cope with some per-step results not being available (eg: from validation set)
     if history_stats or history:
         plt.subplot2grid((grid_height, grid_width), (0, 0), colspan=grid_width // 2, rowspan=2)
         plt.title("Loss and Metrics")
@@ -3106,10 +3107,12 @@ def plot_history_overview(callbacks: list, details=True, iterations=None):
         for s_idx, key in enumerate(keys):
             color = plt.rcParams['axes.prop_cycle'].by_key()['color'][s_idx]
             if hist_per_step:
-                plt.plot(
-                    hist_iterations,
-                    np.array(history_stats.step_history[key])[hist_iteration_indices],
-                    label=key, color=color)
+                # show if available, otherwise omit if not available for this key
+                if key in history_stats.step_history:
+                    plt.plot(
+                        hist_iterations,
+                        np.array(history_stats.step_history[key])[hist_iteration_indices],
+                        label=key, color=color)
             elif key == 'loss' and history_stats:
                 _plot_add_quantiles(
                     hist_iterations,
@@ -3239,18 +3242,24 @@ def plot_train_history(callback: tf.keras.callbacks.History, per_step=False, sho
     iterations, iteration_indices = _filter_iterations(src_iterations, iterations, return_indices=True)
 
     # do plots
+    # - notes:
+    #   - Some metrics not available per-step (eg: validation set metrics) so we may not have stats for them.
+    #     Fallback to history values or just skip if necessary.
     plt.figure(figsize=(11, 3))
     if len(loss_keys) > 0:
         plt.subplot(1, 2, 1)
         plt.title("Loss")
         for s_idx, key in enumerate(loss_keys):
+            color = plt.rcParams['axes.prop_cycle'].by_key()['color'][s_idx]
             if per_step:
-                plt.plot(iterations, np.array(callback.step_history[key])[iteration_indices], label=key)
-            elif show_loss_percentiles and hasattr(callback, 'epoch_stats'):
+                if key in callback.step_history:
+                    plt.plot(iterations, np.array(callback.step_history[key])[iteration_indices],
+                             label=key, color=color)
+            elif show_loss_percentiles and hasattr(callback, 'epoch_stats') and key in callback.epoch_stats:
                 _plot_add_quantiles(iterations, callback.epoch_stats[key].iloc[iteration_indices],
-                                    color=s_idx, label=key, show_percentile_labels=False, single_series=False)
+                                    color=color, label=key, show_percentile_labels=False, single_series=False)
             else:
-                plt.plot(iterations, np.array(callback.history[key])[iteration_indices], label=key)
+                plt.plot(iterations, np.array(callback.history[key])[iteration_indices], label=key, color=color)
         plt.yscale('log')
         plt.xlabel('step' if per_step else 'epoch')
         plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer x-axis ticks
@@ -3260,13 +3269,16 @@ def plot_train_history(callback: tf.keras.callbacks.History, per_step=False, sho
         plt.subplot(1, 2, 2)
         plt.title("Metrics")
         for s_idx, key in enumerate(metric_keys):
+            color = plt.rcParams['axes.prop_cycle'].by_key()['color'][s_idx]
             if per_step:
-                plt.plot(iterations, np.array(callback.step_history[key])[iteration_indices], label=key)
-            elif show_metric_percentiles and hasattr(callback, 'epoch_stats'):
+                if key in callback.step_history:
+                    plt.plot(iterations, np.array(callback.step_history[key])[iteration_indices],
+                             label=key, color=color)
+            elif show_metric_percentiles and hasattr(callback, 'epoch_stats') and key in callback.epoch_stats:
                 _plot_add_quantiles(iterations, callback.epoch_stats[key].iloc[iteration_indices],
-                                    color=s_idx, label=key, show_percentile_labels=False, single_series=False)
+                                    color=color, label=key, show_percentile_labels=False, single_series=False)
             else:
-                plt.plot(iterations, np.array(callback.history[key])[iteration_indices], label=key)
+                plt.plot(iterations, np.array(callback.history[key])[iteration_indices], label=key, color=color)
         plt.xlabel('step' if per_step else 'epoch')
         plt.gca().xaxis.set_major_locator(mticker.MaxNLocator(integer=True))  # ensure integer x-axis ticks
         plt.legend()
