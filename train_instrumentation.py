@@ -2547,6 +2547,30 @@ def layer_indices_by_trainable_variable(model):
     return lookup
 
 
+def variable_display_names(model):
+    """
+    Identifies the display names of all variables (including non-trainable), suitable for identifying the variable
+    in plots.
+    Omits the model name, which is sometimes included, for example when constructed as a Sequence.
+
+    Usually a variable path has two parts (eg: "dense_1/kernel"). In sequences it will also have the model name
+    (eg: "sequence_4/dense_1/kernel"). In some complex layers such as MHA, it'll legitimately have three parts
+    (eg: "mha_1/values/kernel").
+    """
+    # heuristic: if first variable has 3 parts, then the first is the model and we can remove it.
+    num_parts = len(model.variables[0].path.split('/'))
+    start = 0 if num_parts < 3 else 1
+
+    def _process(path):
+        parts = path.split('/')
+        if len(parts) <= 1:
+            return path  # fallback: return as is
+        else:
+            return '/'.join(parts[start:])
+
+    return [_process(v.path) for v in model.variables]
+
+
 def _index_by_identity(lst, target):
     """
     Some classes override the equals() method s.t. you can't simply
@@ -3376,10 +3400,10 @@ def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', y
     else:
         item_shapes = [model.variables[v_idx].shape for v_idx in collected_item_indices]
         layer_id_lookup = layer_indices_by_variable(model)
+        var_names = variable_display_names(model)
         for v_idx in collected_item_indices:
             l_idx = layer_id_lookup[v_idx]
-            variable_path = model.variables[v_idx].path
-            item_display_names.append(f"layer {l_idx}:\n{variable_path}")
+            item_display_names.append(f"layer {l_idx}:\n{var_names[v_idx]}")
 
     # start figure
     # - at least 4 layer plots wide
@@ -3515,10 +3539,10 @@ def plot_activity_history(callback: ActivityStatsCollectingMixin, iterations=Non
         item_shapes = [model.variables[v_idx].shape for v_idx in collected_item_indices]
         spatial_shapes = [shape[0:-1] for shape in item_shapes]  # assume: (..spatial_dims.., channels)
         layer_id_lookup = layer_indices_by_variable(model)
+        var_names = variable_display_names(model)
         for v_idx in collected_item_indices:
             l_idx = layer_id_lookup[v_idx]
-            variable_path = model.variables[v_idx].path
-            item_display_names.append(f"layer {l_idx}:\n{variable_path}")
+            item_display_names.append(f"layer {l_idx}:\n{var_names[v_idx]}")
     has_spatial_shapes = any([len(shape) > 0 for shape in spatial_shapes])
 
     # start figure
