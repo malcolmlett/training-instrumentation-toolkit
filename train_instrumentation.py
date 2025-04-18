@@ -1143,6 +1143,124 @@ class PerEpochAccumulatorStrategy:
         return 1
 
 
+# TODO add unit tests
+class BasicStatsAccumulatorStrategy:
+    """
+    Batched calculation of mean, stddev, min, and max.
+
+    Arguments:
+        abs_log_scale: whether to calculate mean/stddev against
+          the log(abs(.)) of supplied tensors, converting to
+          original scale only when results are retrieved; or otherwise
+          to work with the original tensors.
+    """
+    def __init__(self, abs_log_scale=False):
+        super().__init__()
+        self.abs_log_scale = abs_log_scale
+        self.epsilon = 1e-12
+        self._accumulators = None
+
+    @property
+    def percentiles(self):
+        """
+        The calculated stats as a percentile distribution.
+        Returns:
+            tensor containing percentile values
+        """
+        return [self._compute_as_percentiles(*quantities) if quantities is not None else None
+                for l_idx, quantities in enumerate(self._accumulators)]
+
+    @property
+    def quantiles(self):
+        """
+        The percentile positions that percentiles() approximates from the basic stats.
+        Returns:
+            list
+        """
+        one_sd = 68.0
+        return [0.0, 100-one_sd, 50.0, one_sd, 100.0]
+
+    @property
+    def stats(self):
+        """
+        Gets the basic stats over the currently observed data.
+        Returns:
+            tensor containing min, max, mean, stddev
+        """
+        return [self._compute_as_stats(*quantities) if quantities is not None else None
+                for l_idx, quantities in enumerate(self._accumulators)]
+
+    def accumulate(self, batch, tensors):
+        # accumulate across batches in epoch, resetting first batch in each epoch
+        if batch == 0:
+            self._accumulators = [self._compute_first(t) if t is not None else None for t in tensors]
+        else:
+            self._accumulators = [self._compute_next(t, *quantities) if t is not None else None
+                                  for t, quantities in zip(tensors, self._accumulators)]
+
+    @tf.function
+    def _compute_first(self, tensor):
+        if self.abs_log_scale:
+            tf_eps = tf.constant(self.epsilon, dtype=tensor.dtype)
+            tensor = tf.math.log(tf.abs(tensor) + tf_eps)
+
+        new_min = tf.reduce_min(tensor)
+        new_max = tf.reduce_max(tensor)
+        new_sum = tf.reduce_sum(tensor)
+        new_sq_sum = tf.reduce_sum(tf.square(tensor))
+        new_count = tf.size(tensor)
+        return new_min, new_max, new_sum, new_sq_sum, new_count
+
+    @tf.function
+    def _compute_next(self, tensor, cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
+        if self.abs_log_scale:
+            tf_eps = tf.constant(self.epsilon, dtype=tensor.dtype)
+            tensor = tf.math.log(tf.abs(tensor) + tf_eps)
+
+        new_min = tf.minimum(cur_min, tf.reduce_min(tensor))
+        new_max = tf.maximum(cur_max, tf.reduce_max(tensor))
+        new_sum = cur_sum + tf.reduce_sum(tensor)
+        new_sq_sum = cur_sq_sum + tf.reduce_sum(tf.square(tensor))
+        new_count = cur_count + tf.size(tensor)
+        return new_min, new_max, new_sum, new_sq_sum, new_count
+
+    @tf.function
+    def _compute_as_stats(self, cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
+        full_min, full_mean, full_stddev, full_max =\
+            self._compute_basic_stats(cur_min, cur_max, cur_sum, cur_sq_sum, cur_count)
+        stats = tf.stack([full_min, full_max, full_mean, full_stddev])
+
+        # convert back to linear scale
+        # (and remove epsilon offset so that zeros end up as zeros at the end)
+        if self.abs_log_scale:
+            tf_eps = tf.constant(self.epsilon, dtype=cur_sum.dtype)
+            stats = tf.math.exp(stats) - tf_eps
+        return stats
+
+    @tf.function
+    def _compute_as_percentiles(self, cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
+        full_min, full_mean, full_stddev, full_max =\
+            self._compute_basic_stats(cur_min, cur_max, cur_sum, cur_sq_sum, cur_count)
+        percentiles = tf.stack([full_min, full_mean - full_stddev, full_mean, full_mean + full_stddev, full_max])
+
+        # convert back to linear scale
+        # (and remove epsilon offset so that zeros end up as zeros at the end)
+        if self.abs_log_scale:
+            tf_eps = tf.constant(self.epsilon, dtype=cur_sum.dtype)
+            percentiles = tf.math.exp(percentiles) - tf_eps
+        return percentiles
+
+    # could update to use Welford's algorithm, but it's probably good enough for our needs
+    @staticmethod
+    def _compute_basic_stats(cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
+        # calculate stddev via sqrt(E[X^2] - E[X]^2)
+        cur_count = tf.cast(cur_count, dtype=cur_sum.dtype)
+        x_mean = cur_sum / cur_count
+        x2_mean = cur_sq_sum / cur_count
+        stddev = tf.sqrt(x2_mean - tf.square(x_mean))
+        return cur_min, x_mean, stddev, cur_max
+
+
 class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingMixin, ActivityStatsCollectingMixin):
     """
     Standard model.fit() callback that collects various statistics and/or raw values of
@@ -2317,6 +2435,7 @@ def pos_neg_balance(stats, quantiles=None):
     return np.array(balances)
 
 
+# TODO deprecated, not in use
 def _compute_common_stats_keys():
     """
     Gets the dictionary keys that are always returned by _compute_stats().
@@ -2328,6 +2447,7 @@ def _compute_common_stats_keys():
 
 # Implementation note: optimised for efficient use within TF loops
 # TODO may need to add some div-by-zero protection at some point
+# TODO deprecated, not in use
 @tf.function
 def _compute_common_stats(tensors: list, absolute: bool = False):
     """
@@ -4070,3 +4190,8 @@ def reload_safe_isinstance(obj, cls):
     if isinstance(obj, cls):
         return True
     return class_isinstance(type(obj), cls)
+
+
+tf.sqrt(tf.reduce_mean(tf.square(tensor)))
+
+

@@ -1,4 +1,4 @@
-# TODO needs to be converted to a proper set of unit tests once this toolkit is moved
+# TODO needs to be converted to a proper set of unit tests
 # to something with a build tool
 import tensorflow as tf
 from train_instrumentation import *
