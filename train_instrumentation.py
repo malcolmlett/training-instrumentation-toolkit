@@ -549,6 +549,10 @@ class ValueStatsCollectingMixin:
         self.value_stats_quantiles = value_stats_quantiles or [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
         self._collected_value_indices = None
 
+        # sanity checks
+        if isinstance(value_stats_quantiles, str) and value_stats_quantiles not in ['mean/stddev']:
+            raise ValueError("value_stats_quantiles must be a list of quantiles, or 'mean/stddev")
+
         # - initially: list (by item) of list (by iteration) of scalar norms of gradients
         # - finally:   list (by item) of np array with shape (iterations,)
         self._value_norms = None
@@ -559,6 +563,8 @@ class ValueStatsCollectingMixin:
         # - finally:   list (by item) of pandas dataframes with shape (iterations, stats)
         self._value_stats = None
         self._magnitude_stats = None
+        self._value_stats_accumulator = None
+        self._magnitude_stats_accumulator = None
 
     @property
     def model_norm_stats(self):
@@ -679,6 +685,10 @@ class ValueStatsCollectingMixin:
         if self.value_stats_enabled and self._value_stats is None:
             self._value_stats = [[] if value is not None else None for value in values]
             self._magnitude_stats = [[] if value is not None else None for value in values]
+            if self.value_stats_quantiles == 'mean/stddev':
+                self._value_stats_accumulator = BasicStatsAccumulatorStrategy()
+                self._magnitude_stats_accumulators = BasicStatsAccumulatorStrategy(abs_log_scale=True)
+
         if self.value_norms_enabled or self.value_stats_enabled:
             self._collected_value_indices = [i_idx for i_idx, value in enumerate(values) if value is not None]
 
@@ -695,12 +705,18 @@ class ValueStatsCollectingMixin:
             self._magnitude_stats = self._stats_tensor_list_to_dataframes(
                 self._magnitude_stats, self.value_stats_quantiles)
 
+    def _accum_value_norms_and_stats(self, batch, values):
+        if self._value_stats_accumulator is not None:
+            self._value_stats_accumulator.accumulate(batch, values)
+            self._magnitude_stats_accumulator.accumulate(batch, values)
+
     def _collect_value_norms_and_stats(self, values):
         self._init_value_norms_and_stats(values)
         if self._value_norms is not None or self._value_stats is not None:
             # compute value and magnitude percentile stats for each individual variable
             # - returns tuples (norm, magnitude_percentiles, value_percentiles)
-            stat_tuples = self._compute_iteration_value_stats(values, self.value_stats_quantiles)
+            stat_tuples = self._compute_iteration_value_stats(
+                values, self.value_stats_quantiles, self._value_stats_accumulator, self._magnitude_stats_accumulator)
 
             # append to norms and stats lists
             # (performance note: these loops don't seem to cost much)
@@ -722,7 +738,7 @@ class ValueStatsCollectingMixin:
     # doing percentiles if requested. However, simple mean + stddev isn't very good for heavily skewed distributions
     # like gradient magnitudes.
     @tf.function
-    def _compute_iteration_value_stats(self, tensors, quantiles):
+    def _compute_iteration_value_stats(self, tensors, quantiles, value_accumulator, magnitude_accumulator):
         """
         Computes a set of stats across the raw values and magnitudes of each provided tensor.
         For tensors that commonly have values distributed either side of zero, the median will
@@ -738,6 +754,8 @@ class ValueStatsCollectingMixin:
         Args:
             tensors: list of tensors for which percentiles should be calculated, some of which may be None.
             quantiles: list of quantiles to compute values for
+            value_accumulator: optional accumulator to retrieve data from
+            magnitude_accumulator: opional accumulator to retrieve data from
         Returns:
             - norm - scalar norm
             - value_percentiles - tensor of percentile values across the tensor values, None for None tensors
@@ -748,13 +766,25 @@ class ValueStatsCollectingMixin:
                 norm = tf.sqrt(tf.reduce_mean(tf.square(tensor)))
             else:
                 norm = None
+
             if tensor is not None and self._value_stats is not None:
                 value_percentiles = tfp.stats.percentile(tensor, quantiles, interpolation='linear')
                 magnitude_percentiles = tfp.stats.percentile(tf.abs(tensor), quantiles, interpolation='linear')
             else:
                 value_percentiles, magnitude_percentiles = None, None
             return norm, value_percentiles, magnitude_percentiles
-        return [computation(tensor) for tensor in tensors]
+
+        # TODO make this less crap
+        # TODO need to figure out what to do for norms
+        if value_accumulator is None:
+            return [computation(tensor) for tensor in tensors]
+        else:
+            norms = [tf.sqrt(tf.reduce_mean(tf.square(tensor)))
+                     if tensor is not None and self._value_norms is not None else None
+                     for tensor in tensors]
+            all_value_percentiles = value_accumulator.percentiles()
+            all_magnitude_percentiles = magnitude_accumulator.percentiles()
+            return [(norm, vp, mp) for norm, vp, mp in zip(norms, all_value_percentiles, all_magnitude_percentiles)]
 
     @staticmethod
     def _stats_tensor_list_to_dataframes(stats_by_item, columns):
@@ -1198,6 +1228,7 @@ class BasicStatsAccumulatorStrategy:
             self._accumulators = [self._compute_next(t, *quantities) if t is not None else None
                                   for t, quantities in zip(tensors, self._accumulators)]
 
+    # make sure to keep in sync with _compute_next()
     @tf.function
     def _compute_first(self, tensor):
         if self.abs_log_scale:
@@ -1211,6 +1242,7 @@ class BasicStatsAccumulatorStrategy:
         new_count = tf.size(tensor)
         return new_min, new_max, new_sum, new_sq_sum, new_count
 
+    # make sure to keep in sync with _compute_first()
     @tf.function
     def _compute_next(self, tensor, cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
         if self.abs_log_scale:
@@ -1860,10 +1892,11 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         if self._layer_shapes is None:
             self._layer_shapes = [activation.shape for activation in activations]
 
-        # accumulate activation data
+        # accumulate data
         # - always add each batch, regardless of emitting stats per-step or per-epoch
         # - accum when per-epoch, overwrite when per-step
         is_accum = (not self.per_step)
+        self._accum_value_norms_and_stats(batch if is_accum else 0)
         self._accum_activity_stats(activations, is_accum)
 
         # per-epoch mode only: accumulate activations over course of epoch
