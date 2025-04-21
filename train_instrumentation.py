@@ -4345,7 +4345,3 @@ def reload_safe_isinstance(obj, cls):
         return True
     return class_isinstance(type(obj), cls)
 
-
-tf.sqrt(tf.reduce_mean(tf.square(tensor)))
-
-
