@@ -563,8 +563,18 @@ class ValueStatsCollectingMixin:
         # - finally:   list (by item) of pandas dataframes with shape (iterations, stats)
         self._value_stats = None
         self._magnitude_stats = None
+        self._norms_accumulator = NormAccumulatorStrategy() if self.value_norms_enabled else None
         self._value_stats_accumulator = None
         self._magnitude_stats_accumulator = None
+        if self.value_stats_enabled:
+            if self.value_stats_quantiles == 'mean/stddev':
+                self._value_stats_accumulator = BasicStatsAccumulatorStrategy()
+                self._magnitude_stats_accumulators = BasicStatsAccumulatorStrategy(abs_log_scale=True)
+            else:
+                self._value_stats_accumulator = PercentileAccumulatorStrategy(
+                    quantiles=self.value_stats_quantiles)
+                self._magnitude_stats_accumulators = PercentileAccumulatorStrategy(
+                    quantiles=self.value_stats_quantiles, magnitudes=True)
 
     @property
     def model_norm_stats(self):
@@ -685,10 +695,8 @@ class ValueStatsCollectingMixin:
         if self.value_stats_enabled and self._value_stats is None:
             self._value_stats = [[] if value is not None else None for value in values]
             self._magnitude_stats = [[] if value is not None else None for value in values]
-            if self.value_stats_quantiles == 'mean/stddev':
-                self._value_stats_accumulator = BasicStatsAccumulatorStrategy()
-                self._magnitude_stats_accumulators = BasicStatsAccumulatorStrategy(abs_log_scale=True)
-
+            
+        # populated collected_value_indices if collecting stats or metrics for anything
         if self.value_norms_enabled or self.value_stats_enabled:
             self._collected_value_indices = [i_idx for i_idx, value in enumerate(values) if value is not None]
 
@@ -705,86 +713,40 @@ class ValueStatsCollectingMixin:
             self._magnitude_stats = self._stats_tensor_list_to_dataframes(
                 self._magnitude_stats, self.value_stats_quantiles)
 
-    def _accum_value_norms_and_stats(self, batch, values):
-        if self._value_stats_accumulator is not None:
-            self._value_stats_accumulator.accumulate(batch, values)
-            self._magnitude_stats_accumulator.accumulate(batch, values)
-
-    def _collect_value_norms_and_stats(self, values):
+    def _accum_value_norms_and_stats(self, first, values):
         self._init_value_norms_and_stats(values)
-        if self._value_norms is not None or self._value_stats is not None:
-            # compute value and magnitude percentile stats for each individual variable
-            # - returns tuples (norm, magnitude_percentiles, value_percentiles)
-            stat_tuples = self._compute_iteration_value_stats(
-                values, self.value_stats_quantiles, self._value_stats_accumulator, self._magnitude_stats_accumulator)
+        if self._norms_accumulator is not None:
+            self._norms_accumulator.accumulate(first, values)
+        if self._value_stats_accumulator is not None:
+            self._value_stats_accumulator.accumulate(first, values)
+            self._magnitude_stats_accumulator.accumulate(first, values)
 
-            # append to norms and stats lists
-            # (performance note: these loops don't seem to cost much)
-            if self._value_norms is not None:
-                for item_value_norms, (norm, value_percentiles, magnitude_percentiles) \
-                        in zip(self._value_norms, stat_tuples):
-                    if item_value_norms is not None:
-                        item_value_norms.append(norm)
-            if self._value_stats is not None:
-                for item_value_stats, item_magnitude_stats,\
-                        (norm, value_percentiles, magnitude_percentiles) \
-                        in zip(self._value_stats, self._magnitude_stats, stat_tuples):
-                    if item_value_stats is not None:
-                        item_value_stats.append(value_percentiles)
-                    if item_magnitude_stats is not None:
-                        item_magnitude_stats.append(magnitude_percentiles)
+    def _collect_accumulated_value_norms_and_stats(self):
+        if self._value_norms is not None:
+            self._append_iteration_data(self._value_norms, self._norms_accumulator.accumulated_norms)
+        if self._value_stats is not None:
+            iteration_value_stats = self._value_stats_accumulator.accumulated_percentiles
+            iteration_magnitude_stats = self._magnitude_stats_accumulator.accumulated_percentiles
+            self._append_iteration_data(self._value_stats, iteration_value_stats)
+            self._append_iteration_data(self._magnitude_stats, iteration_magnitude_stats)
 
-    # Percentile calculation is fairly expensive. It could be worth defaulting to calculation of simpler stats and only
-    # doing percentiles if requested. However, simple mean + stddev isn't very good for heavily skewed distributions
-    # like gradient magnitudes.
-    @tf.function
-    def _compute_iteration_value_stats(self, tensors, quantiles, value_accumulator, magnitude_accumulator):
-        """
-        Computes a set of stats across the raw values and magnitudes of each provided tensor.
-        For tensors that commonly have values distributed either side of zero, the median will
-        typically be around zero, and the 25th and 75th percentiles represent the respective medians
-        in the positive and negative halves.
-
-        Norms are calculated as a size-normalized euclidean norm. This makes for easy comparison across layers.
-        If not size normalised then the scale would be proportional to the sqrt of its total number of elements
-        (often in the thousands). This is mathematically equivalent to the root-mean-square of the tensor values.
-        It also happens that computing RMS is more efficient in TF than using tf.norm() (particularly on GPU).
-        So we use that to calculate the norm.
-
-        Args:
-            tensors: list of tensors for which percentiles should be calculated, some of which may be None.
-            quantiles: list of quantiles to compute values for
-            value_accumulator: optional accumulator to retrieve data from
-            magnitude_accumulator: opional accumulator to retrieve data from
-        Returns:
-            - norm - scalar norm
-            - value_percentiles - tensor of percentile values across the tensor values, None for None tensors
-            - magnitude_percentile - tensor of percentile values across the tensor magnitudes, None for None tensors
-        """
-        def computation(tensor):
-            if tensor is not None and self._value_norms is not None:
-                norm = tf.sqrt(tf.reduce_mean(tf.square(tensor)))
-            else:
-                norm = None
-
-            if tensor is not None and self._value_stats is not None:
-                value_percentiles = tfp.stats.percentile(tensor, quantiles, interpolation='linear')
-                magnitude_percentiles = tfp.stats.percentile(tf.abs(tensor), quantiles, interpolation='linear')
-            else:
-                value_percentiles, magnitude_percentiles = None, None
-            return norm, value_percentiles, magnitude_percentiles
-
-        # TODO make this less crap
-        # TODO need to figure out what to do for norms
-        if value_accumulator is None:
-            return [computation(tensor) for tensor in tensors]
-        else:
-            norms = [tf.sqrt(tf.reduce_mean(tf.square(tensor)))
-                     if tensor is not None and self._value_norms is not None else None
-                     for tensor in tensors]
-            all_value_percentiles = value_accumulator.percentiles()
-            all_magnitude_percentiles = magnitude_accumulator.percentiles()
-            return [(norm, vp, mp) for norm, vp, mp in zip(norms, all_value_percentiles, all_magnitude_percentiles)]
+    def _collect_immediate_value_norms_and_stats(self, values):
+        self._init_value_norms_and_stats(values)
+        
+        if self._value_norms is not None:
+            self._append_iteration_data(self._value_norms, self._norms_accumulator.norms(values))
+        if self._value_stats is not None:
+            iteration_value_stats = self._value_stats_accumulator.percentiles(values)
+            iteration_magnitude_stats = self._magnitude_stats_accumulator.percentiles(values)
+            self._append_iteration_data(self._value_stats, iteration_value_stats)
+            self._append_iteration_data(self._magnitude_stats, iteration_magnitude_stats)
+        
+    @staticmethod                
+    def _append_iteration_data(list_by_item_by_iteration, data_by_item):
+        if list_by_item_by_iteration is not None:
+            for item_value_list, data in zip(list_by_item_by_iteration, data_by_item):
+                if item_value_list is not None:
+                    item_value_list.append(data)
 
     @staticmethod
     def _stats_tensor_list_to_dataframes(stats_by_item, columns):
@@ -983,6 +945,19 @@ class ActivityStatsCollectingMixin:
                 dic[f"mean_{key}"] = np.mean(key_stats, axis=0)
             self._model_activity_stats = pd.DataFrame(dic)
 
+    def _reset_per_epoch_activity_stats(self):
+        """
+        Resets accumulators for collection of data per-epoch.
+        Only needed when calling _accume_activity_stats() with is_accum=True.
+        """
+        if self._activity_stats is not None:
+            for activity_sum in self._channel_activity_sums:
+                if activity_sum is not None:
+                    activity_sum.assign(tf.zeros_like(activity_sum))
+            for activity_sum in self._spatial_activity_sums:
+                if activity_sum is not None:
+                    activity_sum.assign(tf.zeros_like(activity_sum))
+
     def _accum_activity_stats(self, values, is_accum):
         """
         Called each iteration and accumulates stats into TF Variables.
@@ -996,20 +971,8 @@ class ActivityStatsCollectingMixin:
                 self._channel_activity_sums,
                 self._spatial_activity_sums)
 
-    def _reset_per_epoch_activity_stats(self):
-        """
-        Resets accumulators for collection of data per-epoch.
-        """
-        if self._activity_stats is not None:
-            for activity_sum in self._channel_activity_sums:
-                if activity_sum is not None:
-                    activity_sum.assign(tf.zeros_like(activity_sum))
-            for activity_sum in self._spatial_activity_sums:
-                if activity_sum is not None:
-                    activity_sum.assign(tf.zeros_like(activity_sum))
-
     # TODO to support live-monitoring, should also compute and append model stats
-    def _collect_activity_stats(self, num_batches):
+    def _collect_accumulated_activity_stats(self, num_batches):
         """
         Args:
             num_batches - number of batches that have gone into the accumulated activity sums
@@ -1021,6 +984,12 @@ class ActivityStatsCollectingMixin:
                 self._spatial_activity_sums,
                 num_batches)
             self._activity_stats.append(iteration_activity_stats)
+
+    # TODO optimise so this is more efficient
+    def _collect_immediate_activity_stats(self, values):
+        self._init_activity_stats(values)
+        self._accum_activity_stats(values, is_accum=False)
+        self._collect_accumulated_activity_stats(1)  # always summing over 1 sample
 
     @staticmethod
     def _activity_stat_keys():
@@ -1183,19 +1152,19 @@ class NormAccumulatorStrategy:
         self._sums = None
         self._counts = None
 
-    @property
-    def accumulated_norms(self):
-        """
-        Norms over all observed data.
-        """
-        return self._compute_aggregate(self._sums, self._counts)
-
     @tf.function
     def norms(self, tensors):
         """
         Immediately calculated norms on the provided data.
         """
         return [tf.sqrt(tf.reduce_mean(tf.square(t))) if t is not None else None for t in tensors]
+
+    @property
+    def accumulated_norms(self):
+        """
+        Norms over all observed data.
+        """
+        return self._compute_aggregate(self._sums, self._counts)
 
     def accumulate(self, first, tensors):
         """
@@ -1265,6 +1234,15 @@ class BasicStatsAccumulatorStrategy:
         one_sd = 68.0
         return [0.0, 100-one_sd, 50.0, one_sd, 100.0]
 
+    @tf.function
+    def percentiles(self, tensors):
+        """
+        Immediately calculated percentiles on the provided data.
+        """
+        accumulators = self._compute_first(tensors)
+        return [self._compute_as_percentiles(*quantities) if quantities is not None else None
+                for l_idx, quantities in enumerate(accumulators)]
+
     @property
     def accumulated_percentiles(self):
         """
@@ -1284,15 +1262,6 @@ class BasicStatsAccumulatorStrategy:
         """
         return [self._compute_as_stats(*quantities) if quantities is not None else None
                 for l_idx, quantities in enumerate(self._accumulators)]
-
-    @tf.function
-    def percentiles(self, tensors):
-        """
-        Immediately calculated percentiles on the provided data.
-        """
-        accumulators = self._compute_first(tensors)
-        return [self._compute_as_percentiles(*quantities) if quantities is not None else None
-                for l_idx, quantities in enumerate(accumulators)]
 
     def accumulate(self, first, tensors):
         """
@@ -1629,11 +1598,10 @@ class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingM
                   in zip(self.model.variables, self._variable_stats_mask)]
 
         # value stats
-        self._collect_value_norms_and_stats(values)
+        self._collect_immediate_value_norms_and_stats(values)
 
         # activity stats
-        self._accum_activity_stats(values, is_accum=False)
-        self._collect_activity_stats(1)  # always summing over 1 sample
+        self._collect_immediate_activity_stats(values)
 
         # raw data capture
         self._collect_raw_values(self.model.variables)
@@ -1835,12 +1803,9 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
         values = [gradients[v_to_t[v_idx]] if v_to_t[v_idx] is not None else None
                   for v_idx in range(len(self.model.variables))]
 
-        # value stats
-        self._collect_value_norms_and_stats(values)
-
-        # activity stats
-        self._accum_activity_stats(values, is_accum=False)
-        self._collect_activity_stats(1)  # always summing over 1 sample
+        # stats and metrics
+        self._collect_immediate_value_norms_and_stats(values)
+        self._collect_immediate_activity_stats(values)
 
         # raw data capture
         self._collect_raw_values(values)
@@ -1872,7 +1837,7 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
             (only available if per_step is True)
     """
 
-    def __init__(self, per_step=False, batch_reduction='auto', keep_dims=False, collection_sets=None, *args, **kwargs):
+    def __init__(self, per_step=False, batch_reduction=None, keep_dims=False, collection_sets=None, *args, **kwargs):
         """
         Args:
             per_step: bool. Whether to collect per-step stats, or per-epoch otherwise.
@@ -1881,21 +1846,6 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
                 If per-step is set, then a `steps` list is available instead, and activity
                 is collected on each update step.
                 The same applies to layer output capture if enabled.
-            batch_reduction: one of 'auto' (default), 'mean', 'sum', or None.
-                When doing per-epoch collection, determines how values are accumulated over the course of the epoch
-                and over each sample in each batch when computing value norms, value stats, and raw values.
-                - 'auto' applies no reduction in per-step mode and 'mean' in per-epoch mode.
-                - 'mean' uses the mean value across all samples in the batch/epoch.
-                    The batch-dim in returned raw values is either dropped (keep_dims==False)
-                    or reduced to size 1 (keep_dims==True).
-                - 'sum' uses the sum across all samples in the batch/epoch
-                    The batch-dim in returned raw values is either dropped (keep_dims==False)
-                    or reduced to size 1 (keep_dims==True).
-                - None applies no reduction. For per-step data collection, uses and retains all samples in each batch.
-                    For per-epoch data collection, uses and retains only the last batch of each epoch. 
-                    Note that the last batch often has less samples than for all other batches in an epoch.
-            keep_dims: bool.
-                Whether to retain the batch-dim if using 'mean' or 'sum' batch reduction.
             value_norms: bool, default: True.
                 Whether to collect the norms of values.
             value_stats: bool, default: True.
@@ -1908,18 +1858,30 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
                 and provides fine-grained control over which layer outputs are collected.
                 If omitted, this callback collects only stats.
                 See _normalize_collection_sets_for_layers() for format details.
+            batch_reduction: one of 'mean', 'sum', or None (default).
+                Determines how raw samples are aggregated before collection.
+                Ignored for metrics and stats.
+                - 'mean' uses the mean value across all samples in the batch/epoch.
+                    The batch-dim in returned raw values is either dropped (keep_dims==False)
+                    or reduced to size 1 (keep_dims==True).
+                - 'sum' uses the sum across all samples in the batch/epoch
+                    The batch-dim in returned raw values is either dropped (keep_dims==False)
+                    or reduced to size 1 (keep_dims==True).
+                - None applies no reduction.
+                    For per-epoch data collection, uses and retains only the last batch of each epoch. 
+                    Note that the last batch often has less samples than for all other batches in an epoch.
+            keep_dims: bool.
+                Whether to retain the batch-dim if using 'mean' or 'sum' batch reduction.
         """
         super().__init__(data_format='BSC', *args, **kwargs)
 
-        if batch_reduction and batch_reduction not in ('auto', 'mean', 'sum'):
+        if batch_reduction and batch_reduction not in ('mean', 'sum'):
             raise ValueError(f"Invalid batch_reduction: '{batch_reduction}'")
-        if batch_reduction == 'auto':
-            batch_reduction = None if per_step else 'mean'
 
         self.per_step = per_step
+        self.collection_sets = collection_sets
         self.batch_reduction = batch_reduction
         self.keep_dims = keep_dims
-        self.collection_sets = collection_sets
 
         # results variable creation
         if per_step:
@@ -1932,7 +1894,9 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         self._epoch = 0
         self._layer_shapes = None
         self._filtered_value_layer_indices = None
-        self._activations_accumulator = PerEpochAccumulatorStrategy(batch_reduction=True, keep_dims=keep_dims) \
+        
+        # accumulation is done manually for per-step, so only needed for per-epoch
+        self._outputs_accumulator = PerEpochAccumulatorStrategy(batch_reduction=True, keep_dims=keep_dims) \
             if not per_step and self.batch_reduction else None
 
     @property
@@ -2024,7 +1988,7 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         self._finalize_activity_stats()
 
         # free memory
-        del self._activations_accumulator
+        del self._outputs_accumulator
 
     def on_epoch_begin(self, epoch, logs=None):
         """
@@ -2047,54 +2011,56 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         if self._layer_shapes is None:
             self._layer_shapes = [activation.shape for activation in activations]
 
-        # accumulate data
-        # - always add each batch, regardless of emitting stats per-step or per-epoch
-        # - accum when per-epoch, overwrite when per-step
-        is_accum = (not self.per_step)
-        self._accum_value_norms_and_stats(batch if is_accum else 0)
-        self._accum_activity_stats(activations, is_accum)
+        # per-epoch mode only: accumulate norms, stats, and raw values each step
+        if not self.per_step:
+            self._accum_value_norms_and_stats(batch == 0, activations)
+            self._accum_activity_stats(activations, is_accum=True)
+            if self._outputs_accumulator:
+                self._outputs_accumulator.accumulate(batch, activations)
 
-        # per-epoch mode only: accumulate activations over course of epoch
-        if not self.per_step and self._activations_accumulator:
-            self._activations_accumulator.accumulate(batch, activations)
-
-        # stats calculations for each step, if configured
+        # per-step mode only: stats calculations for each step
         if self.per_step:
-            if self.batch_reduction == 'sum':
-                activations = [tf.reduce_sum(t, keepdims=self.keep_dims) for t in activations]
-            elif self.batch_reduction == 'mean':
-                activations = [tf.reduce_mean(t, keepdims=self.keep_dims) for t in activations]
-
             self.steps.append(self.params['steps'] * self._epoch + batch)
-            self._collect_value_norms_and_stats(activations)
-            self._collect_raw_values(activations)
-
-            # activity stats calculated based on accumulated partial stats
-            self._collect_activity_stats(1)
+            
+            # stats and metrics calculated based on accumulated partial stats
+            self._collect_immediate_value_norms_and_stats(activations)
+            self._collect_immediate_activity_stats(activations)
+            
+            # raw values from reduced or full batch
+            if self._output_values:
+                if self.batch_reduction == 'sum':
+                    agg_activations = [tf.reduce_sum(t, keepdims=self.keep_dims) for t in activations]
+                elif self.batch_reduction == 'mean':
+                    agg_activations = [tf.reduce_mean(t, keepdims=self.keep_dims) for t in activations]
+                else:
+                    agg_activations = activations
+                self._collect_raw_values(agg_activations)
 
     def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations, output_gradients):
         """
         Collects gradient stats and raw gradients after each epoch, if configured at per-epoch level.
         """
         if not self.per_step:
-            # compute aggregated activations, otherwise use last batch
-            if self.batch_reduction == 'sum':
-                activations = self._activations_accumulator.sum
-            elif self.batch_reduction == 'mean':
-                activations = self._activations_accumulator.mean
-            else:
-                # WORKAROUND:
-                # Doesn't cope with layers that return multiple outputs in a list.
-                # For now, pre-process to just pick the first of each layer's activations if there are multiple
-                activations = [activation[0] if isinstance(activation, list) else activation
-                               for activation in activations]
-
             self.epochs.append(epoch)
-            self._collect_value_norms_and_stats(activations)
-            self._collect_raw_values(activations)
 
-            # activity stats calculated based on accumulated partial stats
-            self._collect_activity_stats(self.params['steps'])
+            # collect accumulated stats and metrics            
+            self._collect_accumulated_value_norms_and_stats()
+            self._collect_accumulated_activity_stats(self.params['steps'])
+
+            # raw values from pre-accumulated or last batch
+            if self._output_values is not None:
+                # collect aggregated activations, otherwise use last batch
+                if self.batch_reduction == 'sum':
+                    agg_activations = self._outputs_accumulator.sum
+                elif self.batch_reduction == 'mean':
+                    agg_activations = self._outputs_accumulator.mean
+                else:
+                    # WORKAROUND:
+                    # Doesn't cope with layers that return multiple outputs in a list.
+                    # For now, pre-process to just pick the first of each layer's activations if there are multiple
+                    agg_activations = [activation[0] if isinstance(activation, list) else activation
+                                       for activation in activations]
+                self._collect_raw_values(agg_activations)
 
     def _collect_raw_values(self, activations):
         # TODO do slicing
@@ -2329,7 +2295,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
             self._collect_raw_values(output_gradients)
 
             # activity stats calculated based on accumulated partial stats
-            self._collect_activity_stats(1)
+            self._collect_accumulated_activity_stats(1)
 
     def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations, output_gradients):
         """
@@ -2353,7 +2319,7 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
             self._collect_raw_values(output_gradients)
 
             # activity stats calculated based on accumulated partial stats
-            self._collect_activity_stats(self.params['steps'])
+            self._collect_accumulated_activity_stats(self.params['steps'])
 
     def _collect_raw_values(self, gradients):
         # TODO do slicing
