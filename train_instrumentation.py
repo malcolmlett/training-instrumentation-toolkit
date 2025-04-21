@@ -1174,6 +1174,70 @@ class PerEpochAccumulatorStrategy:
 
 
 # TODO add unit tests
+class NormAccumulatorStrategy:
+    """
+    Batched calculation of size-normalized norms, aka RMS.
+    """
+    def __init__(self):
+        super().__init__()
+        self._sums = None
+        self._counts = None
+
+    @property
+    def accumulated_norms(self):
+        """
+        Norms over all observed data.
+        """
+        return self._compute_aggregate(self._sums, self._counts)
+
+    @tf.function
+    def norms(self, tensors):
+        """
+        Immediately calculated norms on the provided data.
+        """
+        return [tf.sqrt(tf.reduce_mean(tf.square(t))) if t is not None else None for t in tensors]
+
+    def accumulate(self, first, tensors):
+        """
+        Accumulate stats in preparation for access via accumulated_percentiles() and co.
+        """
+        if first:
+            self._sums, self._counts = self._compute_first(tensors)
+        else:
+            self._sums, self._counts = self._compute_next(tensors, self._sums, self._counts)
+
+    # make sure to keep in sync with _compute_next()
+    @tf.function
+    def _compute_first(self, tensors):
+        """ First half of root-mean-square calculation """
+        sums = [tf.reduce_sum(tf.square(t)) if t is not None else None for t in tensors]
+        counts = [tf.size(t) if t is not None else None for t in tensors]
+        return sums, counts
+
+    # make sure to keep in sync with _compute_first()
+    @tf.function
+    def _compute_next(self, tensors, cur_sums, cur_counts):
+        """ First half of root-mean-square calculation """
+        sums = [one_sum + tf.reduce_sum(tf.square(t)) if t is not None else None
+                for t, one_sum in zip(tensors, cur_sums)]
+        counts = [one_count + tf.size(t) if t is not None else None
+                  for t, one_count in zip(tensors, cur_counts)]
+        return sums, counts
+
+    @tf.function
+    def _compute_aggregate(self, sums, counts):
+        """ Second half of root-mean-square calculation """
+        def compute_one(sum, count):
+            if sum is None:
+                return None
+            elif count == 0:
+                return tf.constant(0.0, dtype=sum.dtype)
+            else:
+                return sum / tf.cast(count, dtype=sum.dtype)
+        return [compute_one(one_sum, one_count) for one_sum, one_count in zip(sums, counts)]
+
+
+# TODO add unit tests
 class BasicStatsAccumulatorStrategy:
     """
     Batched calculation of mean, stddev, min, and max.
@@ -1191,19 +1255,10 @@ class BasicStatsAccumulatorStrategy:
         self._accumulators = None
 
     @property
-    def percentiles(self):
-        """
-        The calculated stats as a percentile distribution.
-        Returns:
-            tensor containing percentile values
-        """
-        return [self._compute_as_percentiles(*quantities) if quantities is not None else None
-                for l_idx, quantities in enumerate(self._accumulators)]
-
-    @property
     def quantiles(self):
         """
-        The percentile positions that percentiles() approximates from the basic stats.
+        The percentile positions that percentiles() and accumulated_percentiles() approximate
+        from the basic stats.
         Returns:
             list
         """
@@ -1211,7 +1266,17 @@ class BasicStatsAccumulatorStrategy:
         return [0.0, 100-one_sd, 50.0, one_sd, 100.0]
 
     @property
-    def stats(self):
+    def accumulated_percentiles(self):
+        """
+        The total accumulated stats as a percentile distribution.
+        Returns:
+            tensor containing percentile values
+        """
+        return [self._compute_as_percentiles(*quantities) if quantities is not None else None
+                for l_idx, quantities in enumerate(self._accumulators)]
+
+    @property
+    def accumulated_stats(self):
         """
         Gets the basic stats over the currently observed data.
         Returns:
@@ -1220,41 +1285,57 @@ class BasicStatsAccumulatorStrategy:
         return [self._compute_as_stats(*quantities) if quantities is not None else None
                 for l_idx, quantities in enumerate(self._accumulators)]
 
-    def accumulate(self, batch, tensors):
+    @tf.function
+    def percentiles(self, tensors):
+        """
+        Immediately calculated percentiles on the provided data.
+        """
+        accumulators = self._compute_first(tensors)
+        return [self._compute_as_percentiles(*quantities) if quantities is not None else None
+                for l_idx, quantities in enumerate(accumulators)]
+
+    def accumulate(self, first, tensors):
+        """
+        Accumulate stats in preparation for access via accumulated_percentiles() and co.
+        """
         # accumulate across batches in epoch, resetting first batch in each epoch
-        if batch == 0:
-            self._accumulators = [self._compute_first(t) if t is not None else None for t in tensors]
+        if first:
+            self._accumulators = self._compute_first(tensors)
         else:
-            self._accumulators = [self._compute_next(t, *quantities) if t is not None else None
-                                  for t, quantities in zip(tensors, self._accumulators)]
+            self._accumulators = self._compute_next(tensors, self._accumulators)
 
     # make sure to keep in sync with _compute_next()
     @tf.function
-    def _compute_first(self, tensor):
-        if self.abs_log_scale:
-            tf_eps = tf.constant(self.epsilon, dtype=tensor.dtype)
-            tensor = tf.math.log(tf.abs(tensor) + tf_eps)
+    def _compute_first(self, tensors):
+        def compute_one(tensor):
+            if self.abs_log_scale:
+                tf_eps = tf.constant(self.epsilon, dtype=tensor.dtype)
+                tensor = tf.math.log(tf.abs(tensor) + tf_eps)
 
-        new_min = tf.reduce_min(tensor)
-        new_max = tf.reduce_max(tensor)
-        new_sum = tf.reduce_sum(tensor)
-        new_sq_sum = tf.reduce_sum(tf.square(tensor))
-        new_count = tf.size(tensor)
-        return new_min, new_max, new_sum, new_sq_sum, new_count
+            new_min = tf.reduce_min(tensor)
+            new_max = tf.reduce_max(tensor)
+            new_sum = tf.reduce_sum(tensor)
+            new_sq_sum = tf.reduce_sum(tf.square(tensor))
+            new_count = tf.size(tensor)
+            return new_min, new_max, new_sum, new_sq_sum, new_count
+        return [compute_one(t) if t is not None else None for t in tensors]
 
     # make sure to keep in sync with _compute_first()
     @tf.function
-    def _compute_next(self, tensor, cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
-        if self.abs_log_scale:
-            tf_eps = tf.constant(self.epsilon, dtype=tensor.dtype)
-            tensor = tf.math.log(tf.abs(tensor) + tf_eps)
+    def _compute_next(self, tensors, accumulators):
+        def compute_one(tensor, cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
+            if self.abs_log_scale:
+                tf_eps = tf.constant(self.epsilon, dtype=tensor.dtype)
+                tensor = tf.math.log(tf.abs(tensor) + tf_eps)
 
-        new_min = tf.minimum(cur_min, tf.reduce_min(tensor))
-        new_max = tf.maximum(cur_max, tf.reduce_max(tensor))
-        new_sum = cur_sum + tf.reduce_sum(tensor)
-        new_sq_sum = cur_sq_sum + tf.reduce_sum(tf.square(tensor))
-        new_count = cur_count + tf.size(tensor)
-        return new_min, new_max, new_sum, new_sq_sum, new_count
+            new_min = tf.minimum(cur_min, tf.reduce_min(tensor))
+            new_max = tf.maximum(cur_max, tf.reduce_max(tensor))
+            new_sum = cur_sum + tf.reduce_sum(tensor)
+            new_sq_sum = cur_sq_sum + tf.reduce_sum(tf.square(tensor))
+            new_count = cur_count + tf.size(tensor)
+            return new_min, new_max, new_sum, new_sq_sum, new_count
+        return [compute_one(t, *quantities) if t is not None else None
+                for t, quantities in zip(tensors, accumulators)]
 
     @tf.function
     def _compute_as_stats(self, cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
@@ -1291,6 +1372,80 @@ class BasicStatsAccumulatorStrategy:
         x2_mean = cur_sq_sum / cur_count
         stddev = tf.sqrt(x2_mean - tf.square(x_mean))
         return cur_min, x_mean, stddev, cur_max
+
+
+class PercentileAccumulatorStrategy:
+    """
+    Approximated calculation of percentiles over multiple batches.
+    Naively takes the mean across all values recorded for each given percentile.
+    Very inaccurate when accumulating.
+    """
+
+    def __init__(self, quantiles=None, magnitudes=False):
+        super().__init__()
+        self.magnitudes = magnitudes
+        self._quantiles = quantiles or [0., 25., 50., 75., 100.]
+        self._summed_percentiles = None
+        self._count = 0
+
+    @property
+    def quantiles(self):
+        """
+        The percentile positions that percentiles() and accumulated_percentiles() approximate
+        from the basic stats.
+        Returns:
+            list
+        """
+        return self.quantiles
+
+    @property
+    def accumulated_percentiles(self):
+        """
+        The total accumulated stats as a percentile distribution.
+        Returns:
+            tensor containing percentile values
+        """
+        return [sums / self._count if sums is not None else None
+                for sums in self._summed_percentiles]
+
+    @tf.function
+    def percentiles(self, tensors):
+        """
+        Immediately calculated percentiles on the provided data.
+        """
+        return self._compute_first(tensors)
+
+    def accumulate(self, first, tensors):
+        """
+        Accumulate stats in preparation for access via accumulated_percentiles() and co.
+        """
+        # accumulate across batches in epoch, resetting first batch in each epoch
+        if first:
+            self._summed_percentiles = self._compute_first(tensors)
+            self._count = 0
+        else:
+            self._summed_percentiles = self._compute_next(tensors, self._summed_percentiles)
+            self._count += 1
+
+    # make sure to keep in sync with _compute_next()
+    @tf.function
+    def _compute_first(self, tensors):
+        def compute_one(tensor):
+            if self.magnitudes:
+                return tfp.stats.percentile(tf.abs(tensor), self.quantiles, interpolation='linear')
+            else:
+                return tfp.stats.percentile(tensor, self.quantiles, interpolation='linear')
+        return [compute_one(t) if t is not None else None for t in tensors]
+
+    # make sure to keep in sync with _compute_first()
+    @tf.function
+    def _compute_next(self, tensors, percentile_sums):
+        def compute_one(tensor):
+            if self.magnitudes:
+                return tfp.stats.percentile(tf.abs(tensor), self.quantiles, interpolation='linear')
+            else:
+                return tfp.stats.percentile(tensor, self.quantiles, interpolation='linear')
+        return [sums + compute_one(t) if t is not None else None for t, sums in zip(tensors, percentile_sums)]
 
 
 class VariableHistoryCallback(tf.keras.callbacks.Callback, ValueStatsCollectingMixin, ActivityStatsCollectingMixin):
