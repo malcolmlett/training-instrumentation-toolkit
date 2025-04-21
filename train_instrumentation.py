@@ -1796,6 +1796,13 @@ class GradientHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin, A
             self.steps.append(step)
             self._do_collection(gradients)
 
+    # FIXME it shouldn't be calculating per-epoch activity stats over sum of gradients.
+    #  It should be accumulating accurately each step. Calculating on sum of gradients is fine for death rate,
+    #  but not for activation rate. The computed activation rate will be higher than it should be. For example,
+    #  this could explain why the LayerOutput activation rates have been tending towards 50%, while the Gradient
+    #  activation rates 100%. That second result might be due to this bug. The only reason this isn't too big a deal
+    #  is that gradients are themselves already means over the samples in a batch, so the true activity_rate for a
+    #  single batch is still going to be considerably closer to 100%.
     def _do_collection(self, gradients):
         # note: gradients list is always relative to model.trainable_variables, but I use
         # the model.variables list as the internal reference point, so we must convert the list.
