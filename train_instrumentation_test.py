@@ -192,42 +192,58 @@ class CollectionSetHandling(unittest.TestCase):
         return model
 
 
-class Attenuators(unittest.TestCase):
+class PercentileAccumulatorStrategyTests(unittest.TestCase):
     def setUp(self) -> None:
         # minimise chance of random variations to cause sporadic test failures
         tf.keras.utils.set_random_seed(1)
 
-    def test_PercentileAccumulator_for_accumulated_percentiles(self):
-        quantiles = [0., 25., 50., 75., 100.]
-        var_list = [tf.random.normal((5, 10, 10), dtype=tf.float32), None,
-                    tf.random.normal((5, 3, 3, 32, 20), dtype=tf.float32)]
+        self.quantiles = [0., 24., 52., 76.5, 100.]
+        self.var_list = [tf.random.normal((5, 10, 10), dtype=tf.float32), None,
+                         tf.random.normal((5, 3, 3, 32, 20), dtype=tf.float32)]
 
+    def test_accumulated_percentiles(self):
         # expected
         def compute_one(var_data):
-            raw_percentiles = tfp.stats.percentile(var_data, quantiles, interpolation='linear',
+            raw_percentiles = tfp.stats.percentile(var_data, self.quantiles, interpolation='linear',
                                                    axis=tf.range(1, tf.rank(var_data)))  # shape: (quantiles, epochs)
             raw_percentiles = tf.transpose(raw_percentiles)  # shape: (epochs, quantiles)
             return tf.reduce_mean(raw_percentiles, axis=0)  # shape: (quantiles,)
-        expected = [compute_one(v) if v is not None else None for v in var_list]
+        expected = [compute_one(v) if v is not None else None for v in self.var_list]
 
         # actual
-        accumulator = PercentileAccumulatorStrategy(quantiles=quantiles)
-        for iteration in range(var_list[0].shape[0]):
-            iteration_data = [v[iteration] if v is not None else None for v in var_list]
+        accumulator = PercentileAccumulatorStrategy(quantiles=self.quantiles)
+        for iteration in range(self.var_list[0].shape[0]):
+            iteration_data = [v[iteration] if v is not None else None for v in self.var_list]
             accumulator.accumulate(iteration == 0, iteration_data)
         actual = accumulator.accumulated_percentiles
 
-        def compare_one(expected_one, actual_one):
-            if expected_one is None and actual_one is not None:
-                return False
-            elif expected_one is not None and actual_one is None:
-                return False
-            elif expected_one is not None:
-                return np.allclose(expected_one, actual_one)
-            return True
+        self.assertEquals(accumulator.quantiles, self.quantiles)
 
-        same_states = [compare_one(e, a) for e, a in zip(expected, actual)]
+        same_states = [close_or_none(e, a) for e, a in zip(expected, actual)]
         msg = f"Differences found. Matches by variable: {same_states}\n"\
               f"-- Expected: {expected}\n"\
               f"-- Actual: {actual}"
         self.assertEqual(np.all(same_states), True, msg)
+
+    def test_immediate_percentiles(self):
+        expected = [tfp.stats.percentile(v, self.quantiles, interpolation='linear')
+                    if v is not None else None for v in self.var_list]
+
+        accumulator = PercentileAccumulatorStrategy(quantiles=self.quantiles)
+        actual = accumulator.percentiles(self.var_list)
+
+        same_states = [close_or_none(e, a) for e, a in zip(expected, actual)]
+        msg = f"Differences found. Matches by variable: {same_states}\n"\
+              f"-- Expected: {expected}\n"\
+              f"-- Actual: {actual}"
+        self.assertEqual(np.all(same_states), True, msg)
+
+
+def close_or_none(expected_one, actual_one):
+    if expected_one is None and actual_one is not None:
+        return False
+    elif expected_one is not None and actual_one is None:
+        return False
+    elif expected_one is None:
+        return True
+    return np.allclose(expected_one, actual_one)
