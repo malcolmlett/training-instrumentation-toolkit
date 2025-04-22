@@ -414,11 +414,11 @@ class CallbackTrainingTestMixinTest(unittest.TestCase):
     Validate helper functionality for the purpose of helping with tests.
     """
     def setUp(self):
-        self.target = CallbackTrainingTestMixin
+        self.target = CallbackTrainingTestMixin()
 
     def test_make_model_given_fnn(self):
         # layers:
-        # - input:   output (64,) -- appears as layer in this case
+        # - input:   output (64,)
         # - dropout: seed variable of shape (2,), output (64,)
         # - dense:   kernel (64, 128), no bias, output (128,)
         tgt = self.target
@@ -429,7 +429,7 @@ class CallbackTrainingTestMixinTest(unittest.TestCase):
 
     def test_make_model_given_cnn(self):
         # layers:
-        # - input:     output (5,5,1) -- appears as layer in this case
+        # - input:     output (5,5,1)
         # - conv2d:    kernel (3,3,1,4), bias (4,), output (5-2,5-2,4)
         # - flatten:   no variables, output (36,)
         # - dense:     kernel (36,128), no bias, output (128,)
@@ -439,8 +439,7 @@ class CallbackTrainingTestMixinTest(unittest.TestCase):
                                biases=[True, False, False, False])
         self.assertEqual(describe(model.variables), [(3, 3, 1, 4), (4,), (36, 128), (128,), (128,), (128,), (128,)])
         self.assertEqual(describe(model.trainable_variables), [(3, 3, 1, 4), (4,), (36, 128), (128,), (128,)])
-        self.assertEqual(tgt.get_layer_output_shapes(model),
-                         [(None, 5, 5, 1), (None, 3, 3, 4), (None, 36), (None, 128), (None, 128)])
+        self.assertEqual(tgt.get_layer_output_shapes(model), [(None, 3, 3, 4), (None, 36), (None, 128), (None, 128)])
 
     def test_expand_to_all_variables(self):
         tgt = self.target
