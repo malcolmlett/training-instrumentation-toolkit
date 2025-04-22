@@ -409,98 +409,6 @@ class PercentileAccumulatorStrategyTests(unittest.TestCase):
         self.assertEqual(np.all(same_states), True, msg)
 
 
-class CallbackTrainingTestMixinTest(unittest.TestCase):
-    """
-    Validate helper functionality for the purpose of helping with tests.
-    """
-    def setUp(self):
-        self.target = CallbackTrainingTestMixin()
-
-    def test_make_model_given_fnn(self):
-        # layers:
-        # - input:   output (64,)
-        # - dropout: seed variable of shape (2,), output (64,)
-        # - dense:   kernel (64, 128), no bias, output (128,)
-        tgt = self.target
-        model = tgt.make_model((64,), ['dropout', (64, 128)])
-        self.assertEqual(describe(model.variables), [(2,), (64, 128)])
-        self.assertEqual(describe(model.trainable_variables), [(64, 128)])
-        self.assertEqual(tgt.get_layer_output_shapes(model), [(None, 64), (None, 128)])
-
-    def test_make_model_given_cnn(self):
-        # layers:
-        # - input:     output (5,5,1)
-        # - conv2d:    kernel (3,3,1,4), bias (4,), output (5-2,5-2,4)
-        # - flatten:   no variables, output (36,)
-        # - dense:     kernel (36,128), no bias, output (128,)
-        # - batchNorm: two trainable variables (128,) each, two non-trainable variables (128,) each, output (128,)
-        tgt = self.target
-        model = tgt.make_model((5, 5, 1), [(3, 3, 1, 4), 'flatten', (36, 128), 'batch-norm'],
-                               biases=[True, False, False, False])
-        self.assertEqual(describe(model.variables), [(3, 3, 1, 4), (4,), (36, 128), (128,), (128,), (128,), (128,)])
-        self.assertEqual(describe(model.trainable_variables), [(3, 3, 1, 4), (4,), (36, 128), (128,), (128,)])
-        self.assertEqual(tgt.get_layer_output_shapes(model), [(None, 3, 3, 4), (None, 36), (None, 128), (None, 128)])
-
-    def test_expand_to_all_variables(self):
-        tgt = self.target
-        model = self.target.make_model((64,), ['dropout', (64, 128)])
-        gradients = [tf.random.normal((2, 2, 64, 128))]
-        self.assertEqual(describe(tgt.expand_to_all_variables(model, model.trainable_variables)), [None, (64, 128)])
-        self.assertEqual(describe(tgt.expand_to_all_variables(model, gradients)), [None, (2, 2, 64, 128)])
-
-    def test_dataset_selection(self):
-        tgt = self.target
-        gradients = [tf.random.normal((2, 2, 64, 128))]
-        outputs = [None, tf.random.normal((2, 40, 128))]
-
-        self.assertEqual(describe(tgt.select_epoch(gradients, 0)), [(2, 64, 128)])
-        self.assertEqual(describe(tgt.select_epoch(gradients, 1)), [(2, 64, 128)])
-        self.assertEqual(describe(tgt.select_variable_batch(gradients, 0, 0)), [(64, 128)])
-        self.assertEqual(describe(tgt.select_variable_batch(gradients, 0, 1)), [(64, 128)])
-        self.assertEqual(describe(tgt.select_epoch(outputs, 0)), [None, (40, 128)])
-        self.assertEqual(describe(tgt.select_epoch(outputs, 1)), [None, (40, 128)])
-        self.assertEqual(describe(tgt.select_layer_batch(outputs, 0, 0, batch_size=32)), [None, (32, 128)])
-        self.assertEqual(describe(tgt.select_layer_batch(outputs, 0, 1, batch_size=32)), [None, (8, 128)])
-
-    def test_dataset_mapping(self):
-        tgt = self.target
-        model = tgt.make_model((64,), ['dropout', (64, 128)])
-        gradients = [tf.random.normal((2, 2, 64, 128))]
-        outputs = [None, tf.random.normal((2, 40, 128))]
-        all_gradients = tgt.expand_to_all_variables(model, gradients)
-        first_epoch_gradients = tgt.select_epoch(all_gradients, 0)
-        first_epoch_outputs = tgt.select_epoch(outputs, 0)
-
-        # basic sanity checks
-        self.assertEqual(describe(gradients), [(2, 2, 64, 128)])
-        self.assertEqual(describe(all_gradients), [None, (2, 2, 64, 128)])
-
-        self.assertEqual(describe(first_epoch_gradients), [None, (2, 64, 128)])
-        self.assertEqual(describe(tgt.map_each_variable_batch(
-            first_epoch_gradients, lambda batch_data: batch_data)),
-            [None, [(64, 128), (64, 128)]])
-        self.assertEqual(describe(first_epoch_outputs), [None, (40, 128)])
-        self.assertEqual(describe(tgt.map_each_layer_batch(
-            first_epoch_outputs, lambda batch_data: batch_data)),
-            [None, [(32, 128), (8, 128)]])
-        
-        self.assertEqual(describe(all_gradients), [None, (2, 2, 64, 128)])
-        self.assertEqual(describe(tgt.map_each_epoch(
-            all_gradients, lambda epoch_data: epoch_data)),
-            [None, [(2, 64, 128), (2, 64, 128)]])
-        self.assertEqual(describe(tgt.flatmap_epoch_batches(
-            all_gradients, lambda datasets: tgt.map_each_variable_batch(datasets, lambda batch_data: batch_data))),
-            [None, [(64, 128), (64, 128), (64, 128), (64, 128)]])
-        
-        self.assertEqual(describe(outputs), [None, (2, 40, 128)])
-        self.assertEqual(describe(tgt.map_each_epoch(
-            outputs, lambda epoch_data: epoch_data)),
-            [None, [(40, 128), (40, 128)]])
-        self.assertEqual(describe(tgt.flatmap_epoch_batches(
-            outputs, lambda datasets: tgt.map_each_layer_batch(datasets, lambda batch_data: batch_data))),
-            [None, [(32, 128), (8, 128), (32, 128), (8, 128)]])
-
-
 class CallbackTrainingTestMixin:
     """
     Bunch of capabilities for creating models, doing fake training runs, for selecting data along various
@@ -929,6 +837,351 @@ class CallbackTrainingTestMixin:
                 if data is not None:
                     res[item_idx].extend(data)
         return res
+
+
+class CallbackTrainingTestMixinTest(unittest.TestCase):
+    """
+    Validate helper functionality for the purpose of helping with tests.
+    """
+
+    def setUp(self):
+        self.target = CallbackTrainingTestMixin()
+
+    def test_make_model_given_fnn(self):
+        # layers:
+        # - input:   output (64,)
+        # - dropout: seed variable of shape (2,), output (64,)
+        # - dense:   kernel (64, 128), no bias, output (128,)
+        tgt = self.target
+        model = tgt.make_model((64,), ['dropout', (64, 128)])
+        self.assertEqual(describe(model.variables), [(2,), (64, 128)])
+        self.assertEqual(describe(model.trainable_variables), [(64, 128)])
+        self.assertEqual(tgt.get_layer_output_shapes(model), [(None, 64), (None, 128)])
+
+    def test_make_model_given_cnn(self):
+        # layers:
+        # - input:     output (5,5,1)
+        # - conv2d:    kernel (3,3,1,4), bias (4,), output (5-2,5-2,4)
+        # - flatten:   no variables, output (36,)
+        # - dense:     kernel (36,128), no bias, output (128,)
+        # - batchNorm: two trainable variables (128,) each, two non-trainable variables (128,) each, output (128,)
+        tgt = self.target
+        model = tgt.make_model((5, 5, 1), [(3, 3, 1, 4), 'flatten', (36, 128), 'batch-norm'],
+                               biases=[True, False, False, False])
+        self.assertEqual(describe(model.variables), [(3, 3, 1, 4), (4,), (36, 128), (128,), (128,), (128,), (128,)])
+        self.assertEqual(describe(model.trainable_variables), [(3, 3, 1, 4), (4,), (36, 128), (128,), (128,)])
+        self.assertEqual(tgt.get_layer_output_shapes(model), [(None, 3, 3, 4), (None, 36), (None, 128), (None, 128)])
+
+    def test_expand_to_all_variables(self):
+        tgt = self.target
+        model = self.target.make_model((64,), ['dropout', (64, 128)])
+        gradients = [tf.random.normal((2, 2, 64, 128))]
+        self.assertEqual(describe(tgt.expand_to_all_variables(model, model.trainable_variables)), [None, (64, 128)])
+        self.assertEqual(describe(tgt.expand_to_all_variables(model, gradients)), [None, (2, 2, 64, 128)])
+
+    def test_dataset_selection(self):
+        tgt = self.target
+        gradients = [tf.random.normal((2, 2, 64, 128))]
+        outputs = [None, tf.random.normal((2, 40, 128))]
+
+        self.assertEqual(describe(tgt.select_epoch(gradients, 0)), [(2, 64, 128)])
+        self.assertEqual(describe(tgt.select_epoch(gradients, 1)), [(2, 64, 128)])
+        self.assertEqual(describe(tgt.select_variable_batch(gradients, 0, 0)), [(64, 128)])
+        self.assertEqual(describe(tgt.select_variable_batch(gradients, 0, 1)), [(64, 128)])
+        self.assertEqual(describe(tgt.select_epoch(outputs, 0)), [None, (40, 128)])
+        self.assertEqual(describe(tgt.select_epoch(outputs, 1)), [None, (40, 128)])
+        self.assertEqual(describe(tgt.select_layer_batch(outputs, 0, 0, batch_size=32)), [None, (32, 128)])
+        self.assertEqual(describe(tgt.select_layer_batch(outputs, 0, 1, batch_size=32)), [None, (8, 128)])
+
+    def test_dataset_mapping(self):
+        tgt = self.target
+        model = tgt.make_model((64,), ['dropout', (64, 128)])
+        gradients = [tf.random.normal((2, 2, 64, 128))]
+        outputs = [None, tf.random.normal((2, 40, 128))]
+        all_gradients = tgt.expand_to_all_variables(model, gradients)
+        first_epoch_gradients = tgt.select_epoch(all_gradients, 0)
+        first_epoch_outputs = tgt.select_epoch(outputs, 0)
+
+        # basic sanity checks
+        self.assertEqual(describe(gradients), [(2, 2, 64, 128)])
+        self.assertEqual(describe(all_gradients), [None, (2, 2, 64, 128)])
+
+        self.assertEqual(describe(first_epoch_gradients), [None, (2, 64, 128)])
+        self.assertEqual(describe(tgt.map_each_variable_batch(
+            first_epoch_gradients, lambda batch_data: batch_data)),
+            [None, [(64, 128), (64, 128)]])
+        self.assertEqual(describe(first_epoch_outputs), [None, (40, 128)])
+        self.assertEqual(describe(tgt.map_each_layer_batch(
+            first_epoch_outputs, lambda batch_data: batch_data)),
+            [None, [(32, 128), (8, 128)]])
+
+        self.assertEqual(describe(all_gradients), [None, (2, 2, 64, 128)])
+        self.assertEqual(describe(tgt.map_each_epoch(
+            all_gradients, lambda epoch_data: epoch_data)),
+            [None, [(2, 64, 128), (2, 64, 128)]])
+        self.assertEqual(describe(tgt.flatmap_epoch_batches(
+            all_gradients, lambda datasets: tgt.map_each_variable_batch(datasets, lambda batch_data: batch_data))),
+            [None, [(64, 128), (64, 128), (64, 128), (64, 128)]])
+
+        self.assertEqual(describe(outputs), [None, (2, 40, 128)])
+        self.assertEqual(describe(tgt.map_each_epoch(
+            outputs, lambda epoch_data: epoch_data)),
+            [None, [(40, 128), (40, 128)]])
+        self.assertEqual(describe(tgt.flatmap_epoch_batches(
+            outputs, lambda datasets: tgt.map_each_layer_batch(datasets, lambda batch_data: batch_data))),
+            [None, [(32, 128), (8, 128), (32, 128), (8, 128)]])
+
+
+class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
+    """
+    Validate helper functionality for the purpose of helping with tests.
+    """
+    def setUp(self):
+        self.model = self.make_model((64,), ['dropout', (64, 128)])
+        self.variable_datasets = [
+            tf.random.uniform((2, 2, 2), maxval=100, dtype=tf.int64), tf.random.normal((2, 2, 64, 128))]
+        self.gradient_datasets = [tf.random.normal((2, 2, 64, 128))]
+        self.output_datasets = [tf.random.normal((2, 40, 64)), tf.random.normal((2, 40, 128))]
+        self.outgrad_datasets = [tf.random.normal((2, 40, 64)), tf.random.normal((2, 40, 128))]
+
+    def test_basic_setup(self):
+        model = self.model
+        self.assertEqual(describe(model.variables), [(2,), (64, 128)])
+        self.assertEqual(describe(model.trainable_variables), [(64, 128)])
+        self.assertEqual(self.get_layer_output_shapes(model), [(None, 64), (None, 128)])
+        self.assertEquals(describe(self.variable_datasets), [(2, 2, 2), (2, 2, 64, 128)])
+        self.assertEquals(describe(self.gradient_datasets), [(2, 2, 64, 128)])
+        self.assertEquals(describe(self.output_datasets), [(2, 40, 64), (2, 40, 64)])
+        self.assertEquals(describe(self.outgrad_datasets), [(2, 40, 64), (2, 40, 64)])
+
+    def test_per_epoch_norms(self):
+        """
+        Norms, value_stats, and magnitude_stats calculated on sum(steps) over gradient data.
+        Based on notion that there is a single "overall" gradient for the epoch: the sum of the gradients at each step.
+        """
+        cb = GradientHistoryCallback()
+        model = self.model
+        self.fake_train(model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
+                        output_data=self.output_datasets, output_gradient_data=self.outgrad_datasets,
+                        callbacks=[cb])
+
+        # basic shapes
+        self.assertEqual(describe(cb.model_norm_stats), (2, 5))
+        self.assertEqual(describe(cb.value_norms), [None, (2,)])
+
+        # calculate expected values
+        all_gradients = self.expand_to_all_variables(model, self.gradient_datasets)
+        norm_accumulator = NormAccumulatorStrategy()
+        expected = self.map_each_epoch(
+            all_gradients, lambda epoch_data: norm_accumulator.single(tf.reduce_sum(epoch_data, axis=0)))
+        expected = [np.stack(v) if v is not None else None for v in expected]
+
+        # asserts
+        actual = cb.value_norms
+        matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
+        if not matches:
+            sources = self.map_each_epoch(all_gradients, lambda epoch_data: tf.reduce_sum(epoch_data, axis=0))
+            print()
+            print(f"test_per_epoch_norms:")
+            print(f"- sources:  {describe(sources, verbose=2)}")
+            print(f"- expected: {expected}")
+            print(f"- actual:   {cb.value_norms}")
+        self.assertTrue(matches, "see logs for details")
+
+    def test_per_epoch_value_stats(self):
+        """Based on sum(steps) as for norms"""
+        cb = GradientHistoryCallback()
+        model = self.model
+        self.fake_train(model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
+                        output_data=self.output_datasets, output_gradient_data=self.outgrad_datasets,
+                        callbacks=[cb])
+
+        # basic shapes
+        self.assertEqual(describe(cb.value_stats), [None, (2, 9)])
+
+        # calculate expected values
+        expected_quantiles = [0., 12.5, 25, 37.5, 50, 62.5, 75, 87.5, 100]
+        all_gradients = self.expand_to_all_variables(model, self.gradient_datasets)
+        percentile_accumulator = PercentileAccumulatorStrategy(quantiles=expected_quantiles)
+        expected = self.map_each_epoch(
+            all_gradients, lambda epoch_data: percentile_accumulator.single(tf.reduce_sum(epoch_data, axis=0)))
+        expected = [np.stack(v) if v is not None else None for v in expected]
+
+        # asserts
+        self.assertEqual(cb.value_stats[1].columns, expected_quantiles)
+        actual = self.map_each_item(cb.value_stats, lambda v: v.to_numpy())
+        matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
+        if not matches:
+            sources = self.map_each_epoch(all_gradients, lambda epoch_data: tf.reduce_sum(epoch_data, axis=0))
+            print()
+            print(f"test_per_epoch_value_stats:")
+            print(f"- sources:  {describe(sources, verbose=2)}")
+            print(f"- expected: {expected}")
+            print(f"- actual:   {cb.value_norms}")
+        self.assertTrue(matches, "see logs for details")
+
+    def test_per_epoch_magnitude_stats(self):
+        """Based on sum(steps) as for norms"""
+        cb = GradientHistoryCallback()
+        model = self.model
+        self.fake_train(model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
+                        output_data=self.output_datasets, output_gradient_data=self.outgrad_datasets,
+                        callbacks=[cb])
+
+        # basic shapes
+        self.assertEqual(describe(cb.model_magnitude_stats), (2, 5))
+        self.assertEqual(describe(cb.magnitude_stats), [None, (2, 9)])
+
+        # calculate expected values
+        expected_quantiles = [0., 12.5, 25, 37.5, 50, 62.5, 75, 87.5, 100]
+        all_gradients = self.expand_to_all_variables(model, self.gradient_datasets)
+        percentile_accumulator = PercentileAccumulatorStrategy(quantiles=expected_quantiles, magnitudes=True)
+        expected = self.map_each_epoch(
+            all_gradients, lambda epoch_data: percentile_accumulator.single(tf.reduce_sum(epoch_data, axis=0)))
+        expected = [np.stack(v) if v is not None else None for v in expected]
+
+        # assert
+        self.assertEqual(cb.magnitude_stats[1].columns, expected_quantiles)
+        actual = self.map_each_item(cb.magnitude_stats, lambda v: v.to_numpy())
+        matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
+        if not matches:
+            sources = self.map_each_epoch(all_gradients, lambda epoch_data: tf.reduce_sum(epoch_data, axis=0))
+            print()
+            print(f"test_per_epoch_magnitude_stats:")
+            print(f"- sources:  {describe(sources, verbose=2)}")
+            print(f"- expected: {expected}")
+            print(f"- actual:   {cb.value_norms}")
+        self.assertTrue(matches, "see logs for details")
+
+    def test_per_epoch_activity_rates(self):
+        cb = GradientHistoryCallback()
+        model = self.model
+        self.fake_train(model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
+                        output_data=self.output_datasets, output_gradient_data=self.outgrad_datasets,
+                        callbacks=[cb])
+
+        # basic shapes
+        self.assertEqual(describe(cb.activity_stats), [None, (2, 3)])
+
+        # TODO assert on values
+
+    def test_per_step_norms(self):
+        """
+        Norms, value_stats, and magnitude_stats calculated on gradients at each step.
+        """
+        cb = GradientHistoryCallback(per_step=True)
+        model = self.model
+        self.fake_train(model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
+                        output_data=self.output_datasets, output_gradient_data=self.outgrad_datasets,
+                        callbacks=[cb])
+
+        # basic shapes
+        self.assertEqual(describe(cb.model_norm_stats), (4, 5))
+        self.assertEqual(describe(cb.value_norms), [None, (4,)])
+
+        all_gradients = self.expand_to_all_variables(model, self.gradient_datasets)
+        norm_accumulator = NormAccumulatorStrategy()
+        expected = self.flatmap_epoch_batches(
+            all_gradients, lambda epoch_data: self.map_each_variable_batch(
+                epoch_data, lambda batch_data: norm_accumulator.single(batch_data)))
+        expected = [np.stack(v) if v is not None else None for v in expected]
+
+        # assert
+        actual = cb.value_norms
+        matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
+        if not matches:
+            sources = self.flatmap_epoch_batches(
+                all_gradients, lambda epoch_data: self.map_each_variable_batch(
+                    epoch_data, lambda batch_data: batch_data))
+            print()
+            print(f"test_per_step_norms:")
+            print(f"- sources:  {describe(sources, verbose=2)}")
+            print(f"- expected: {expected}")
+            print(f"- actual:   {cb.value_norms}")
+        self.assertTrue(matches, "see logs for details")
+
+    def test_per_step_value_stats(self):
+        """Based on sum(steps) as for norms"""
+        cb = GradientHistoryCallback(per_step=True)
+        model = self.model
+        self.fake_train(model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
+                        output_data=self.output_datasets, output_gradient_data=self.outgrad_datasets,
+                        callbacks=[cb])
+
+        # basic shapes
+        self.assertEqual(describe(cb.value_stats), [None, (4, 9)])
+
+        # calculate expected values
+        expected_quantiles = [0., 12.5, 25, 37.5, 50, 62.5, 75, 87.5, 100]
+        all_gradients = self.expand_to_all_variables(model, self.gradient_datasets)
+        percentile_accumulator = PercentileAccumulatorStrategy(quantiles=expected_quantiles)
+        expected = self.flatmap_epoch_batches(
+            all_gradients, lambda epoch_data: self.map_each_variable_batch(
+                epoch_data, lambda batch_data: percentile_accumulator.single(batch_data)))
+        expected = [np.stack(v) if v is not None else None for v in expected]
+
+        # assert
+        self.assertEqual(cb.value_stats[1].columns, expected_quantiles)
+        actual = self.map_each_item(cb.value_stats, lambda v: v.to_numpy())
+        matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
+        if not matches:
+            sources = self.flatmap_epoch_batches(
+                all_gradients, lambda epoch_data: self.map_each_variable_batch(
+                    epoch_data, lambda batch_data: batch_data))
+            print()
+            print(f"test_per_step_value_stats:")
+            print(f"- sources:  {describe(sources, verbose=2)}")
+            print(f"- expected: {expected}")
+            print(f"- actual:   {cb.value_norms}")
+        self.assertTrue(matches, "see logs for details")
+
+    def test_per_step_magnitude_stats(self):
+        """Based on sum(steps) as for norms"""
+        cb = GradientHistoryCallback(per_step=True)
+        model = self.model
+        self.fake_train(model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
+                        output_data=self.output_datasets, output_gradient_data=self.outgrad_datasets,
+                        callbacks=[cb])
+
+        # basic shapes
+        self.assertEqual(describe(cb.model_magnitude_stats), (4, 5))
+        self.assertEqual(describe(cb.magnitude_stats), [None, (4, 9)])
+
+        # calculate expected values
+        expected_quantiles = [0., 12.5, 25, 37.5, 50, 62.5, 75, 87.5, 100]
+        all_gradients = self.expand_to_all_variables(model, self.gradient_datasets)
+        percentile_accumulator = PercentileAccumulatorStrategy(quantiles=expected_quantiles, magnitudes=True)
+        expected = self.flatmap_epoch_batches(
+            all_gradients, lambda epoch_data: self.map_each_variable_batch(
+                epoch_data, lambda batch_data: percentile_accumulator.single(batch_data)))
+        expected = [np.stack(v) if v is not None else None for v in expected]
+
+        # assert
+        self.assertEqual(cb.magnitude_stats[1].columns, expected_quantiles)
+        actual = self.map_each_item(cb.magnitude_stats, lambda v: v.to_numpy())
+        matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
+        if not matches:
+            sources = self.flatmap_epoch_batches(
+                all_gradients, lambda epoch_data: self.map_each_variable_batch(
+                    epoch_data, lambda batch_data: batch_data))
+            print()
+            print(f"test_per_step_magnitude_stats:")
+            print(f"- sources:  {describe(sources, verbose=2)}")
+            print(f"- expected: {expected}")
+            print(f"- actual:   {cb.value_norms}")
+        self.assertTrue(matches, "see logs for details")
+
+    def test_per_step_activity_rates(self):
+        cb = GradientHistoryCallback(per_step=True)
+        model = self.model
+        self.fake_train(model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
+                        output_data=self.output_datasets, output_gradient_data=self.outgrad_datasets,
+                        callbacks=[cb])
+
+        # basic shapes
+        self.assertEqual(describe(cb.activity_stats), [None, (4, 3)])
+
+        # TODO assert on values
 
 
 def describe(thing, verbose=1):
