@@ -1238,7 +1238,8 @@ class BasicStatsAccumulatorStrategy:
         """
         Immediately calculated percentiles on the provided data.
         """
-        return [self._compute_percentiles(*self._quantities(t)) if t is not None else None for t in tensors]
+        return [self._compute_one_percentiles(*self._one_quantities(t))
+                if t is not None else None for t in tensors]
 
     @property
     def accumulated_percentiles(self):
@@ -1247,8 +1248,7 @@ class BasicStatsAccumulatorStrategy:
         Returns:
             tensor containing percentile values
         """
-        return [self._compute_percentiles(*quantities) if quantities is not None else None
-                for quantities in self._accumulators]
+        return self._compute_all_percentiles(self._accumulators)
 
     def accumulate(self, first, tensors):
         """
@@ -1262,17 +1262,21 @@ class BasicStatsAccumulatorStrategy:
 
     @tf.function
     def _compute_first(self, tensors):
-        return [self._quantities(t) if t is not None else None for t in tensors]
+        return [self._one_quantities(t) if t is not None else None for t in tensors]
 
     @tf.function
     def _compute_next(self, tensors, accumulators):
-        return [self._aggregate(quantities, self._quantities(t)) if t is not None else None
+        return [self._aggregate_one(quantities, self._one_quantities(t)) if t is not None else None
                 for t, quantities in zip(tensors, accumulators)]
 
     @tf.function
-    def _compute_percentiles(self, cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
+    def _compute_all_percentiles(self, accumulators):
+        return [self._compute_one_percentiles(*quantities) if quantities is not None else None
+                for quantities in accumulators]
+
+    def _compute_one_percentiles(self, cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
         full_min, full_mean, full_stddev, full_max =\
-            self._compute_basic_stats(cur_min, cur_max, cur_sum, cur_sq_sum, cur_count)
+            self._compute_summary_stats(cur_min, cur_max, cur_sum, cur_sq_sum, cur_count)
 
         # log-abs mode
         # - for sake of nomenclature simplicity pretend that (mean-sd, mean, mean+sd) are first, middle, and third
@@ -1309,7 +1313,7 @@ class BasicStatsAccumulatorStrategy:
 
         return percentiles
 
-    def _quantities(self, tensor):
+    def _one_quantities(self, tensor):
         """Computes the accumulatable quantities for a single tensor"""
         if self.abs_log_scale:
             tf_eps = tf.constant(self.epsilon, dtype=tensor.dtype)
@@ -1335,7 +1339,7 @@ class BasicStatsAccumulatorStrategy:
             return new_min, new_max, new_sum, new_sq_sum, new_count
 
     @staticmethod
-    def _aggregate(cur_quantities, new_quantities):
+    def _aggregate_one(cur_quantities, new_quantities):
         # unpack
         cur_min, cur_max, cur_sum, cur_sq_sum, cur_count = cur_quantities
         new_min, new_max, new_sum, new_sq_sum, new_count = new_quantities
@@ -1349,7 +1353,7 @@ class BasicStatsAccumulatorStrategy:
 
     # could update to use Welford's algorithm, but it's probably good enough for our needs
     @staticmethod
-    def _compute_basic_stats(cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
+    def _compute_summary_stats(cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
         # calculate stddev via sqrt(E[X^2] - E[X]^2)
         cur_count = tf.cast(cur_count, dtype=cur_sum.dtype)
         x_mean = cur_sum / cur_count
