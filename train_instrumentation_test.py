@@ -839,6 +839,7 @@ class CallbackTrainingTestMixin:
         return res
 
 
+
 class CallbackTrainingTestMixinTest(unittest.TestCase):
     """
     Validate helper functionality for the purpose of helping with tests.
@@ -944,6 +945,20 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         self.output_datasets = [tf.random.normal((2, 40, 64)), tf.random.normal((2, 40, 128))]
         self.outgrad_datasets = [tf.random.normal((2, 40, 64)), tf.random.normal((2, 40, 128))]
 
+    def assertListsAlmostEqual(self, actual, expected, msg=None, sources=None):
+        same = [close_or_none(a, b) for a, b in zip(expected, actual)]
+        matches = np.all(same)
+        if not matches:
+            full_msg = f"Lists differ: matches = {same}"
+            if msg is not None:
+                full_msg += f" - {msg}"
+            full_msg += ':'
+            if sources is not None:
+                full_msg += f"\n- sources: {describe(sources, verbose=2)}"
+            full_msg += f"\n- expected: {expected}"
+            full_msg += f"\n- actual:   {actual}"
+            raise self.fail(msg)
+
     def test_basic_setup(self):
         model = self.model
         self.assertEqual(describe(model.variables), [(2,), (64, 128)])
@@ -973,18 +988,11 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         expected = self.map_each_epoch(
             all_gradients, lambda epoch_data: norm_accumulator.single(tf.reduce_sum(epoch_data, axis=0)))
         expected = [np.stack(v) if v is not None else None for v in expected]
+        sources = self.map_each_epoch(all_gradients, lambda epoch_data: tf.reduce_sum(epoch_data, axis=0))
 
         # asserts
         actual = cb.value_norms
-        matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
-        if not matches:
-            sources = self.map_each_epoch(all_gradients, lambda epoch_data: tf.reduce_sum(epoch_data, axis=0))
-            print()
-            print(f"test_per_epoch_norms:")
-            print(f"- sources:  {describe(sources, verbose=2)}")
-            print(f"- expected: {expected}")
-            print(f"- actual:   {cb.value_norms}")
-        self.assertTrue(matches, "see logs for details")
+        self.assertListsAlmostEqual(actual, expected, sources=sources)
 
     # Calculated based on sum(steps), as for norms
     def test_per_epoch_value_stats(self):
@@ -1004,19 +1012,12 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         expected = self.map_each_epoch(
             all_gradients, lambda epoch_data: percentile_accumulator.single(tf.reduce_sum(epoch_data, axis=0)))
         expected = [np.stack(v) if v is not None else None for v in expected]
+        sources = self.map_each_epoch(all_gradients, lambda epoch_data: tf.reduce_sum(epoch_data, axis=0))
 
         # asserts
-        self.assertEqual(list(cb.value_stats[1].columns), expected_quantiles)
         actual = self.map_each_item(cb.value_stats, lambda v: v.to_numpy())
-        matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
-        if not matches:
-            sources = self.map_each_epoch(all_gradients, lambda epoch_data: tf.reduce_sum(epoch_data, axis=0))
-            print()
-            print(f"test_per_epoch_value_stats:")
-            print(f"- sources:  {describe(sources, verbose=2)}")
-            print(f"- expected: {expected}")
-            print(f"- actual:   {cb.value_norms}")
-        self.assertTrue(matches, "see logs for details")
+        self.assertEqual(list(cb.value_stats[1].columns), expected_quantiles)
+        self.assertListsAlmostEqual(actual, expected, sources=sources)
 
     # Calculated based on sum(steps), as for norms
     def test_per_epoch_magnitude_stats(self):
@@ -1037,19 +1038,12 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         expected = self.map_each_epoch(
             all_gradients, lambda epoch_data: percentile_accumulator.single(tf.reduce_sum(epoch_data, axis=0)))
         expected = [np.stack(v) if v is not None else None for v in expected]
+        sources = self.map_each_epoch(all_gradients, lambda epoch_data: tf.reduce_sum(epoch_data, axis=0))
 
         # assert
-        self.assertEqual(list(cb.magnitude_stats[1].columns), expected_quantiles)
         actual = self.map_each_item(cb.magnitude_stats, lambda v: v.to_numpy())
-        matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
-        if not matches:
-            sources = self.map_each_epoch(all_gradients, lambda epoch_data: tf.reduce_sum(epoch_data, axis=0))
-            print()
-            print(f"test_per_epoch_magnitude_stats:")
-            print(f"- sources:  {describe(sources, verbose=2)}")
-            print(f"- expected: {expected}")
-            print(f"- actual:   {cb.value_norms}")
-        self.assertTrue(matches, "see logs for details")
+        self.assertEqual(list(cb.magnitude_stats[1].columns), expected_quantiles)
+        self.assertListsAlmostEqual(actual, expected, sources=sources)
 
     def test_per_epoch_activity_rates(self):
         cb = GradientHistoryCallback()
@@ -1080,20 +1074,13 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
             all_gradients, lambda epoch_data: self.map_each_variable_batch(
                 epoch_data, lambda batch_data: norm_accumulator.single(batch_data)))
         expected = [np.stack(v) if v is not None else None for v in expected]
+        sources = self.flatmap_epoch_batches(
+            all_gradients, lambda epoch_data: self.map_each_variable_batch(
+                epoch_data, lambda batch_data: batch_data))
 
         # assert
         actual = cb.value_norms
-        matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
-        if not matches:
-            sources = self.flatmap_epoch_batches(
-                all_gradients, lambda epoch_data: self.map_each_variable_batch(
-                    epoch_data, lambda batch_data: batch_data))
-            print()
-            print(f"test_per_step_norms:")
-            print(f"- sources:  {describe(sources, verbose=2)}")
-            print(f"- expected: {expected}")
-            print(f"- actual:   {cb.value_norms}")
-        self.assertTrue(matches, "see logs for details")
+        self.assertListsAlmostEqual(actual, expected, sources=sources)
 
     def test_per_step_value_stats(self):
         cb = GradientHistoryCallback(per_step=True)
@@ -1113,21 +1100,14 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
             all_gradients, lambda epoch_data: self.map_each_variable_batch(
                 epoch_data, lambda batch_data: percentile_accumulator.single(batch_data)))
         expected = [np.stack(v) if v is not None else None for v in expected]
+        sources = self.flatmap_epoch_batches(
+            all_gradients, lambda epoch_data: self.map_each_variable_batch(
+                epoch_data, lambda batch_data: batch_data))
 
         # assert
-        self.assertEqual(list(cb.value_stats[1].columns), expected_quantiles)
         actual = self.map_each_item(cb.value_stats, lambda v: v.to_numpy())
-        matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
-        if not matches:
-            sources = self.flatmap_epoch_batches(
-                all_gradients, lambda epoch_data: self.map_each_variable_batch(
-                    epoch_data, lambda batch_data: batch_data))
-            print()
-            print(f"test_per_step_value_stats:")
-            print(f"- sources:  {describe(sources, verbose=2)}")
-            print(f"- expected: {expected}")
-            print(f"- actual:   {cb.value_norms}")
-        self.assertTrue(matches, "see logs for details")
+        self.assertEqual(list(cb.value_stats[1].columns), expected_quantiles)
+        self.assertListsAlmostEqual(actual, expected, sources=sources)
 
     def test_per_step_magnitude_stats(self):
         cb = GradientHistoryCallback(per_step=True)
@@ -1148,21 +1128,14 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
             all_gradients, lambda epoch_data: self.map_each_variable_batch(
                 epoch_data, lambda batch_data: percentile_accumulator.single(batch_data)))
         expected = [np.stack(v) if v is not None else None for v in expected]
+        sources = self.flatmap_epoch_batches(
+            all_gradients, lambda epoch_data: self.map_each_variable_batch(
+                epoch_data, lambda batch_data: batch_data))
 
         # assert
-        self.assertEqual(list(cb.magnitude_stats[1].columns), expected_quantiles)
         actual = self.map_each_item(cb.magnitude_stats, lambda v: v.to_numpy())
-        matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
-        if not matches:
-            sources = self.flatmap_epoch_batches(
-                all_gradients, lambda epoch_data: self.map_each_variable_batch(
-                    epoch_data, lambda batch_data: batch_data))
-            print()
-            print(f"test_per_step_magnitude_stats:")
-            print(f"- sources:  {describe(sources, verbose=2)}")
-            print(f"- expected: {expected}")
-            print(f"- actual:   {cb.value_norms}")
-        self.assertTrue(matches, "see logs for details")
+        self.assertEqual(list(cb.magnitude_stats[1].columns), expected_quantiles)
+        self.assertListsAlmostEqual(actual, expected, sources=sources)
 
     def test_per_step_activity_rates(self):
         cb = GradientHistoryCallback(per_step=True)
