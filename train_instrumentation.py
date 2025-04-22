@@ -1345,10 +1345,15 @@ class BasicStatsAccumulatorStrategy:
 
 class PercentileAccumulatorStrategy:
     """
-    Approximated calculation of percentiles over multiple batches.
+    Primarily used for calculation of percentiles over single batches or pre-accumulated epoch data.
+
+    As a fallback option, can also be used for approximated accumulation of percentiles over multiple batches.
     Naively takes the mean across all values recorded for each given percentile.
     Very inaccurate when accumulating.
+
+    Issues a warning the first time it's used.
     """
+    _warning_issued = False
 
     def __init__(self, quantiles=None, magnitudes=False):
         super().__init__()
@@ -1365,7 +1370,7 @@ class PercentileAccumulatorStrategy:
         Returns:
             list
         """
-        return self.quantiles
+        return self._quantiles
 
     @property
     def accumulated_percentiles(self):
@@ -1374,6 +1379,10 @@ class PercentileAccumulatorStrategy:
         Returns:
             tensor containing percentile values
         """
+        if self._count > 1 and not PercentileAccumulatorStrategy._warning_issued:
+            print("Warning: PercentileAccumulatorStrategy is very inaccurate when accumulating percentiles "
+                  "over multiple batches")
+            PercentileAccumulatorStrategy._warning_issued = True
         return [sums / self._count if sums is not None else None
                 for sums in self._summed_percentiles]
 
