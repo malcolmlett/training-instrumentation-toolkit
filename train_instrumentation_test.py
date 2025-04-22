@@ -939,20 +939,13 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
     """
     def setUp(self):
         self.model = self.make_model((64,), ['dropout', (64, 128)])
-        self.variable_datasets = [
-            tf.random.uniform((2, 2, 2), maxval=100, dtype=tf.int64), tf.random.normal((2, 2, 64, 128))]
         self.gradient_datasets = [tf.random.normal((2, 2, 64, 128))]
-        self.output_datasets = [tf.random.normal((2, 40, 64)), tf.random.normal((2, 40, 128))]
-        self.outgrad_datasets = [tf.random.normal((2, 40, 64)), tf.random.normal((2, 40, 128))]
-
-        self.expected_quantiles = [0., 12.5, 25, 37.5, 50, 62.5, 75, 87.5, 100]
         self.all_gradients = self.expand_to_all_variables(self.model, self.gradient_datasets)
+        self.expected_quantiles = [0., 12.5, 25, 37.5, 50, 62.5, 75, 87.5, 100]
 
     def train(self, per_step):
         cb = GradientHistoryCallback(per_step=per_step)
-        self.fake_train(self.model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
-                        output_data=self.output_datasets, output_gradient_data=self.outgrad_datasets,
-                        callbacks=[cb])
+        self.fake_train(self.model, gradient_data=self.gradient_datasets, callbacks=[cb])
         return cb
 
     def assertListsAlmostEqual(self, actual, expected, msg=None, sources=None):
@@ -974,10 +967,7 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         self.assertEqual(describe(model.variables), [(2,), (64, 128)])
         self.assertEqual(describe(model.trainable_variables), [(64, 128)])
         self.assertEqual(self.get_layer_output_shapes(model), [(None, 64), (None, 128)])
-        self.assertEquals(describe(self.variable_datasets), [(2, 2, 2), (2, 2, 64, 128)])
         self.assertEquals(describe(self.gradient_datasets), [(2, 2, 64, 128)])
-        self.assertEquals(describe(self.output_datasets), [(2, 40, 64), (2, 40, 128)])
-        self.assertEquals(describe(self.outgrad_datasets), [(2, 40, 64), (2, 40, 128)])
 
     # Norms, value_stats, and magnitude_stats ared calculated on sum(steps) over gradient data.
     # Based on notion that there is a single "overall" gradient for the epoch: the sum of the gradients at each step.
@@ -1095,6 +1085,54 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         cb = self.train(per_step=True)
         self.assertEqual(describe(cb.activity_stats), [None, (4, 3)])
         # TODO assert on values
+
+
+# TODO remove once all callback test classes written
+class ExampleCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
+    """
+    Validate helper functionality for the purpose of helping with tests.
+    """
+    def setUp(self):
+        self.model = self.make_model((64,), ['dropout', (64, 128)])
+        self.variable_datasets = [
+            tf.random.uniform((2, 2, 2), maxval=100, dtype=tf.int64), tf.random.normal((2, 2, 64, 128))]
+        self.gradient_datasets = [tf.random.normal((2, 2, 64, 128))]
+        self.output_datasets = [tf.random.normal((2, 40, 64)), tf.random.normal((2, 40, 128))]
+        self.outgrad_datasets = [tf.random.normal((2, 40, 64)), tf.random.normal((2, 40, 128))]
+
+        self.expected_quantiles = [0., 12.5, 25, 37.5, 50, 62.5, 75, 87.5, 100]
+        self.all_gradients = self.expand_to_all_variables(self.model, self.gradient_datasets)
+
+    def train(self, per_step):
+        cb = GradientHistoryCallback(per_step=per_step)
+        self.fake_train(self.model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
+                        output_data=self.output_datasets, output_gradient_data=self.outgrad_datasets,
+                        callbacks=[cb])
+        return cb
+
+    def assertListsAlmostEqual(self, actual, expected, msg=None, sources=None):
+        same = [close_or_none(a, b) for a, b in zip(expected, actual)]
+        matches = np.all(same)
+        if not matches:
+            full_msg = f"Lists differ: matches = {same}"
+            if msg is not None:
+                full_msg += f" - {msg}"
+            full_msg += ':'
+            if sources is not None:
+                full_msg += f"\n- sources: {describe(sources, verbose=2)}"
+            full_msg += f"\n- expected: {expected}"
+            full_msg += f"\n- actual:   {actual}"
+            raise self.fail(msg)
+
+    def test_basic_setup(self):
+        model = self.model
+        self.assertEqual(describe(model.variables), [(2,), (64, 128)])
+        self.assertEqual(describe(model.trainable_variables), [(64, 128)])
+        self.assertEqual(self.get_layer_output_shapes(model), [(None, 64), (None, 128)])
+        self.assertEquals(describe(self.variable_datasets), [(2, 2, 2), (2, 2, 64, 128)])
+        self.assertEquals(describe(self.gradient_datasets), [(2, 2, 64, 128)])
+        self.assertEquals(describe(self.output_datasets), [(2, 40, 64), (2, 40, 128)])
+        self.assertEquals(describe(self.outgrad_datasets), [(2, 40, 64), (2, 40, 128)])
 
 
 def describe(thing, verbose=1):
