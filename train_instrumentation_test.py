@@ -416,7 +416,7 @@ class CallbackTrainingTestMixin:
     """
 
     def fake_train(self, model, variable_data=None, gradient_data=None, output_data=None, output_gradient_data=None,
-                   batch_size=32, callbacks=None, use_variable_data_before=False, verbose=1):
+                   batch_size=32, callbacks=None, use_variable_data_before=False, verbose=0):
         """
         Fakes the behaviour of model training w.r.t. what gets passed to callbacks at each event.
 
@@ -951,14 +951,12 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         self.assertEqual(self.get_layer_output_shapes(model), [(None, 64), (None, 128)])
         self.assertEquals(describe(self.variable_datasets), [(2, 2, 2), (2, 2, 64, 128)])
         self.assertEquals(describe(self.gradient_datasets), [(2, 2, 64, 128)])
-        self.assertEquals(describe(self.output_datasets), [(2, 40, 64), (2, 40, 64)])
-        self.assertEquals(describe(self.outgrad_datasets), [(2, 40, 64), (2, 40, 64)])
+        self.assertEquals(describe(self.output_datasets), [(2, 40, 64), (2, 40, 128)])
+        self.assertEquals(describe(self.outgrad_datasets), [(2, 40, 64), (2, 40, 128)])
 
+    # Norms, value_stats, and magnitude_stats ared calculated on sum(steps) over gradient data.
+    # Based on notion that there is a single "overall" gradient for the epoch: the sum of the gradients at each step.
     def test_per_epoch_norms(self):
-        """
-        Norms, value_stats, and magnitude_stats calculated on sum(steps) over gradient data.
-        Based on notion that there is a single "overall" gradient for the epoch: the sum of the gradients at each step.
-        """
         cb = GradientHistoryCallback()
         model = self.model
         self.fake_train(model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
@@ -988,8 +986,8 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
             print(f"- actual:   {cb.value_norms}")
         self.assertTrue(matches, "see logs for details")
 
+    # Calculated based on sum(steps), as for norms
     def test_per_epoch_value_stats(self):
-        """Based on sum(steps) as for norms"""
         cb = GradientHistoryCallback()
         model = self.model
         self.fake_train(model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
@@ -1008,7 +1006,7 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         expected = [np.stack(v) if v is not None else None for v in expected]
 
         # asserts
-        self.assertEqual(cb.value_stats[1].columns, expected_quantiles)
+        self.assertEqual(list(cb.value_stats[1].columns), expected_quantiles)
         actual = self.map_each_item(cb.value_stats, lambda v: v.to_numpy())
         matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
         if not matches:
@@ -1020,8 +1018,8 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
             print(f"- actual:   {cb.value_norms}")
         self.assertTrue(matches, "see logs for details")
 
+    # Calculated based on sum(steps), as for norms
     def test_per_epoch_magnitude_stats(self):
-        """Based on sum(steps) as for norms"""
         cb = GradientHistoryCallback()
         model = self.model
         self.fake_train(model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
@@ -1041,7 +1039,7 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         expected = [np.stack(v) if v is not None else None for v in expected]
 
         # assert
-        self.assertEqual(cb.magnitude_stats[1].columns, expected_quantiles)
+        self.assertEqual(list(cb.magnitude_stats[1].columns), expected_quantiles)
         actual = self.map_each_item(cb.magnitude_stats, lambda v: v.to_numpy())
         matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
         if not matches:
@@ -1066,9 +1064,6 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         # TODO assert on values
 
     def test_per_step_norms(self):
-        """
-        Norms, value_stats, and magnitude_stats calculated on gradients at each step.
-        """
         cb = GradientHistoryCallback(per_step=True)
         model = self.model
         self.fake_train(model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
@@ -1101,7 +1096,6 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         self.assertTrue(matches, "see logs for details")
 
     def test_per_step_value_stats(self):
-        """Based on sum(steps) as for norms"""
         cb = GradientHistoryCallback(per_step=True)
         model = self.model
         self.fake_train(model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
@@ -1121,7 +1115,7 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         expected = [np.stack(v) if v is not None else None for v in expected]
 
         # assert
-        self.assertEqual(cb.value_stats[1].columns, expected_quantiles)
+        self.assertEqual(list(cb.value_stats[1].columns), expected_quantiles)
         actual = self.map_each_item(cb.value_stats, lambda v: v.to_numpy())
         matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
         if not matches:
@@ -1136,7 +1130,6 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         self.assertTrue(matches, "see logs for details")
 
     def test_per_step_magnitude_stats(self):
-        """Based on sum(steps) as for norms"""
         cb = GradientHistoryCallback(per_step=True)
         model = self.model
         self.fake_train(model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
@@ -1157,7 +1150,7 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         expected = [np.stack(v) if v is not None else None for v in expected]
 
         # assert
-        self.assertEqual(cb.magnitude_stats[1].columns, expected_quantiles)
+        self.assertEqual(list(cb.magnitude_stats[1].columns), expected_quantiles)
         actual = self.map_each_item(cb.magnitude_stats, lambda v: v.to_numpy())
         matches = np.all([close_or_none(a, b) for a, b in zip(expected, actual)])
         if not matches:
