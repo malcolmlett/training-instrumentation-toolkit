@@ -1142,7 +1142,6 @@ class PerEpochAccumulatorStrategy:
         return 1
 
 
-# TODO add unit tests
 class NormAccumulatorStrategy:
     """
     Batched calculation of size-normalized norms, aka RMS.
@@ -1206,10 +1205,10 @@ class NormAccumulatorStrategy:
         return [compute_one(one_sum, one_count) for one_sum, one_count in zip(sums, counts)]
 
 
-# TODO add unit tests
 class BasicStatsAccumulatorStrategy:
     """
     Batched calculation of mean, stddev, min, and max.
+    For consistency with the more common percentiles approach, results are returned as percentile distributions.
 
     Arguments:
         abs_log_scale: whether to calculate mean/stddev against
@@ -1240,7 +1239,7 @@ class BasicStatsAccumulatorStrategy:
         Immediately calculated percentiles on the provided data.
         """
         accumulators = self._compute_first(tensors)
-        return [self._compute_as_percentiles(*quantities) if quantities is not None else None
+        return [self._compute_percentiles(*quantities) if quantities is not None else None
                 for l_idx, quantities in enumerate(accumulators)]
 
     @property
@@ -1250,17 +1249,7 @@ class BasicStatsAccumulatorStrategy:
         Returns:
             tensor containing percentile values
         """
-        return [self._compute_as_percentiles(*quantities) if quantities is not None else None
-                for l_idx, quantities in enumerate(self._accumulators)]
-
-    @property
-    def accumulated_stats(self):
-        """
-        Gets the basic stats over the currently observed data.
-        Returns:
-            tensor containing min, max, mean, stddev
-        """
-        return [self._compute_as_stats(*quantities) if quantities is not None else None
+        return [self._compute_percentiles(*quantities) if quantities is not None else None
                 for l_idx, quantities in enumerate(self._accumulators)]
 
     def accumulate(self, first, tensors):
@@ -1273,64 +1262,92 @@ class BasicStatsAccumulatorStrategy:
         else:
             self._accumulators = self._compute_next(tensors, self._accumulators)
 
-    # make sure to keep in sync with _compute_next()
     @tf.function
     def _compute_first(self, tensors):
-        def compute_one(tensor):
-            if self.abs_log_scale:
-                tf_eps = tf.constant(self.epsilon, dtype=tensor.dtype)
-                tensor = tf.math.log(tf.abs(tensor) + tf_eps)
+        return [self._quantities(t) if t is not None else None for t in tensors]
 
-            new_min = tf.reduce_min(tensor)
-            new_max = tf.reduce_max(tensor)
-            new_sum = tf.reduce_sum(tensor)
-            new_sq_sum = tf.reduce_sum(tf.square(tensor))
-            new_count = tf.size(tensor)
-            return new_min, new_max, new_sum, new_sq_sum, new_count
-        return [compute_one(t) if t is not None else None for t in tensors]
-
-    # make sure to keep in sync with _compute_first()
     @tf.function
     def _compute_next(self, tensors, accumulators):
-        def compute_one(tensor, cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
-            if self.abs_log_scale:
-                tf_eps = tf.constant(self.epsilon, dtype=tensor.dtype)
-                tensor = tf.math.log(tf.abs(tensor) + tf_eps)
-
-            new_min = tf.minimum(cur_min, tf.reduce_min(tensor))
-            new_max = tf.maximum(cur_max, tf.reduce_max(tensor))
-            new_sum = cur_sum + tf.reduce_sum(tensor)
-            new_sq_sum = cur_sq_sum + tf.reduce_sum(tf.square(tensor))
-            new_count = cur_count + tf.size(tensor)
-            return new_min, new_max, new_sum, new_sq_sum, new_count
-        return [compute_one(t, *quantities) if t is not None else None
+        return [self._aggregate(quantities, self._quantities(t)) if t is not None else None
                 for t, quantities in zip(tensors, accumulators)]
 
     @tf.function
-    def _compute_as_stats(self, cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
+    def _compute_percentiles(self, cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
         full_min, full_mean, full_stddev, full_max =\
             self._compute_basic_stats(cur_min, cur_max, cur_sum, cur_sq_sum, cur_count)
-        stats = tf.stack([full_min, full_max, full_mean, full_stddev])
 
-        # convert back to linear scale
-        # (and remove epsilon offset so that zeros end up as zeros at the end)
+        # log-abs mode
+        # - for sake of nomenclature simplicity pretend that (mean-sd, mean, mean+sd) are first, middle, and third
+        #   quartiles
+        # - calculate first, middle, and third quartiles
+        # - ONLY then convert to linear
+        # - apply edge-case rules to ensure sanity:
+        #    - mean-sd must be >= min
+        #    - mean+sd must be <= max
+        #    - anything with magnitude < epsilon is treated as zero.
         if self.abs_log_scale:
             tf_eps = tf.constant(self.epsilon, dtype=cur_sum.dtype)
-            stats = tf.math.exp(stats) - tf_eps
-        return stats
 
-    @tf.function
-    def _compute_as_percentiles(self, cur_min, cur_max, cur_sum, cur_sq_sum, cur_count):
-        full_min, full_mean, full_stddev, full_max =\
-            self._compute_basic_stats(cur_min, cur_max, cur_sum, cur_sq_sum, cur_count)
-        percentiles = tf.stack([full_min, full_mean - full_stddev, full_mean, full_mean + full_stddev, full_max])
+            first_q = tf.math.exp(full_mean - full_stddev) - tf_eps
+            first_q = tf.where(first_q < tf_eps, 0.0, first_q)
+            first_q = tf.maximum(full_min, first_q)
 
-        # convert back to linear scale
-        # (and remove epsilon offset so that zeros end up as zeros at the end)
-        if self.abs_log_scale:
-            tf_eps = tf.constant(self.epsilon, dtype=cur_sum.dtype)
-            percentiles = tf.math.exp(percentiles) - tf_eps
+            mid_q = tf.math.exp(full_mean) - tf_eps
+            mid_q = tf.where(mid_q < tf_eps, 0.0, mid_q)
+
+            third_q = tf.math.exp(full_mean + full_stddev) - tf_eps
+            third_q = tf.minimum(full_max, third_q)
+
+            percentiles = tf.stack([full_min, first_q, mid_q, third_q, full_max])
+
+        # linear mode
+        # - apply edge-case rules to ensure sanity:
+        #    - mean-sd must be >= min
+        #    - mean+sd must be <= max
+        else:
+            first_q = tf.maximum(full_min, full_mean - full_stddev)
+            third_q = tf.minimum(full_max, full_mean + full_stddev)
+            percentiles = tf.stack([full_min, first_q, full_mean, third_q, full_max])
+
         return percentiles
+
+    def _quantities(self, tensor):
+        """Computes the accumulatable quantities for a single tensor"""
+        if self.abs_log_scale:
+            tf_eps = tf.constant(self.epsilon, dtype=tensor.dtype)
+
+            # min, max, count on abs tensor
+            tensor = tf.abs(tensor)
+            new_min = tf.reduce_min(tensor)
+            new_max = tf.reduce_max(tensor)
+            new_count = tf.size(tensor)
+
+            # mean and stddev in log-scale
+            # - with small offset to avoid log(zero) issues
+            tensor = tf.math.log(tensor + tf_eps)
+            new_sum = tf.reduce_sum(tensor)
+            new_sq_sum = tf.reduce_sum(tf.square(tensor))
+            return new_min, new_max, new_sum, new_sq_sum, new_count
+        else:
+            new_min = tf.reduce_min(tensor)
+            new_max = tf.reduce_max(tensor)
+            new_count = tf.size(tensor)
+            new_sum = tf.reduce_sum(tensor)
+            new_sq_sum = tf.reduce_sum(tf.square(tensor))
+            return new_min, new_max, new_sum, new_sq_sum, new_count
+
+    @staticmethod
+    def _aggregate(cur_quantities, new_quantities):
+        # unpack
+        cur_min, cur_max, cur_sum, cur_sq_sum, cur_count = cur_quantities
+        new_min, new_max, new_sum, new_sq_sum, new_count = new_quantities
+        # compute
+        new_min = tf.minimum(cur_min, new_min)
+        new_max = tf.maximum(cur_max, new_max)
+        new_count = cur_count + new_count
+        new_sum = cur_sum + new_sum
+        new_sq_sum = cur_sq_sum + new_sq_sum
+        return new_min, new_max, new_sum, new_sq_sum, new_count
 
     # could update to use Welford's algorithm, but it's probably good enough for our needs
     @staticmethod

@@ -285,6 +285,29 @@ class BasicStatsAccumulatorStrategyTests(unittest.TestCase):
               f"-- Actual: {actual}"
         self.assertEqual(np.all(same_states), True, msg)
 
+    def test_accumulated_percentiles_given_abs_log_scale_and_zeros(self):
+        def randomly_zerofy_one(tensor):
+            zero_out = tf.random.uniform(tensor.shape, maxval=1.0, dtype=tf.float32) < 0.5
+            return tf.where(zero_out, tf.zeros_like(tensor), tensor)
+        var_list_with_zeros = [randomly_zerofy_one(v) if v is not None else None for v in self.var_list]
+
+        # expected
+        expected = [self.one_expected_percentile(v, abs_log_scale=True)
+                    if v is not None else None for v in var_list_with_zeros]
+
+        # actual
+        accumulator = BasicStatsAccumulatorStrategy(abs_log_scale=True)
+        for iteration in range(self.var_list[0].shape[0]):
+            iteration_data = [v[iteration] if v is not None else None for v in var_list_with_zeros]
+            accumulator.accumulate(iteration == 0, iteration_data)
+        actual = accumulator.accumulated_percentiles
+
+        same_states = [close_or_none(e, a) for e, a in zip(expected, actual)]
+        msg = f"Differences found. Matches by variable: {same_states}\n"\
+              f"-- Expected: {expected}\n"\
+              f"-- Actual: {actual}"
+        self.assertEqual(np.all(same_states), True, msg)
+
     def test_immediate_percentiles_given_linear_scale(self):
         expected = [self.one_expected_percentile(v, abs_log_scale=False)
                     if v is not None else None for v in self.var_list]
@@ -314,13 +337,23 @@ class BasicStatsAccumulatorStrategyTests(unittest.TestCase):
     @staticmethod
     def one_expected_percentile(tensor, abs_log_scale):
         if abs_log_scale:
+            # using different log(zero) handling than in actual implementation
+            # in order to verify that the handling is accurate enough
+            epsilon = 1e-12
+            has_zero = np.any(tensor == 0.0)
+
+            tensor = tf.where(tensor == 0.0, tf.ones_like(tensor) * epsilon, tensor)
             tensor = tf.math.log(tf.abs(tensor))
             min = tf.reduce_min(tensor)
             max = tf.reduce_max(tensor)
             mean = tf.reduce_mean(tensor)
             sd = tf.math.reduce_std(tensor)
             p = tf.stack([min, mean - sd, mean, mean + sd, max])
-            return tf.math.exp(p)
+            p = tf.math.exp(p)
+            if has_zero:
+                first_q = tf.where(p[1] < epsilon, 0.0, p[1])
+                p = tf.stack([0.0, first_q, p[2], p[3], p[4]])
+            return p
         else:
             min = tf.reduce_min(tensor)
             max = tf.reduce_max(tensor)
