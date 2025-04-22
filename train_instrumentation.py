@@ -569,11 +569,11 @@ class ValueStatsCollectingMixin:
         if self.value_stats_enabled:
             if self.value_stats_quantiles == 'mean/stddev':
                 self._value_stats_accumulator = BasicStatsAccumulatorStrategy()
-                self._magnitude_stats_accumulators = BasicStatsAccumulatorStrategy(abs_log_scale=True)
+                self._magnitude_stats_accumulator = BasicStatsAccumulatorStrategy(abs_log_scale=True)
             else:
                 self._value_stats_accumulator = PercentileAccumulatorStrategy(
                     quantiles=self.value_stats_quantiles)
-                self._magnitude_stats_accumulators = PercentileAccumulatorStrategy(
+                self._magnitude_stats_accumulator = PercentileAccumulatorStrategy(
                     quantiles=self.value_stats_quantiles, magnitudes=True)
 
     @property
@@ -1158,6 +1158,14 @@ class NormAccumulatorStrategy:
         """
         return [tf.sqrt(tf.reduce_mean(tf.square(t))) if t is not None else None for t in tensors]
 
+    @staticmethod
+    def single(tensor):
+        """
+        Convenience method when just want to use the same configuration as used here, but want to run on a single
+        tensor. Not optimised for use in loops.
+        """
+        return tf.sqrt(tf.reduce_mean(tf.square(tensor)))
+
     @property
     def accumulated_norms(self):
         """
@@ -1240,6 +1248,13 @@ class BasicStatsAccumulatorStrategy:
         """
         return [self._compute_one_percentiles(*self._one_quantities(t))
                 if t is not None else None for t in tensors]
+
+    def single(self, tensor):
+        """
+        Convenience method when just want to use the same configuration as used here, but want to run on a single
+        tensor. Not optimised for use in loops.
+        """
+        return self._compute_one_percentiles(*self._one_quantities(tensor))
 
     @property
     def accumulated_percentiles(self):
@@ -1411,6 +1426,13 @@ class PercentileAccumulatorStrategy:
         Immediately calculated percentiles on the provided data.
         """
         return self._compute_first(tensors)
+
+    def single(self, tensor):
+        """
+        Convenience method when just want to use the same configuration as used here, but want to run on a single
+        tensor. Not optimised for use in loops.
+        """
+        return self._compute_first([tensor])[0]
 
     def accumulate(self, first, tensors):
         """
