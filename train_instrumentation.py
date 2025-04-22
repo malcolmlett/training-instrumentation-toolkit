@@ -1238,9 +1238,7 @@ class BasicStatsAccumulatorStrategy:
         """
         Immediately calculated percentiles on the provided data.
         """
-        accumulators = self._compute_first(tensors)
-        return [self._compute_percentiles(*quantities) if quantities is not None else None
-                for l_idx, quantities in enumerate(accumulators)]
+        return [self._compute_percentiles(*self._quantities(t)) if t is not None else None for t in tensors]
 
     @property
     def accumulated_percentiles(self):
@@ -1250,7 +1248,7 @@ class BasicStatsAccumulatorStrategy:
             tensor containing percentile values
         """
         return [self._compute_percentiles(*quantities) if quantities is not None else None
-                for l_idx, quantities in enumerate(self._accumulators)]
+                for quantities in self._accumulators]
 
     def accumulate(self, first, tensors):
         """
