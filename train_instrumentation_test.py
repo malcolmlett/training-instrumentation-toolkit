@@ -192,6 +192,48 @@ class CollectionSetHandling(unittest.TestCase):
         return model
 
 
+class NormAccumulatorStrategyTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # minimise chance of random variations to cause sporadic test failures
+        tf.keras.utils.set_random_seed(1)
+
+        self.var_list = [tf.random.normal((5, 10, 10), dtype=tf.float32), None,
+                         tf.random.normal((5, 3, 3, 32, 20), dtype=tf.float32)]
+
+    def test_accumulated_norms(self):
+        # expected
+        expected = [self.one_expected_norm(v) if v is not None else None for v in self.var_list]
+
+        # actual
+        accumulator = NormAccumulatorStrategy()
+        for iteration in range(self.var_list[0].shape[0]):
+            iteration_data = [v[iteration] if v is not None else None for v in self.var_list]
+            accumulator.accumulate(iteration == 0, iteration_data)
+        actual = accumulator.accumulated_norms
+
+        same_states = [close_or_none(e, a) for e, a in zip(expected, actual)]
+        msg = f"Differences found. Matches by variable: {same_states}\n"\
+              f"-- Expected: {expected}\n"\
+              f"-- Actual: {actual}"
+        self.assertEqual(np.all(same_states), True, msg)
+
+    def test_immediate_norms(self):
+        expected = [self.one_expected_norm(v) if v is not None else None for v in self.var_list]
+
+        accumulator = NormAccumulatorStrategy()
+        actual = accumulator.norms(self.var_list)
+
+        same_states = [close_or_none(e, a) for e, a in zip(expected, actual)]
+        msg = f"Differences found. Matches by variable: {same_states}\n"\
+              f"-- Expected: {expected}\n"\
+              f"-- Actual: {actual}"
+        self.assertEqual(np.all(same_states), True, msg)
+
+    @staticmethod
+    def one_expected_norm(tensor):
+        return tf.sqrt(tf.reduce_mean(tf.square(tensor)))
+
+
 class BasicStatsAccumulatorStrategyTests(unittest.TestCase):
     def setUp(self) -> None:
         # minimise chance of random variations to cause sporadic test failures
@@ -270,20 +312,20 @@ class BasicStatsAccumulatorStrategyTests(unittest.TestCase):
         self.assertEqual(np.all(same_states), True, msg)
 
     @staticmethod
-    def one_expected_percentile(var_data, abs_log_scale):
+    def one_expected_percentile(tensor, abs_log_scale):
         if abs_log_scale:
-            var_data = tf.math.log(tf.abs(var_data))
-            min = tf.reduce_min(var_data)
-            max = tf.reduce_max(var_data)
-            mean = tf.reduce_mean(var_data)
-            sd = tf.math.reduce_std(var_data)
+            tensor = tf.math.log(tf.abs(tensor))
+            min = tf.reduce_min(tensor)
+            max = tf.reduce_max(tensor)
+            mean = tf.reduce_mean(tensor)
+            sd = tf.math.reduce_std(tensor)
             p = tf.stack([min, mean - sd, mean, mean + sd, max])
             return tf.math.exp(p)
         else:
-            min = tf.reduce_min(var_data)
-            max = tf.reduce_max(var_data)
-            mean = tf.reduce_mean(var_data)
-            sd = tf.math.reduce_std(var_data)
+            min = tf.reduce_min(tensor)
+            max = tf.reduce_max(tensor)
+            mean = tf.reduce_mean(tensor)
+            sd = tf.math.reduce_std(tensor)
             return tf.stack([min, mean-sd, mean, mean+sd, max])
 
 

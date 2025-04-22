@@ -1202,7 +1202,7 @@ class NormAccumulatorStrategy:
             elif count == 0:
                 return tf.constant(0.0, dtype=sum.dtype)
             else:
-                return sum / tf.cast(count, dtype=sum.dtype)
+                return tf.sqrt(sum / tf.cast(count, dtype=sum.dtype))
         return [compute_one(one_sum, one_count) for one_sum, one_count in zip(sums, counts)]
 
 
