@@ -1,5 +1,7 @@
 import unittest
 import tensorflow as tf
+import tensorflow_probability as tfp
+import numpy as np
 from train_instrumentation import *
 from train_instrumentation import _normalize_collection_sets_for_layers, _normalize_collection_sets_for_variables
 
@@ -189,3 +191,43 @@ class CollectionSetHandling(unittest.TestCase):
         ])
         return model
 
+
+class Attenuators(unittest.TestCase):
+    def setUp(self) -> None:
+        # minimise chance of random variations to cause sporadic test failures
+        tf.keras.utils.set_random_seed(1)
+
+    def test_PercentileAccumulator_for_accumulated_percentiles(self):
+        quantiles = [0., 25., 50., 75., 100.]
+        var_list = [tf.random.normal((5, 10, 10), dtype=tf.float32), None,
+                    tf.random.normal((5, 3, 3, 32, 20), dtype=tf.float32)]
+
+        # expected
+        def compute_one(var_data):
+            raw_percentiles = tfp.stats.percentile(var_data, quantiles, interpolation='linear',
+                                                   axis=tf.range(1, tf.rank(var_data)))  # shape: (quantiles, epochs)
+            raw_percentiles = tf.transpose(raw_percentiles)  # shape: (epochs, quantiles)
+            return tf.reduce_mean(raw_percentiles, axis=0)  # shape: (quantiles,)
+        expected = [compute_one(v) if v is not None else None for v in var_list]
+
+        # actual
+        accumulator = PercentileAccumulatorStrategy(quantiles=quantiles)
+        for iteration in range(var_list[0].shape[0]):
+            iteration_data = [v[iteration] if v is not None else None for v in var_list]
+            accumulator.accumulate(iteration == 0, iteration_data)
+        actual = accumulator.accumulated_percentiles
+
+        def compare_one(expected_one, actual_one):
+            if expected_one is None and actual_one is not None:
+                return False
+            elif expected_one is not None and actual_one is None:
+                return False
+            elif expected_one is not None:
+                return np.allclose(expected_one, actual_one)
+            return True
+
+        same_states = [compare_one(e, a) for e, a in zip(expected, actual)]
+        msg = f"Differences found. Matches by variable: {same_states}\n"\
+              f"-- Expected: {expected}\n"\
+              f"-- Actual: {actual}"
+        self.assertEqual(np.all(same_states), True, msg)

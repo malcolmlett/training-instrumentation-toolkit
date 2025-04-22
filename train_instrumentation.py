@@ -1400,7 +1400,7 @@ class PercentileAccumulatorStrategy:
         # accumulate across batches in epoch, resetting first batch in each epoch
         if first:
             self._summed_percentiles = self._compute_first(tensors)
-            self._count = 0
+            self._count = 1
         else:
             self._summed_percentiles = self._compute_next(tensors, self._summed_percentiles)
             self._count += 1
