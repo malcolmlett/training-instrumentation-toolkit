@@ -948,12 +948,12 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         self.expected_quantiles = [0., 12.5, 25, 37.5, 50, 62.5, 75, 87.5, 100]
         self.all_gradients = self.expand_to_all_variables(self.model, self.gradient_datasets)
 
-        # run training
-        self.per_epoch_cb = GradientHistoryCallback(per_step=False)
-        self.per_step_cb = GradientHistoryCallback(per_step=True)
+    def train(self, per_step):
+        cb = GradientHistoryCallback(per_step=per_step)
         self.fake_train(self.model, variable_data=self.variable_datasets, gradient_data=self.gradient_datasets,
                         output_data=self.output_datasets, output_gradient_data=self.outgrad_datasets,
-                        callbacks=[self.per_epoch_cb, self.per_step_cb])
+                        callbacks=[cb])
+        return cb
 
     def assertListsAlmostEqual(self, actual, expected, msg=None, sources=None):
         same = [close_or_none(a, b) for a, b in zip(expected, actual)]
@@ -990,7 +990,7 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         sources = self.map_each_epoch(self.all_gradients, lambda epoch_data: tf.reduce_sum(epoch_data, axis=0))
 
         # asserts
-        cb = self.per_epoch_cb
+        cb = self.train(per_step=False)
         actual = cb.value_norms
         self.assertEqual(describe(cb.model_norm_stats), (2, 5))
         self.assertEqual(describe(cb.value_norms), [None, (2,)])
@@ -1006,7 +1006,7 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         sources = self.map_each_epoch(self.all_gradients, lambda epoch_data: tf.reduce_sum(epoch_data, axis=0))
 
         # asserts
-        cb = self.per_epoch_cb
+        cb = self.train(per_step=False)
         actual = self.map_each_item(cb.value_stats, lambda v: v.to_numpy())
         self.assertEqual(describe(cb.value_stats), [None, (2, 9)])
         self.assertEqual(list(cb.value_stats[1].columns), self.expected_quantiles)
@@ -1022,7 +1022,7 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
         sources = self.map_each_epoch(self.all_gradients, lambda epoch_data: tf.reduce_sum(epoch_data, axis=0))
 
         # assert
-        cb = self.per_epoch_cb
+        cb = self.train(per_step=False)
         actual = self.map_each_item(cb.magnitude_stats, lambda v: v.to_numpy())
         self.assertEqual(describe(cb.model_magnitude_stats), (2, 5))
         self.assertEqual(describe(cb.magnitude_stats), [None, (2, 9)])
@@ -1031,7 +1031,7 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
 
     def test_per_epoch_activity_rates(self):
         # assert
-        cb = self.per_epoch_cb
+        cb = self.train(per_step=False)
         self.assertEqual(describe(cb.activity_stats), [None, (2, 3)])
         # TODO assert on values
 
@@ -1047,7 +1047,7 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
                 epoch_data, lambda batch_data: batch_data))
 
         # assert
-        cb = self.per_step_cb
+        cb = self.train(per_step=True)
         actual = cb.value_norms
         self.assertEqual(describe(cb.model_norm_stats), (4, 5))
         self.assertEqual(describe(cb.value_norms), [None, (4,)])
@@ -1065,7 +1065,7 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
                 epoch_data, lambda batch_data: batch_data))
 
         # assert
-        cb = self.per_step_cb
+        cb = self.train(per_step=True)
         actual = self.map_each_item(cb.value_stats, lambda v: v.to_numpy())
         self.assertEqual(describe(cb.value_stats), [None, (4, 9)])
         self.assertEqual(list(cb.value_stats[1].columns), self.expected_quantiles)
@@ -1083,7 +1083,7 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
                 epoch_data, lambda batch_data: batch_data))
 
         # assert
-        cb = self.per_step_cb
+        cb = self.train(per_step=True)
         actual = self.map_each_item(cb.magnitude_stats, lambda v: v.to_numpy())
         self.assertEqual(describe(cb.model_magnitude_stats), (4, 5))
         self.assertEqual(describe(cb.magnitude_stats), [None, (4, 9)])
@@ -1092,7 +1092,7 @@ class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
 
     def test_per_step_activity_rates(self):
         # assert
-        cb = self.per_step_cb
+        cb = self.train(per_step=True)
         self.assertEqual(describe(cb.activity_stats), [None, (4, 3)])
         # TODO assert on values
 
