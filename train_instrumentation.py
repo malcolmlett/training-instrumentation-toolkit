@@ -708,10 +708,9 @@ class ValueStatsCollectingMixin:
             self._value_norms = [np.array(item_norms) if item_norms is not None else None
                                  for item_norms in self._value_norms]
         if self._value_stats is not None:
-            self._value_stats = self._stats_tensor_list_to_dataframes(
-                self._value_stats, self.value_stats_quantiles)
-            self._magnitude_stats = self._stats_tensor_list_to_dataframes(
-                self._magnitude_stats, self.value_stats_quantiles)
+            actual_quantiles = self._value_stats_accumulator.quantiles
+            self._value_stats = self._stats_tensor_list_to_dataframes(self._value_stats, actual_quantiles)
+            self._magnitude_stats = self._stats_tensor_list_to_dataframes(self._magnitude_stats, actual_quantiles)
 
     def _accum_value_norms_and_stats(self, first, values):
         self._init_value_norms_and_stats(values)
@@ -1385,7 +1384,25 @@ class PercentileAccumulatorStrategy:
     Naively takes the mean across all values recorded for each given percentile.
     Very inaccurate when accumulating.
 
-    Issues a warning the first time it's used.
+    Efficiency note:
+    - I have experimented with alternative ways to accumulate percentile data.
+    - Options are:
+        - (1) Use TFP.stats.percentile() each step and blindly take the mean of the results for each percentile.
+            - Very inaccurate. Results will tend to be "pulled" towards the centre relative to where they should be.
+            - Very slow. Calling percentile() each step costs a lot in terms of training time.
+              For example, increasing from 7ms/step to 105ms/step.
+        - (2) Use TFP.stats.percentile() each step and do some linear interpolation to estimate the percentiles
+              of the underlying distribution.
+            - Likely to be fairly inaccurate, but much better than option (1).
+            - Just as slow.
+            - Slightly faster than using fastdigest.
+        - (3) Use fastdigest (https://github.com/moritzmucha/fastdigest).
+            - Requires pip install of fastdigest.
+            - Accurate.
+            - Very slow. For example, increasing from 7ms/step to 150ms/step.
+            - Note that the original TDigest is way worse at 36sec/step.
+
+    Issues a warning the first time it's used for accumulation.
     """
     _warning_issued = False
 
@@ -1882,9 +1899,13 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
     Custom tot.fit() gradient callback function that collects various statistics and/or raw values of
     layer outputs during training.
 
-    When collecting data per-epoch, by default, raw values and value stats are calculated based on the mean layer
-    output over all samples in the epoch. This ensures consistency with `LayerOutputGradientHistoryCallback`.
-    Activity stats are always calculated over all individual samples.
+    Note that layer outputs include a batch dimension and special handling is required to accurately measure that
+    without consuming too much memory.
+
+    When collecting data per-epoch, stats and metrics are accumulated over all samples in the epoch.
+    When using 'mean/stddev' value/magnitude stats, this is accurate. When collecting actual percentile data, this
+    is only approximated (very naively). By default, only the last batch of each epoch is retained for
+    raw data. This can be changed by batch_reduction.
 
     Other properties:
         model: the model captured
@@ -1894,7 +1915,8 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
             (only available if per_step is True)
     """
 
-    def __init__(self, per_step=False, batch_reduction=None, keep_dims=False, collection_sets=None, *args, **kwargs):
+    def __init__(self, per_step=False, batch_reduction=None, keep_dims=False, collection_sets=None,
+                 value_stats_quantiles=None, *args, **kwargs):
         """
         Args:
             per_step: bool. Whether to collect per-step stats, or per-epoch otherwise.
@@ -1909,8 +1931,11 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
                 Whether to collect value and magnitude stats.
             activity_stats: bool, default: True.
                 Whether to collect activity stats.
-            value_stats_quantiles: list of percentiles to collect stats for, in range 0 .. 100.
-                Default: [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
+            value_stats_quantiles: list of percentiles to collect stats for, in range 0 .. 100,
+                or 'mean/stddev' to emulate percentiles via basic statistics.
+                Note that per-epoch calculation of percentiles across entire dataset is not possible due to memory
+                cost, and so it is only very naively approximated if requested. It is best to use 'mean/stddev'.
+                Default: 'mean/stddev' for per_epoch, [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.] for per_step.
             collection_sets: list of dicts. Enables collection of raw layer outputs
                 and provides fine-grained control over which layer outputs are collected.
                 If omitted, this callback collects only stats.
@@ -1925,12 +1950,20 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
                     The batch-dim in returned raw values is either dropped (keep_dims==False)
                     or reduced to size 1 (keep_dims==True).
                 - None applies no reduction.
-                    For per-epoch data collection, uses and retains only the last batch of each epoch. 
+                    For per-epoch data collection, uses and retains only the last batch of each epoch.
                     Note that the last batch often has less samples than for all other batches in an epoch.
             keep_dims: bool.
                 Whether to retain the batch-dim if using 'mean' or 'sum' batch reduction.
         """
-        super().__init__(data_format='BSC', *args, **kwargs)
+        # pre-defaulting
+        # (must be done before call to super().__init__()
+        if value_stats_quantiles is None and not per_step:
+            # percentiles cannot be efficiently and accurately estimated via accumulation
+            # so default to basic stats instead for per-epoch
+            value_stats_quantiles = 'mean/stddev'
+
+        # hierarchy init
+        super().__init__(data_format='BSC', value_stats_quantiles=value_stats_quantiles, *args, **kwargs)
 
         if batch_reduction and batch_reduction not in ('mean', 'sum'):
             raise ValueError(f"Invalid batch_reduction: '{batch_reduction}'")
@@ -2148,7 +2181,8 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
             (only available if per_step is True)
     """
 
-    def __init__(self, per_step=False, batch_reduction='auto', keep_dims=False, collection_sets=None, *args, **kwargs):
+    def __init__(self, per_step=False, batch_reduction='auto', keep_dims=False, collection_sets=None,
+                 value_stats_quantiles='mean/stddev', *args, **kwargs):
         """
         Args:
             per_step: bool. Whether to collect per-step stats and raw values, or per-epoch otherwise.
@@ -2176,8 +2210,11 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
                 Whether to collect value and magnitude stats.
             activity_stats: bool, default: True.
                 Whether to collect activity stats.
-            value_stats_quantiles: list of percentiles to collect stats for, in range 0 .. 100.
-                Default: [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.]
+            value_stats_quantiles: list of percentiles to collect stats for, in range 0 .. 100,
+                or 'mean/stddev' to emulate percentiles via basic statistics.
+                Note that per-epoch calculation of percentiles across entire dataset is not possible due to memory
+                cost, and so it is only very naively approximated if requested. It is best to use 'mean/stddev'.
+                Default: 'mean/stddev'
             collection_sets: list of dicts. Enables collection of raw gradients
                 and provides fine-grained control over which gradients are collected.
                 If omitted, this callback collects only stats.
