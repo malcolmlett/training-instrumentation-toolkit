@@ -709,7 +709,8 @@ class CallbackTrainingTestMixin:
     @staticmethod
     def map_each_item(list_of_item_datasets, item_fn):
         """
-        Dataset operation that applies a mapping function to each non-None item in the provided list
+        Dataset operation that applies a mapping function to each non-None item in the provided list.
+        Iterates the first dimension only, calling the function on the data ta each position.
         """
         if list_of_item_datasets is None:
             return None
@@ -719,11 +720,15 @@ class CallbackTrainingTestMixin:
     def map_each_epoch(list_of_epochs_of_datasets, dataset_fn):
         """
         Dataset operation that applies a mapping function against each epoch of data.
+        Iterates the item and epoch dimensions, calling the function on the data ta each position, while
+        retaining the nested dimensions.
         Params:
           list_of_epochs_of_datasets: list (by variable/layer) of tensor with shape (epochs, ..other-dims..),
+            or list (by variable/layer) of list (by epoch) of Anything,
             may have Nones for some variables/layers
           dataset_fn: function applied to each dataset at each epoch.
-            Takes a tensor of shape (..other-dims..) and returns anything
+            Takes either a tensor of shape (..other-dims..), or whatever the list (by epoch) contains,
+            and returns anything
         Returns:
           list (by variable/layer) of list (by epoch) of results of fn() against each epoch of data,
             with Nones for some variables/layers
@@ -736,86 +741,20 @@ class CallbackTrainingTestMixin:
 
         return [map_one_item(dataset) if dataset is not None else None for dataset in list_of_epochs_of_datasets]
 
-    def map_each_layer_batch(self, epoch_of_datasets, batch_fn, batch_size=32, batch_first=False):
-        """
-        Dataset operation that applies a mapping function against each batch of data within a single epoch.
-        Params:
-          epoch_of_datasets: list (by layer) of tensor with shape (dataset-size, ..other-dims..),
-            may have Nones for some layers
-          batch_fn: function applied to each batch of data for each layer.
-            Takes a tensor of shape (batch-size, ..other-dims..) and returns anything
-          batch_first: whether to have list axes as (batch, layer), or otherwise as (layer, batch) (default).
-        Returns:
-          list (by layer) of list (by batch) of results of fn() against each batch of data,
-            with Nones for some layers,
-          OR if batch_first is True then
-          list (by batch) of list (by layer) of results of fn() against each batch of data,
-            with Nones for some layers.
-        """
-        if epoch_of_datasets is None:
-            return None
-
-        dataset_size = None
-        for layer_data in epoch_of_datasets:
-            if layer_data is not None:
-                dataset_size = layer_data.shape[0]
-        n_steps = math.ceil(dataset_size / batch_size)
-
-        if batch_first:
-            res = []  # list with shape: (n_steps, n_layers), of Any
-            for step in range(n_steps):
-                # batch_datas shape: list (by items) of tensor (batch-size-or-less, ..other-dims..)
-                batch_datas = self.select_layer_batch(
-                    epoch_of_datasets, epoch_index=None, batch_index=step, batch_size=batch_size)
-                batch_datas = [batch_fn(data) if data is not None else None for data in batch_datas]
-                res.append(batch_datas)
-            return res
-
-        else:
-            # list with shape: (n_layers, n_steps), of Any
-            res = [[] if v is not None else None for v in epoch_of_datasets]
-            for step in range(n_steps):
-                # batch_datas shape: list (by items) of tensor (batch-size-or-less, ..other-dims..)
-                batch_datas = self.select_layer_batch(
-                    epoch_of_datasets, epoch_index=None, batch_index=step, batch_size=batch_size)
-                batch_datas = [batch_fn(data) if data is not None else None for data in batch_datas]
-                for l_idx, data in enumerate(batch_datas):
-                    if data is not None:
-                        res[l_idx].append(data)
-            return res
-
     @staticmethod
-    def map_each_variable_batch(epoch_of_datasets, batch_fn):
-        """
-        Dataset operation that applies a mapping function against each batch of data within a single epoch.
-        Params:
-          epoch_of_datasets: list (by variable) of tensor with shape (steps, ..other-dims..),
-            may have Nones for some variables
-          batch_fn: function applied to each batch of data for each variable.
-            Takes a tensor of shape (..other-dims..) and returns anything
-        Returns:
-          list (by variable) of list (by batch) of results of fn() against each batch of data,
-            with Nones for some variables
-        """
-        if epoch_of_datasets is None:
-            return None
-
-        def map_one_item(dataset):
-            return [batch_fn(dataset[step]) for step in range(dataset.shape[0])]
-
-        return [map_one_item(dataset) if dataset is not None else None for dataset in epoch_of_datasets]
-
-    def flatmap_epoch_batches(self, list_of_epochs_of_datasets, datasets_fn):
+    def flatmap_epoch_batches(list_of_epochs_of_datasets, dataset_fn):
         """
         Dataset operation that applies a mapping function against each batch of data, flattening with epoch dimension.
         Usually the mapping function will be one of map_each_layer_batch() or map_each_variable_batch().
+        Iterates the item, epoch, and batch dimensions, calling the function on the data at each position, while
+        flattening the epoch and batch dimensions in the result.
         Params:
           list_of_epochs_of_datasets: list (by variable/layer) of tensor with shape (epochs, batch-dim, ..other-dims..),
             may have Nones for some variables/layers,
             where batch-dim is usually either a full dataset or one entry for each step in an epoch.
-          datasets_fn: function applied to lists of datasets, for each epoch.
-            Takes a list (by variable/layer) of tensors of shape (batch-dim, ..other-dims..) and returns
-            and return list (by variable/layer) of list (by batch) of Anything
+          dataset_fn: function applied to each dataset at each epoch.
+            Takes a tensor of shape (batch-dim, ..other-dims..)
+            and returns a list (by batch) of Anything
         Returns:
           list (by variable/layer) of list (by batch) of Anything,
             with Nones for some variables/layers
@@ -828,16 +767,66 @@ class CallbackTrainingTestMixin:
             if item_dataset is not None:
                 n_epochs = item_dataset.shape[0]
 
-        # list with shape: (n_layers, n_steps), of Any
-        res = [[] if v is not None else None for v in list_of_epochs_of_datasets]
-        for epoch in range(n_epochs):
-            epoch_of_datasets = self.select_epoch(list_of_epochs_of_datasets, epoch)
-            list_of_batches = datasets_fn(epoch_of_datasets)
-            for item_idx, data in enumerate(list_of_batches):
-                if data is not None:
-                    res[item_idx].extend(data)
+        # returns list with shape (n_steps,) of Any
+        def map_one_item(item_epochs):
+            res = []
+            for epoch in range(n_epochs):
+                epoch_dataset = item_epochs[epoch]
+                batches = dataset_fn(epoch_dataset)
+                res.extend(batches)
+            return res
+
+        # returns nested list with shape: (n_layers, n_steps), of Any
+        return [map_one_item(item_epochs) if item_epochs is not None else None for item_epochs in list_of_epochs_of_datasets]
+
+    def map_each_layer_batch(self, dataset, batch_fn, batch_size=32):
+        """
+        Nested dataset operation that applies a mapping function against each batch of data within a single dataset,
+        for a single layer.
+        Can be passed to either map_each_epoch() or flatmap_epoch_batches().
+        Params:
+          dataset: tensor with shape (dataset-size, ..other-dims..),
+            may have Nones for some layers
+          batch_fn: function applied to each batch of data for each layer.
+            Takes a tensor of shape (batch-size, ..other-dims..) and returns anything
+          batch_first: whether to have list axes as (batch, layer), or otherwise as (layer, batch) (default).
+        Returns:
+          list (by batch) of results of fn() against each batch of data,
+            with Nones for some layers
+        """
+        if dataset is None:
+            return None
+
+        n_steps = math.ceil(dataset.shape[0] / batch_size)
+
+        # list with shape: (n_steps), of Any
+        res = []
+        for step in range(n_steps):
+            # select_layer_batch() expects a list by variable/layer, so fake it
+            # batch shape: tensor (batch-size-or-less, ..other-dims..)
+            batch = self.select_layer_batch([dataset], epoch_index=None, batch_index=step, batch_size=batch_size)[0]
+            res.append(batch_fn(batch))
         return res
 
+    @staticmethod
+    def map_each_variable_batch(dataset, batch_fn):
+        """
+        Nested dataset operation that applies a mapping function against each batch of data within a single dataset,
+        for a single variable.
+        Can be passed to either map_each_epoch() or flatmap_epoch_batches().
+        Params:
+          dataset: tensor with shape (dataset-size, ..other-dims..),
+            may have Nones for some layers
+          batch_fn: function applied to each batch of data for each variable.
+            Takes a tensor of shape (..other-dims..) and returns anything
+        Returns:
+          list (by batch) of results of fn() against each batch of data,
+            with Nones for some variables
+        """
+        if dataset is None:
+            return None
+
+        return [batch_fn(dataset[step]) for step in range(dataset.shape[0])]
 
 
 class CallbackTrainingTestMixinTest(unittest.TestCase):
@@ -907,36 +896,48 @@ class CallbackTrainingTestMixinTest(unittest.TestCase):
         self.assertEqual(describe(gradients), [(2, 2, 64, 128)])
         self.assertEqual(describe(all_gradients), [None, (2, 2, 64, 128)])
 
+        # on datasets of single epochs - variable structure
         self.assertEqual(describe(first_epoch_gradients), [None, (2, 64, 128)])
-        self.assertEqual(describe(tgt.map_each_variable_batch(
-            first_epoch_gradients, lambda batch_data: batch_data)),
+        self.assertEqual(describe(tgt.map_each_item(
+            first_epoch_gradients, lambda epoch_data: tgt.map_each_variable_batch(
+                epoch_data, lambda batch_data: batch_data))),
             [None, [(64, 128), (64, 128)]])
+
+        # on datasets of single epochs - layer structure
         self.assertEqual(describe(first_epoch_outputs), [None, (40, 128)])
-        self.assertEqual(describe(tgt.map_each_layer_batch(
-            first_epoch_outputs, lambda batch_data: batch_data)),
+        self.assertEqual(describe(tgt.map_each_item(
+            first_epoch_outputs, lambda epoch_data: tgt.map_each_layer_batch(
+                epoch_data, lambda batch_data: batch_data))),
             [None, [(32, 128), (8, 128)]])
 
+        # on datasets of multiple epochs - variable structure
         self.assertEqual(describe(all_gradients), [None, (2, 2, 64, 128)])
         self.assertEqual(describe(tgt.map_each_epoch(
             all_gradients, lambda epoch_data: epoch_data)),
             [None, [(2, 64, 128), (2, 64, 128)]])
+        self.assertEqual(describe(tgt.map_each_epoch(
+            all_gradients, lambda epoch_data: tgt.map_each_variable_batch(
+                epoch_data, lambda batch_data: batch_data))),
+            [None, [[(64, 128), (64, 128)], [(64, 128), (64, 128)]]])
         self.assertEqual(describe(tgt.flatmap_epoch_batches(
             all_gradients, lambda datasets: tgt.map_each_variable_batch(datasets, lambda batch_data: batch_data))),
             [None, [(64, 128), (64, 128), (64, 128), (64, 128)]])
 
+        # on datasets of multiple epochs - layer structure
         self.assertEqual(describe(outputs), [None, (2, 40, 128)])
         self.assertEqual(describe(tgt.map_each_epoch(
             outputs, lambda epoch_data: epoch_data)),
             [None, [(40, 128), (40, 128)]])
+        self.assertEqual(describe(tgt.map_each_epoch(
+            outputs, lambda epoch_data: tgt.map_each_layer_batch(
+                epoch_data, lambda batch_data: batch_data))),
+            [None, [[(32, 128), (8, 128)], [(32, 128), (8, 128)]]])
         self.assertEqual(describe(tgt.flatmap_epoch_batches(
             outputs, lambda datasets: tgt.map_each_layer_batch(datasets, lambda batch_data: batch_data))),
             [None, [(32, 128), (8, 128), (32, 128), (8, 128)]])
 
 
 class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
-    """
-    Validate helper functionality for the purpose of helping with tests.
-    """
     def setUp(self):
         self.model = self.make_model((64,), ['dropout', (64, 128)])
         self.gradient_datasets = [tf.random.normal((2, 2, 64, 128))]
