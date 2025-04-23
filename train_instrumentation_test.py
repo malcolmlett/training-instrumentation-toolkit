@@ -453,9 +453,14 @@ class CallbackTrainingTestMixin:
 
         # determine basic coordinates
         epochs, n_steps = None, None
-        if gradient_data is not None:
+        if variable_data is not None:
+            for var_data in variable_data:
+                if var_data is not None:
+                    epochs, n_steps = var_data.shape[0:2]
+        elif gradient_data is not None:
             for var_data in gradient_data:
-                epochs, n_steps = var_data.shape[0:2]
+                if var_data is not None:
+                    epochs, n_steps = var_data.shape[0:2]
         elif output_data is not None:
             dataset_size = None
             for layer_data in output_data:
@@ -536,7 +541,7 @@ class CallbackTrainingTestMixin:
                     print('')
 
                 # simulate variable state AFTER update step
-                if use_variable_data_before:
+                if not use_variable_data_before:
                     self.set_model_variables(model, batch_variables)
 
                 # notify callbacks
@@ -647,9 +652,17 @@ class CallbackTrainingTestMixin:
         """
         indices = trainable_variable_indices_to_variable_indices(model)
         res = [None for i in range(len(model.variables))]
-        for i, var in enumerate(list_by_trainable_var):
-            res[indices[i]] = var
+        for i, val in enumerate(list_by_trainable_var):
+            res[indices[i]] = val
         return res
+
+    @staticmethod
+    def nonify_for_trainable_only(model, list_by_var):
+        """
+        Takes a list-by-variable and produces a copy with entries to None that don't correspond to trainable variables.
+        """
+        indices = trainable_variable_indices_to_variable_indices(model)
+        return [val if i in indices else None for i, val in enumerate(list_by_var)]
 
     @staticmethod
     def select_epoch(list_of_epochs_of_datasets, epoch_index):
@@ -737,7 +750,7 @@ class CallbackTrainingTestMixin:
             return None
 
         def map_one_item(dataset):
-            return [dataset_fn(dataset[epoch]) for epoch in range(dataset.shape[0])]
+            return [dataset_fn(dataset[epoch]) for epoch in range(len(dataset))]
 
         return [map_one_item(dataset) if dataset is not None else None for dataset in list_of_epochs_of_datasets]
 
@@ -935,6 +948,192 @@ class CallbackTrainingTestMixinTest(unittest.TestCase):
         self.assertEqual(describe(tgt.flatmap_epoch_batches(
             outputs, lambda datasets: tgt.map_each_layer_batch(datasets, lambda batch_data: batch_data))),
             [None, [(32, 128), (8, 128), (32, 128), (8, 128)]])
+
+
+class VariableHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
+    # Two epochs, two batches each
+    def setUp(self):
+        self.model = self.make_model((64,), ['dropout', (64, 128)])
+        self.variable_datasets = [
+            tf.random.uniform((2, 2, 2), maxval=100, dtype=tf.int64), tf.random.normal((2, 2, 64, 128))]
+        self.nonified_variables = self.nonify_for_trainable_only(self.model, self.variable_datasets)
+        self.expected_quantiles = [0., 12.5, 25, 37.5, 50, 62.5, 75, 87.5, 100]
+
+    def train(self, before_updates, per_step):
+        cb = VariableHistoryCallback(before_updates=before_updates, per_step=per_step)
+        self.fake_train(self.model, variable_data=self.variable_datasets, use_variable_data_before=before_updates,
+                        callbacks=[cb])
+        return cb
+
+    def assertListsAlmostEqual(self, actual, expected, msg=None, sources=None):
+        same = [close_or_none(a, b) for a, b in zip(expected, actual)]
+        matches = np.all(same)
+        if not matches:
+            full_msg = f"Lists differ: matches = {same}"
+            if msg is not None:
+                full_msg += f" - {msg}"
+            full_msg += ':'
+            if sources is not None:
+                full_msg += f"\n- sources: {describe(sources, verbose=2)}"
+            full_msg += f"\n- expected: {expected}"
+            full_msg += f"\n- actual:   {actual}"
+            raise self.fail(full_msg)
+
+    def test_basic_setup(self):
+        model = self.model
+        self.assertEqual(describe(model.variables), [(2,), (64, 128)])
+        self.assertEqual(describe(model.trainable_variables), [(64, 128)])
+        self.assertEqual(self.get_layer_output_shapes(model), [(None, 64), (None, 128)])
+        self.assertEquals(describe(self.variable_datasets), [(2, 2, 2), (2, 2, 64, 128)])
+
+    def select_batch_of_each_epoch(self, list_of_epochs_of_datasets, batch_index):
+        """ Returns: list (by variable) of list (by epoch) of tuple """
+        # split into batches
+        # - result: list (by variable) of list (by epoch) of list (by batch)
+        batched = self.map_each_epoch(
+            list_of_epochs_of_datasets, lambda epoch_data: self.map_each_variable_batch(
+                epoch_data, lambda batch_data: batch_data))
+
+        # pick last batch in each
+        return self.map_each_epoch(batched, lambda batches: batches[batch_index])
+
+    # State of variables is "sampled" once per epoch, after updates, and any values at other times are ignored.
+    # Norms, value_stats, and magnitude_stats are calculated on the sampled state.
+    def test_per_epoch_norms(self):
+        # calculate expected values
+        norm_accumulator = NormAccumulatorStrategy()
+        sources = self.select_batch_of_each_epoch(self.nonified_variables, -1)
+        expected = self.map_each_epoch(sources, lambda last_batch_data: norm_accumulator.single(last_batch_data))
+        expected = [np.stack(v) if v is not None else None for v in expected]
+
+        # asserts
+        cb = self.train(before_updates=False, per_step=False)
+        actual = cb.value_norms
+        self.assertEqual(describe(cb.model_norm_stats), (2, 5))
+        self.assertEqual(describe(cb.value_norms), [None, (2,)])
+        self.assertListsAlmostEqual(actual, expected, sources=sources)
+
+    def test_per_epoch_norms_before_updates(self):
+        # calculate expected values
+        norm_accumulator = NormAccumulatorStrategy()
+        sources = self.select_batch_of_each_epoch(self.nonified_variables, 0)
+        expected = self.map_each_epoch(sources, lambda last_batch_data: norm_accumulator.single(last_batch_data))
+        expected = [np.stack(v) if v is not None else None for v in expected]
+
+        # asserts
+        cb = self.train(before_updates=True, per_step=False)
+        actual = cb.value_norms
+        self.assertEqual(describe(cb.model_norm_stats), (2, 5))
+        self.assertEqual(describe(cb.value_norms), [None, (2,)])
+        self.assertListsAlmostEqual(actual, expected, sources=sources)
+
+    # Calculated based on sum(steps), as for norms
+    def test_per_epoch_value_stats(self):
+        # calculate expected values
+        percentile_accumulator = PercentileAccumulatorStrategy(quantiles=self.expected_quantiles)
+        sources = self.select_batch_of_each_epoch(self.nonified_variables, -1)
+        expected = self.map_each_epoch(sources, lambda last_batch_data: percentile_accumulator.single(last_batch_data))
+        expected = [np.stack(v) if v is not None else None for v in expected]
+
+        # asserts
+        cb = self.train(before_updates=False, per_step=False)
+        actual = self.map_each_item(cb.value_stats, lambda v: v.to_numpy())
+        self.assertEqual(describe(cb.value_stats), [None, (2, 9)])
+        self.assertEqual(list(cb.value_stats[1].columns), self.expected_quantiles)
+        self.assertListsAlmostEqual(actual, expected, sources=sources)
+
+    # Calculated based on sum(steps), as for norms
+    def test_per_epoch_magnitude_stats(self):
+        # calculate expected values
+        percentile_accumulator = PercentileAccumulatorStrategy(quantiles=self.expected_quantiles, magnitudes=True)
+        sources = self.select_batch_of_each_epoch(self.nonified_variables, -1)
+        expected = self.map_each_epoch(sources, lambda last_batch_data: percentile_accumulator.single(last_batch_data))
+        expected = [np.stack(v) if v is not None else None for v in expected]
+
+        # assert
+        cb = self.train(before_updates=False, per_step=False)
+        actual = self.map_each_item(cb.magnitude_stats, lambda v: v.to_numpy())
+        self.assertEqual(describe(cb.model_magnitude_stats), (2, 5))
+        self.assertEqual(describe(cb.magnitude_stats), [None, (2, 9)])
+        self.assertEqual(list(cb.magnitude_stats[1].columns), self.expected_quantiles)
+        self.assertListsAlmostEqual(actual, expected, sources=sources)
+
+    def test_per_epoch_activity_rates(self):
+        # assert
+        cb = self.train(before_updates=False, per_step=False)
+        self.assertEqual(describe(cb.activity_stats), [None, (2, 3)])
+        # TODO assert on values
+
+    def test_per_step_norms(self):
+        # calculated expected values
+        norm_accumulator = NormAccumulatorStrategy()
+        sources = self.flatmap_epoch_batches(
+            self.nonified_variables, lambda epoch_data: self.map_each_variable_batch(
+                epoch_data, lambda batch_data: batch_data))
+        expected = self.map_each_epoch(sources, lambda batch_data: norm_accumulator.single(batch_data))
+        expected = [np.stack(v) if v is not None else None for v in expected]
+
+        # assert
+        cb = self.train(before_updates=False, per_step=True)
+        actual = cb.value_norms
+        self.assertEqual(describe(cb.model_norm_stats), (4, 5))
+        self.assertEqual(describe(cb.value_norms), [None, (4,)])
+        self.assertListsAlmostEqual(actual, expected, sources=sources)
+
+    def test_per_step_norms_before_updates(self):
+        # calculated expected values
+        norm_accumulator = NormAccumulatorStrategy()
+        sources = self.flatmap_epoch_batches(
+            self.nonified_variables, lambda epoch_data: self.map_each_variable_batch(
+                epoch_data, lambda batch_data: batch_data))
+        expected = self.map_each_epoch(sources, lambda batch_data: norm_accumulator.single(batch_data))
+        expected = [np.stack(v) if v is not None else None for v in expected]
+
+        # assert
+        cb = self.train(before_updates=True, per_step=True)
+        actual = cb.value_norms
+        self.assertEqual(describe(cb.model_norm_stats), (4, 5))
+        self.assertEqual(describe(cb.value_norms), [None, (4,)])
+        self.assertListsAlmostEqual(actual, expected, sources=sources)
+
+    def test_per_step_value_stats(self):
+        # calculate expected values
+        percentile_accumulator = PercentileAccumulatorStrategy(quantiles=self.expected_quantiles)
+        sources = self.flatmap_epoch_batches(
+            self.nonified_variables, lambda epoch_data: self.map_each_variable_batch(
+                epoch_data, lambda batch_data: batch_data))
+        expected = self.map_each_epoch(sources, lambda batch_data: percentile_accumulator.single(batch_data))
+        expected = [np.stack(v) if v is not None else None for v in expected]
+
+        # assert
+        cb = self.train(before_updates=False, per_step=True)
+        actual = self.map_each_item(cb.value_stats, lambda v: v.to_numpy())
+        self.assertEqual(describe(cb.value_stats), [None, (4, 9)])
+        self.assertEqual(list(cb.value_stats[1].columns), self.expected_quantiles)
+        self.assertListsAlmostEqual(actual, expected, sources=sources)
+
+    def test_per_step_magnitude_stats(self):
+        # calculate expected values
+        percentile_accumulator = PercentileAccumulatorStrategy(quantiles=self.expected_quantiles, magnitudes=True)
+        sources = self.flatmap_epoch_batches(
+            self.nonified_variables, lambda epoch_data: self.map_each_variable_batch(
+                epoch_data, lambda batch_data: batch_data))
+        expected = self.map_each_epoch(sources, lambda batch_data: percentile_accumulator.single(batch_data))
+        expected = [np.stack(v) if v is not None else None for v in expected]
+
+        # assert
+        cb = self.train(before_updates=False, per_step=True)
+        actual = self.map_each_item(cb.magnitude_stats, lambda v: v.to_numpy())
+        self.assertEqual(describe(cb.model_magnitude_stats), (4, 5))
+        self.assertEqual(describe(cb.magnitude_stats), [None, (4, 9)])
+        self.assertEqual(list(cb.magnitude_stats[1].columns), self.expected_quantiles)
+        self.assertListsAlmostEqual(actual, expected, sources=sources)
+
+    def test_per_step_activity_rates(self):
+        # assert
+        cb = self.train(before_updates=False, per_step=True)
+        self.assertEqual(describe(cb.activity_stats), [None, (4, 3)])
+        # TODO assert on values
 
 
 class GradientHistoryCallbackTest(unittest.TestCase, CallbackTrainingTestMixin):
