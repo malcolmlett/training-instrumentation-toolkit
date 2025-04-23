@@ -775,6 +775,10 @@ class ValueStatsCollectingMixin:
         return item_dataframes
 
 
+# TODO pull out some of this logic into a "AccumulatorStrategy", following the same pattern as I've used
+#  for Norm/BasicStats/Percentile-AccumulatorStrategies, then add unit tests, improve performance through
+#  more recent patterns for using @tf.function against whole lists of tensors, and add a single() method too.
+#  Finally, add assertions against activity stats outputs in callback tests.
 class ActivityStatsCollectingMixin:
     """
     Mixin for callback classes the need to measure the activity rates of the items that they capture.
@@ -799,14 +803,13 @@ class ActivityStatsCollectingMixin:
     * The "dead rate" is the fraction of units that are dead.
     * The "spatial dead rate" uses the concept, but measures across discrete spatial positions.
         It identifies the fraction of spatial positions that are always dead across the batch and channel dims.
-
     """
+
     def __init__(self, activity_stats=True, data_format="BSC", *args, **kwargs):
         """
         Args:
             activity_stats: bool.
                 Whether to enable collection of activity stats.
-
             data_format: string.
                 Indicates the structure of the data being analysed. This depends on
                 whether it's layer or variable data. Ideally we'd also support the standard
@@ -3717,9 +3720,9 @@ def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', y
     Args:
         callback: any of "value stats collecting" callbacks in this module
         show: one of 'magnitudes' (default), 'values', 'norms'. Where:
-            'magnitudes' - percentile stats over value magnitudes (log scale).
-            'values' - percentile stats over raw values (linear scale).
-            'norms' - norms of values (log scale).
+            'magnitudes' - percentile stats over value magnitudes (default log scale).
+            'values' - percentile stats over raw values (default linear scale).
+            'norms' - norms of values (default linear scale).
         yscale: one of 'auto' (default), 'linear', 'log'. Where:
             'auto' - automatically selects linear or log depending on the kind of value shown.
             'linear' - linear scale
@@ -3750,11 +3753,13 @@ def plot_value_history(callback: ValueStatsCollectingMixin, show='magnitudes', y
     if callback.value_stats is None:
         raise ValueError(f"{type(callback).__name__} did not collect value stats")
 
-    if show == 'values':
-        # forced linear if showing values
+    # apply defaults
+    if show == 'norms' and yscale == 'auto':
         yscale = 'linear'
-    elif yscale == 'auto':
-        # magnitudes and norms default to log scale
+    elif show == 'values':
+        # always force linear
+        yscale = 'linear'
+    elif show == 'magnitudes' and yscale == 'auto':
         yscale = 'log'
 
     # collect data
