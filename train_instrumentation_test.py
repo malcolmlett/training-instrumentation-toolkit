@@ -1437,7 +1437,7 @@ class LayerOutputGradientHistoryCallbackTest(unittest.TestCase, CallbackTraining
 
     def train(self, per_step):
         cb = LayerOutputGradientHistoryCallback(per_step=per_step)
-        self.fake_train(self.model, output_data=self.output_datasets, callbacks=[cb])
+        self.fake_train(self.model, output_gradient_data=self.outgrad_datasets, callbacks=[cb])
         return cb
 
     def assertListsAlmostEqual(self, actual, expected, msg=None, sources=None):

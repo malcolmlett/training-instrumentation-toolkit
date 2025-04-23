@@ -19,6 +19,15 @@ from enum import Enum
 # tip: to get output shape of a layer:
 #  model.layers[l].compute_output_shape(model.layers[l].input.shape)
 
+# Future improvements:
+# - Separate callbacks for raw data collection
+#   - Only reason for retaining that logic within the main callbacks was for efficiency
+#     when doing things like accumulating the raw values before passing to calculations of statistics etc.
+#     But now I'm almost entirely only doing raw-value accumulation for the case when collecting raw values.
+#   - Doesn't make sense to keep the these capabilities in the same callback classes as they're quite different
+#     in nature. eg: their per_epoch/step frequency doesn't need to be consistent.
+#   - Separating them will make it easier to optimise a training loop for just raw-data collection, eg: per step,
+#     without having to manually disable the stats calculations.
 
 # NOTICE: copied with changes from the Keras project (https://github.com/keras-team/keras).
 #  See NOTICE-KERAS for licence information.
@@ -1904,8 +1913,9 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
 
     When collecting data per-epoch, stats and metrics are accumulated over all samples in the epoch.
     When using 'mean/stddev' value/magnitude stats, this is accurate. When collecting actual percentile data, this
-    is only approximated (very naively). By default, only the last batch of each epoch is retained for
-    raw data. This can be changed by batch_reduction.
+    is only approximated (very naively).
+    
+    By default, only the last batch of each epoch is retained for raw data. This can be changed by batch_reduction.
 
     Other properties:
         model: the model captured
@@ -1915,8 +1925,8 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
             (only available if per_step is True)
     """
 
-    def __init__(self, per_step=False, batch_reduction=None, keep_dims=False, collection_sets=None,
-                 value_stats_quantiles=None, *args, **kwargs):
+    def __init__(self, per_step=False, value_stats_quantiles=None, collection_sets=None, batch_reduction=None,
+                 keep_dims=False, *args, **kwargs):
         """
         Args:
             per_step: bool. Whether to collect per-step stats, or per-epoch otherwise.
@@ -1985,7 +1995,7 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         self._layer_shapes = None
         self._filtered_value_layer_indices = None
         
-        # accumulation is done manually for per-step, so only needed for per-epoch
+        # accumulation is done manually for per-step, so only used for per-epoch
         self._outputs_accumulator = PerEpochAccumulatorStrategy(batch_reduction=True, keep_dims=keep_dims) \
             if not per_step and self.batch_reduction else None
 
@@ -2112,12 +2122,12 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         if self.per_step:
             self.steps.append(self.params['steps'] * self._epoch + batch)
             
-            # stats and metrics calculated based on accumulated partial stats
+            # stats and metrics calculated based on current activations
             self._collect_immediate_value_norms_and_stats(activations)
             self._collect_immediate_activity_stats(activations)
             
             # raw values from reduced or full batch
-            if self._output_values:
+            if self._output_values is not None:
                 if self.batch_reduction == 'sum':
                     agg_activations = [tf.reduce_sum(t, keepdims=self.keep_dims) for t in activations]
                 elif self.batch_reduction == 'mean':
@@ -2133,7 +2143,7 @@ class LayerOutputHistoryCallback(BaseGradientCallback, ValueStatsCollectingMixin
         if not self.per_step:
             self.epochs.append(epoch)
 
-            # collect accumulated stats and metrics            
+            # collect from accumulated stats and metrics
             self._collect_accumulated_value_norms_and_stats()
             self._collect_accumulated_activity_stats(self.params['steps'])
 
@@ -2166,12 +2176,18 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
     Custom tot.fit() gradient callback function that collects various statistics and/or raw values of
     layer output gradients during training.
     See `GradientHistoryCallback` for the standard gradients w.r.t variables.
+    
+    Note that layer outputs include a batch dimension, and thus their gradients correspondingly have a batch dimension.
+    The backprop equations also include that batch dimension. Consequently, this class takes retains the batch
+    dimension in its calculations - for example, it does not collapse the data to a mean gradient in the way
+    that's suitable for GradientHistoryCallback against the model parameters.
+    Special handling is required to accurately measure that without consuming too much memory.
 
-    When collecting data per-epoch, by default, raw values and value stats are calculated based on the mean gradient
-    over all samples in the epoch. This smooths out the fact that batched stochastic gradient descent tends to
-    jump-around as it iterates through the batches in each epoch. It also resolves the fact that the last batch of
-    each epoch often has fewer samples than for other batches.
-    Activity stats are always calculated over all individual samples.
+    When collecting data per-epoch, stats and metrics are accumulated over all samples in the epoch.
+    When using 'mean/stddev' value/magnitude stats, this is accurate. When collecting actual percentile data, this
+    is only approximated (very naively).
+    
+    By default, only the last batch of each epoch is retained for raw data. This can be changed by batch_reduction.
 
     Other properties:
         model: the model captured
@@ -2181,8 +2197,8 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
             (only available if per_step is True)
     """
 
-    def __init__(self, per_step=False, batch_reduction='auto', keep_dims=False, collection_sets=None,
-                 value_stats_quantiles='mean/stddev', *args, **kwargs):
+    def __init__(self, per_step=False, value_stats_quantiles=None, collection_sets=None, batch_reduction=None,
+                 keep_dims=False, *args, **kwargs):
         """
         Args:
             per_step: bool. Whether to collect per-step stats and raw values, or per-epoch otherwise.
@@ -2191,19 +2207,6 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
                 If per-step is set, then a `steps` list is available instead, and activity
                 is collected on each update step.
                 The same applies to layer output capture if enabled.
-            batch_reduction: one of 'auto' (default), 'mean', 'sum', or None.
-                When doing per-epoch collection, determines how values are accumulated over the course of the epoch
-                and over each sample in each batch when computing value norms, value stats, and raw values.
-                - 'auto' applies no reduction in per-step mode and 'mean' in per-epoch mode.
-                - 'mean' uses the mean value across all samples in the batch/epoch.
-                    The batch-dim in returned raw values is either dropped (keep_dims==False)
-                    or reduced to size 1 (keep_dims==True).
-                - 'sum' uses the sum across all samples in the batch/epoch
-                    The batch-dim in returned raw values is either dropped (keep_dims==False)
-                    or reduced to size 1 (keep_dims==True).
-                - None applies no reduction. For per-step data collection, uses and retains all samples in each batch.
-                    For per-epoch data collection, uses and retains only the last batch of each epoch. 
-                    Note that the last batch often has less samples than for all other batches in an epoch.
             value_norms: bool, default: True.
                 Whether to collect the norms of values.
             value_stats: bool, default: True.
@@ -2214,18 +2217,38 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
                 or 'mean/stddev' to emulate percentiles via basic statistics.
                 Note that per-epoch calculation of percentiles across entire dataset is not possible due to memory
                 cost, and so it is only very naively approximated if requested. It is best to use 'mean/stddev'.
-                Default: 'mean/stddev'
+                Default: 'mean/stddev' for per_epoch, [0., 12.5, 25., 37.5, 50., 62.5, 75., 87.5, 100.] for per_step.
             collection_sets: list of dicts. Enables collection of raw gradients
                 and provides fine-grained control over which gradients are collected.
                 If omitted, this callback collects only stats.
                 See _normalize_collection_sets_for_layers() for format details.
+            batch_reduction: one of 'mean', 'sum', or None (default).
+                Determines how raw samples are aggregated before collection.
+                Ignored for metrics and stats.
+                - 'mean' uses the mean value across all samples in the batch/epoch.
+                    The batch-dim in returned raw values is either dropped (keep_dims==False)
+                    or reduced to size 1 (keep_dims==True).
+                - 'sum' uses the sum across all samples in the batch/epoch
+                    The batch-dim in returned raw values is either dropped (keep_dims==False)
+                    or reduced to size 1 (keep_dims==True).
+                - None applies no reduction.
+                    For per-epoch data collection, uses and retains only the last batch of each epoch.
+                    Note that the last batch often has less samples than for all other batches in an epoch.
+            keep_dims: bool.
+                Whether to retain the batch-dim if using 'mean' or 'sum' batch reduction.
         """
-        super().__init__(data_format='BSC', *args, **kwargs)
+        # pre-defaulting
+        # (must be done before call to super().__init__()
+        if value_stats_quantiles is None and not per_step:
+            # percentiles cannot be efficiently and accurately estimated via accumulation
+            # so default to basic stats instead for per-epoch
+            value_stats_quantiles = 'mean/stddev'
 
-        if batch_reduction and batch_reduction not in ('auto', 'mean', 'sum'):
+        # hierarchy init
+        super().__init__(data_format='BSC', value_stats_quantiles=value_stats_quantiles, *args, **kwargs)
+
+        if batch_reduction and batch_reduction not in ('mean', 'sum'):
             raise ValueError(f"Invalid batch_reduction: '{batch_reduction}'")
-        if batch_reduction == 'auto':
-            batch_reduction = None if per_step else 'mean'
 
         self.per_step = per_step
         self.batch_reduction = batch_reduction
@@ -2244,6 +2267,8 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
         self._epoch = 0
         self._layer_shapes = None
         self._filtered_value_layer_indices = None
+
+        # accumulation is done manually for per-step, so only used for per-epoch
         self._gradients_accumulator = PerEpochAccumulatorStrategy(batch_reduction=True, keep_dims=keep_dims) \
             if not per_step and self.batch_reduction else None
 
@@ -2367,53 +2392,56 @@ class LayerOutputGradientHistoryCallback(BaseGradientCallback, ValueStatsCollect
         if self._layer_shapes is None:
             self._layer_shapes = [output.shape if output is not None else None for output in output_gradients]
 
-        # accumulate activation data
-        # - always add each batch, regardless of emitting stats per-step or per-epoch
-        # - accum when per-epoch, overwrite when per-step
-        is_accum = (not self.per_step)
-        self._accum_activity_stats(output_gradients, is_accum)
+        # per-epoch mode only: accumulate norms, stats, and raw values each step
+        if not self.per_step:
+            self._accum_value_norms_and_stats(batch == 0, output_gradients)
+            self._accum_activity_stats(output_gradients, is_accum=True)
+            if self._gradients_accumulator:
+                self._gradients_accumulator.accumulate(batch, output_gradients)
 
-        # per-epoch mode only: accumulate gradients over course of epoch
-        if not self.per_step and self._gradients_accumulator:
-            self._gradients_accumulator.accumulate(batch, output_gradients)
-
-        # stats calculations for each step, if configured
+        # per-step mode only: stats calculations for each step
         if self.per_step:
-            if self.batch_reduction == 'sum':
-                output_gradients = [tf.reduce_sum(t, keepdims=self.keep_dims) for t in output_gradients]
-            elif self.batch_reduction == 'mean':
-                output_gradients = [tf.reduce_mean(t, keepdims=self.keep_dims) for t in output_gradients]
-
             self.steps.append(self.params['steps'] * self._epoch + batch)
-            self._collect_value_norms_and_stats(output_gradients)
-            self._collect_raw_values(output_gradients)
+
+            # stats and metrics calculated based on current activations
+            self._collect_immediate_value_norms_and_stats(output_gradients)
+            self._collect_immediate_activity_stats(output_gradients)
 
             # activity stats calculated based on accumulated partial stats
-            self._collect_accumulated_activity_stats(1)
+            if self._gradient_values is not None:
+                if self.batch_reduction == 'sum':
+                    agg_gradients = [tf.reduce_sum(t, keepdims=self.keep_dims) for t in output_gradients]
+                elif self.batch_reduction == 'mean':
+                    agg_gradients = [tf.reduce_mean(t, keepdims=self.keep_dims) for t in output_gradients]
+                else:
+                    agg_gradients = output_gradients
+                self._collect_raw_values(agg_gradients)
 
     def on_epoch_end(self, epoch, loss, gradients, trainable_variables, activations, output_gradients):
         """
         Collects gradient stats and raw gradients after each epoch, if configured at per-epoch level.
         """
         if not self.per_step:
-            # compute aggregated gradients, otherwise use last batch
-            if self.batch_reduction == 'sum':
-                output_gradients = self._gradients_accumulator.sum
-            elif self.batch_reduction == 'mean':
-                output_gradients = self._gradients_accumulator.mean
-            else:
-                # WORKAROUND:
-                # Doesn't cope with layers that return multiple outputs in a list.
-                # For now, pre-process to just pick the first of each layer's output gradients if there are multiple
-                output_gradients = [output[0] if isinstance(output, list) else output
-                                    for output in output_gradients]
-
             self.epochs.append(epoch)
-            self._collect_value_norms_and_stats(output_gradients)
-            self._collect_raw_values(output_gradients)
 
-            # activity stats calculated based on accumulated partial stats
+            # collect from accumulated stats and metrics
+            self._collect_accumulated_value_norms_and_stats()
             self._collect_accumulated_activity_stats(self.params['steps'])
+
+            # raw values from pre-accumulated or last batch
+            if self._gradient_values is not None:
+                # compute aggregated gradients, otherwise use last batch
+                if self.batch_reduction == 'sum':
+                    agg_gradients = self._gradients_accumulator.sum
+                elif self.batch_reduction == 'mean':
+                    agg_gradients = self._gradients_accumulator.mean
+                else:
+                    # WORKAROUND:
+                    # Doesn't cope with layers that return multiple outputs in a list.
+                    # For now, pre-process to just pick the first of each layer's output gradients if there are multiple
+                    agg_gradients = [output[0] if isinstance(output, list) else output
+                                     for output in output_gradients]
+                self._collect_raw_values(agg_gradients)
 
     def _collect_raw_values(self, gradients):
         # TODO do slicing
