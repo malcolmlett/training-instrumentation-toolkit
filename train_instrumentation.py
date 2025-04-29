@@ -2679,33 +2679,24 @@ def pos_neg_balance(stats, quantiles=None):
 
     balances = []
     for row_idx, row in enumerate(values):
-        # trivial cases - all positive or all negative
-        if np.all(row >= 0):
+        # trivial cases - all zero, positive, or negative
+        if np.all(row == 0):
+            balance = 0.
+        elif np.all(row >= 0):
             balance = 1.0
         elif np.all(row <= 0):
             balance = -1.0
         else:
-            # find point closest to zero
-            mid_col_idx = np.argmin(np.abs(row))
-            mid_q = quantiles[mid_col_idx]
-
-            # fit curve to nearby points
-            if mid_col_idx == 0:
-                # left edge: fit line to first two
-                p = Polynomial.fit(x=quantiles[:2], y=row[:2], deg=1)
-            elif mid_col_idx == len(row) - 1:
-                # right edge: fit line to last two
-                p = Polynomial.fit(x=quantiles[-2:], y=row[-2:], deg=1)
-            else:
-                # in middle: fit curve to middle three
-                p = Polynomial.fit(x=quantiles[mid_col_idx - 1:mid_col_idx + 2],
-                                   y=row[mid_col_idx - 1:mid_col_idx + 2], deg=2)
+            # find points either side of zero
+            # - also copes if there are multiple zeros in between
+            neg_idx = np.searchsorted(row, 0., side='left') - 1
+            pos_idx = np.searchsorted(row, 0., side='right')
+            selection = np.array([neg_idx, pos_idx])
+            p = Polynomial.fit(x=quantiles[selection], y=row[selection], deg=1)
 
             # extrapolate accurate zero-point quantile
             # - gives a floating point value in range 0 to 100
-            roots = p.roots()
-            root_idx = np.argmin(np.abs(roots - mid_q))  # pick root closest to mid-point
-            zero_q = roots[root_idx]
+            zero_q = p.roots()[0]
 
             # convert to balance
             frac_pos = (100 - zero_q) / 100
