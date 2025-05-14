@@ -86,8 +86,12 @@ notebooks directly within Google Colab so you can run them yourself.
 
 Detailed pydocs are available within the source code.
 
-The above documentation notebooks all found in the `doc` folder. If you navigate there you will also find other
+The above documentation notebooks are all found in the `doc` folder. If you navigate there you will also find other
 experiments, including a series of notebooks that feed into blog posts.
+
+This toolkit is extensively used in a series of blog posts on improving instrumentation and visualisation of model dynamics during training:
+[Better ways to monitor NNs while training: Model introspection and visualization that speeds up the development cycle](
+https://medium.com/ai-advances/better-ways-to-monitor-nns-while-training-7c246867ca4f).
 
 ## License
 See the [LICENSE](./LICENSE) file for details about the license under which this code is made available.
