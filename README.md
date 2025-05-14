@@ -89,9 +89,12 @@ Detailed pydocs are available within the source code.
 The above documentation notebooks are all found in the `doc` folder. If you navigate there you will also find other
 experiments, including a series of notebooks that feed into blog posts.
 
+**Blog Posts**
+
 This toolkit is extensively used in a series of blog posts on improving instrumentation and visualisation of model dynamics during training:
-[Better ways to monitor NNs while training: Model introspection and visualization that speeds up the development cycle](
-https://medium.com/ai-advances/better-ways-to-monitor-nns-while-training-7c246867ca4f).
+* [Better ways to monitor NNs while training](https://medium.com/ai-advances/better-ways-to-monitor-nns-while-training-7c246867ca4f).
+* [Neuron Death in ANNs](https://medium.com/ai-advances/neuron-death-in-anns-detecting-and-troubleshooting-4a7b5cc2f099)
+* [Vanishing and Exploding Gradients](https://medium.com/ai-advances/neuron-death-in-anns-detecting-and-troubleshooting-4a7b5cc2f099)
 
 ## License
 See the [LICENSE](./LICENSE) file for details about the license under which this code is made available.
