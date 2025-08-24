@@ -104,5 +104,5 @@ If you find this repository useful in your research, please consider giving a st
 For citation information, please see the "Cite this repository" button on the right.
 
 ## PyTorch
-Maksym Khavil has created an excellent PyTorch library with similar features. So if you prefer PyTorch, please check it out:
+Maksym Khavil has created an excellent PyTorch library with similar features. So if you prefer PyTorch, please check it out:
 * [monitorch](https://github.com/ZhigaMason/monitorch)
