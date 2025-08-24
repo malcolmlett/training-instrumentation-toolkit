@@ -102,3 +102,7 @@ See the [LICENSE](./LICENSE) file for details about the license under which this
 ## Citation
 If you find this repository useful in your research, please consider giving a star :star: and a citation.
 For citation information, please see the "Cite this repository" button on the right.
+
+## PyTorch
+Maksym Khavil has created an excellent PyTorch library with similar features. So if you prefer PyTorch, please check it out:
+* [monitorch](https://github.com/ZhigaMason/monitorch)
